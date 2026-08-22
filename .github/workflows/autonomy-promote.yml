@@ -36,7 +36,7 @@ jobs:
         id: meta
         working-directory: trusted
         env:
-          FORCE_PROMOTION: ${{ github.event_name == "workflow_dispatch" && inputs.force || false }}
+          FORCE_PROMOTION: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
         run: |
           set -euo pipefail
           git fetch origin next
