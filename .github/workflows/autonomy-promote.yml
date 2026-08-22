@@ -62,7 +62,7 @@ jobs:
         if: steps.meta.outputs.should_promote == 'true'
         with:
           node-version: "22"
-          cache: false
+          package-manager-cache: false
 
       - name: Full validation of exact next SHA
         if: steps.meta.outputs.should_promote == 'true'
