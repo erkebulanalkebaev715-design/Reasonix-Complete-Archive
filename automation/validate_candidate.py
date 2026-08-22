@@ -104,7 +104,7 @@ def check_html_js(index_html: Path) -> None:
         return
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
         for block in scripts:
-            f.write(html.unescape(block))
+            f.write(block)
             f.write("\n")
         temp = Path(f.name)
     try:
