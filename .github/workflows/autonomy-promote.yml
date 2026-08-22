@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Manual test only: bypass 3-day quarantine"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: reasonix-main-promotion
@@ -29,6 +35,8 @@ jobs:
       - name: Resolve exact next SHA and stability age
         id: meta
         working-directory: trusted
+        env:
+          FORCE_PROMOTION: ${{ github.event_name == "workflow_dispatch" && inputs.force || false }}
         run: |
           set -euo pipefail
           git fetch origin next
@@ -38,7 +46,7 @@ jobs:
           age=$(( $(date +%s) - $(git show -s --format=%ct origin/next) ))
           should=true
           if [ "$main_tree" = "$next_tree" ]; then should=false; fi
-          if [ "$age" -lt 259200 ]; then should=false; fi
+          if [ "$age" -lt 259200 ] && [ "$FORCE_PROMOTION" != "true" ]; then should=false; fi
           {
             echo "next_sha=$next_sha"
             echo "should_promote=$should"
