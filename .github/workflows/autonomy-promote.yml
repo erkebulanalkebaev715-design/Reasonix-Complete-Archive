@@ -1,0 +1,104 @@
+name: Reasonix Autonomous Promotion
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: reasonix-main-promotion
+  cancel-in-progress: false
+
+jobs:
+  validate-next:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    permissions:
+      contents: read
+    outputs:
+      next_sha: ${{ steps.meta.outputs.next_sha }}
+      should_promote: ${{ steps.meta.outputs.should_promote }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve exact next SHA and stability age
+        id: meta
+        working-directory: trusted
+        run: |
+          set -euo pipefail
+          git fetch origin next
+          next_sha=$(git rev-parse origin/next)
+          main_tree=$(git rev-parse HEAD^{tree})
+          next_tree=$(git rev-parse origin/next^{tree})
+          age=$(( $(date +%s) - $(git show -s --format=%ct origin/next) ))
+          should=true
+          if [ "$main_tree" = "$next_tree" ]; then should=false; fi
+          if [ "$age" -lt 259200 ]; then should=false; fi
+          {
+            echo "next_sha=$next_sha"
+            echo "should_promote=$should"
+          } >> "$GITHUB_OUTPUT"
+          echo "NEXT=$next_sha age_seconds=$age should_promote=$should"
+
+      - name: Materialize exact next tree
+        if: steps.meta.outputs.should_promote == 'true'
+        working-directory: trusted
+        run: |
+          set -euo pipefail
+          git worktree add --detach ../candidate "${{ steps.meta.outputs.next_sha }}"
+
+      - uses: actions/setup-go@v7
+        if: steps.meta.outputs.should_promote == 'true'
+        with:
+          go-version: "1.26.6"
+          cache: false
+
+      - uses: actions/setup-node@v7
+        if: steps.meta.outputs.should_promote == 'true'
+        with:
+          node-version: "22"
+          cache: false
+
+      - name: Full validation of exact next SHA
+        if: steps.meta.outputs.should_promote == 'true'
+        env:
+          GOTOOLCHAIN: local
+        run: python3 trusted/automation/validate_candidate.py --candidate candidate --full
+
+  promote:
+    needs: validate-next
+    if: needs.validate-next.outputs.should_promote == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Promote exact validated next tree as one stable snapshot
+        env:
+          NEXT_SHA: ${{ needs.validate-next.outputs.next_sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin next
+          test "$(git rev-parse origin/next)" = "$NEXT_SHA"
+          git config user.name "Reasonix Autonomy"
+          git config user.email "actions@users.noreply.github.com"
+          before=$(git rev-parse HEAD)
+          tag="autonomy-before-$(date -u +%Y%m%d-%H%M%S)"
+          git tag "$tag" "$before"
+          git read-tree --reset -u "$NEXT_SHA"
+          if git diff --cached --quiet; then
+            echo "No tree change"
+            exit 0
+          fi
+          git commit -m "autonomy: promote next $NEXT_SHA"
+          git push origin main "$tag"
+          echo "AUTONOMOUS_MAIN_PROMOTION_PASS next=$NEXT_SHA before=$before"

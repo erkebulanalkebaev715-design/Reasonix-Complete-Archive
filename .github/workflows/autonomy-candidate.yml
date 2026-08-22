@@ -1,0 +1,148 @@
+name: Reasonix Trusted Candidate Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+        type: string
+      head_sha:
+        description: Exact PR head SHA
+        required: true
+        type: string
+
+concurrency:
+  group: reasonix-autonomous-integration
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      head_sha: ${{ steps.meta.outputs.head_sha }}
+      base_sha: ${{ steps.meta.outputs.base_sha }}
+      pr: ${{ steps.meta.outputs.pr }}
+    steps:
+      - name: Validate dispatch metadata against current PR
+        id: meta
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          EXPECTED_HEAD: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          repo=os.environ["REPO"]; pr=int(os.environ["PR"]); want=os.environ["EXPECTED_HEAD"]
+          req=urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/pulls/{pr}",
+            headers={"Authorization":f"Bearer {os.environ['GITHUB_TOKEN']}",
+                     "Accept":"application/vnd.github+json",
+                     "X-GitHub-Api-Version":"2022-11-28"})
+          with urllib.request.urlopen(req, timeout=30) as r: d=json.load(r)
+          if d["state"]!="open" or d.get("draft"): raise SystemExit("PR is not merge-ready")
+          if d["base"]["ref"]!="next": raise SystemExit("PR base must be next")
+          if d["head"]["sha"]!=want: raise SystemExit("PR head changed before validation")
+          out=os.environ["GITHUB_OUTPUT"]
+          with open(out,"a",encoding="utf-8") as f:
+              f.write(f"pr={pr}\nhead_sha={d['head']['sha']}\nbase_sha={d['base']['sha']}\n")
+          print("META_PASS", d["head"]["sha"], d["base"]["sha"])
+          PY
+
+      - name: Checkout trusted control plane from main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          path: trusted
+          persist-credentials: false
+
+      - name: Checkout PR merge result
+        uses: actions/checkout@v7
+        with:
+          ref: refs/pull/${{ inputs.pr }}/merge
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact PR head is the merge second parent
+        working-directory: candidate
+        env:
+          EXPECTED_HEAD: ${{ steps.meta.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD^2)
+          test "$actual" = "$EXPECTED_HEAD"
+          echo "EXACT_HEAD_PASS $actual"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.6"
+          cache: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: false
+
+      - name: Run trusted candidate validator
+        env:
+          GOTOOLCHAIN: local
+        run: python3 trusted/automation/validate_candidate.py --candidate candidate
+
+  merge:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Re-check immutable governance and exact validated SHAs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.validate.outputs.pr }}
+          HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+          BASE_SHA: ${{ needs.validate.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body -sS \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.raw+json" \
+            "https://raw.githubusercontent.com/$REPO/main/automation/pr_guard.py" \
+            -o /tmp/pr_guard.py
+          python3 /tmp/pr_guard.py --repo "$REPO" --pr "$PR" --expected-head "$HEAD_SHA" --expected-base "$BASE_SHA"
+
+      - name: Merge validated PR into next
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.validate.outputs.pr }}
+          HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          repo=os.environ["REPO"]; pr=int(os.environ["PR"]); sha=os.environ["HEAD_SHA"]
+          body=json.dumps({"sha":sha,"merge_method":"merge",
+                           "commit_title":f"Autonomous integration of PR #{pr}"}).encode()
+          req=urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/pulls/{pr}/merge",
+            data=body, method="PUT",
+            headers={"Authorization":f"Bearer {os.environ['GITHUB_TOKEN']}",
+                     "Accept":"application/vnd.github+json",
+                     "Content-Type":"application/json",
+                     "X-GitHub-Api-Version":"2022-11-28"})
+          try:
+              with urllib.request.urlopen(req,timeout=30) as r: d=json.load(r)
+          except urllib.error.HTTPError as e:
+              raise SystemExit(e.read().decode("utf-8","replace"))
+          if not d.get("merged"):
+              raise SystemExit("merge rejected: "+str(d))
+          print("AUTONOMOUS_NEXT_MERGE_PASS", d.get("sha",""))
+          PY

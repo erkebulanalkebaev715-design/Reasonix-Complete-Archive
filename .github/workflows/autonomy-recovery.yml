@@ -1,0 +1,75 @@
+name: Reasonix Autonomous Recovery
+
+on:
+  schedule:
+    - cron: "43 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: reasonix-main-recovery
+  cancel-in-progress: false
+
+jobs:
+  verify-main:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    permissions:
+      contents: read
+    outputs:
+      main_sha: ${{ steps.meta.outputs.main_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - id: meta
+        run: echo "main_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.6"
+          cache: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: false
+
+      - name: Full main validation
+        env:
+          GOTOOLCHAIN: local
+        run: python3 automation/validate_candidate.py --candidate . --full
+
+  recover:
+    needs: verify-main
+    if: ${{ always() && needs.verify-main.result == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 3
+
+      - name: Revert only an unchanged latest autonomous promotion
+        env:
+          FAILED_SHA: ${{ needs.verify-main.outputs.main_sha }}
+        run: |
+          set -euo pipefail
+          test -n "$FAILED_SHA"
+          test "$(git rev-parse HEAD)" = "$FAILED_SHA"
+          subject=$(git show -s --format=%s HEAD)
+          case "$subject" in
+            "autonomy: promote next "*) ;;
+            *) echo "Latest commit is not an autonomous promotion; refusing blind rollback"; exit 1 ;;
+          esac
+          git config user.name "Reasonix Autonomy"
+          git config user.email "actions@users.noreply.github.com"
+          badtag="autonomy-failed-${FAILED_SHA:0:12}"
+          git tag "$badtag" "$FAILED_SHA"
+          git revert --no-edit "$FAILED_SHA"
+          git push origin main "$badtag"
+          echo "AUTONOMOUS_ROLLBACK_PASS failed=$FAILED_SHA"

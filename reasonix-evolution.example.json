@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "architecture": "example-future-reasonix",
+  "majorEvolution": true,
+  "compatibility": {
+    "balance-apk-v1": "migration"
+  },
+  "migrationDoc": "docs/MIGRATION.md",
+  "build": [
+    [
+      "go",
+      "build",
+      "./..."
+    ]
+  ],
+  "test": [
+    [
+      "go",
+      "test",
+      "./..."
+    ]
+  ],
+  "blackbox": null
+}
