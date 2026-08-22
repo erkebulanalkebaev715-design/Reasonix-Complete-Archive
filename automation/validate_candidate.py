@@ -129,8 +129,8 @@ def current_architecture(candidate: Path, full: bool) -> None:
         env_extra={"REASONIX_RELEASE_CACHE_GUARD": "1"})
     run([go, "build", "./..."], core, timeout=1200,
         env_extra={"REASONIX_RELEASE_CACHE_GUARD": "1"})
-    run([go, "test", "-timeout=12m", "./..."], core, timeout=1800,
-        env_extra={"REASONIX_RELEASE_CACHE_GUARD": "1"})
+    run([go, "test", "-p=1", "-timeout=12m", "./..."], core, timeout=1800,
+        env_extra={"REASONIX_RELEASE_CACHE_GUARD": "1", "GOMAXPROCS": "1"})
 
     if full:
         race_targets = [
