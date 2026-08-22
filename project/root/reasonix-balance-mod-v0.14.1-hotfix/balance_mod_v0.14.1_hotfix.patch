@@ -1,0 +1,13 @@
+diff --git a/internal/serve/mod_contract_test.go b/internal/serve/mod_contract_test.go
+index 2257208..f6edbba 100644
+--- a/internal/serve/mod_contract_test.go
++++ b/internal/serve/mod_contract_test.go
+@@ -82,7 +82,7 @@ func TestModAPKContractFrozenV1AndBootstrapNegotiates(t *testing.T) {
+ 
+ func TestModAPKContractRequiresJSONForPOSTByPolicy(t *testing.T) {
+ 	c := modAPKContractPayload()
+-	if c.RequestRules["postRequestsContentType"] != "application/json" {
++	if c.RequestRules["mutatingRequestsContentType"] != "application/json" {
+ 		t.Fatalf("request rules=%v", c.RequestRules)
+ 	}
+ 	for _, e := range c.Endpoints {

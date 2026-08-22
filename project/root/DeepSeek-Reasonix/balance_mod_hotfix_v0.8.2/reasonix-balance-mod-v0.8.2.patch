@@ -1,0 +1,11 @@
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -143,6 +143,7 @@ type modStatusPayload struct {
+ 	Execution   efficiency.ExecutionSnapshot   `json:"execution"`
+ 	Profile     efficiency.ProjectProfile      `json:"profile"`
+ 	Environment modEnvironmentSnapshot         `json:"environment"`
++	Persistence map[string]any                  `json:"persistence"`
+ 	Features    map[string]string              `json:"features"`
+ }
+ 

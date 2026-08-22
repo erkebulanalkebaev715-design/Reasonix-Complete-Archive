@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "revision": 4,
+  "revision_known": true,
+  "content_digest": "7318667346c97fc50cdc03ff381b67bfc144c0fe9b20cec5950ec522e17c8d6e",
+  "transcript_size": 70091,
+  "message_count": 7,
+  "authored_turns": 3,
+  "entries": [
+    {
+      "index": 0,
+      "offset": 0,
+      "length": 39657,
+      "role": "system",
+      "authored_turn": 0
+    },
+    {
+      "index": 1,
+      "offset": 39657,
+      "length": 397,
+      "role": "user",
+      "authored_turn": 1,
+      "starts_turn": true
+    },
+    {
+      "index": 2,
+      "offset": 40054,
+      "length": 15775,
+      "role": "assistant",
+      "authored_turn": 1
+    },
+    {
+      "index": 3,
+      "offset": 55829,
+      "length": 403,
+      "role": "user",
+      "authored_turn": 2,
+      "starts_turn": true
+    },
+    {
+      "index": 4,
+      "offset": 56232,
+      "length": 4825,
+      "role": "assistant",
+      "authored_turn": 2
+    },
+    {
+      "index": 5,
+      "offset": 61057,
+      "length": 503,
+      "role": "user",
+      "authored_turn": 3,
+      "starts_turn": true
+    },
+    {
+      "index": 6,
+      "offset": 61560,
+      "length": 8531,
+      "role": "assistant",
+      "authored_turn": 3
+    }
+  ],
+  "updated_at": "2026-08-22T10:27:10.826400019Z"
+}

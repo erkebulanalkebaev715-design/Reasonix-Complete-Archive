@@ -1,0 +1,21 @@
+diff --git a/internal/serve/mod_bridge_test.go b/internal/serve/mod_bridge_test.go
+--- a/internal/serve/mod_bridge_test.go	2026-08-17 05:53:33.323676702 +0000
++++ b/internal/serve/mod_bridge_test.go	2026-08-17 05:53:19.929969701 +0000
+@@ -232,6 +232,7 @@
+ 	}
+ 
+ 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mod/cycle/reset", strings.NewReader(`{}`))
++	req.Header.Set("Content-Type", "application/json")
+ 	reset, err := http.DefaultClient.Do(req)
+ 	if err != nil {
+ 		t.Fatal(err)
+@@ -262,7 +263,8 @@
+ 		t.Fatalf("recovery=%+v", status)
+ 	}
+ 
+-	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mod/recovery/rollback-last", nil)
++	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mod/recovery/rollback-last", strings.NewReader(`{}`))
++	req.Header.Set("Content-Type", "application/json")
+ 	rollback, err := http.DefaultClient.Do(req)
+ 	if err != nil {
+ 		t.Fatal(err)

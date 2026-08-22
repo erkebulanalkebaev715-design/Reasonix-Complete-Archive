@@ -1,0 +1,2 @@
+go: go.mod requires go >= 1.25.0 (running go 1.24.4; GOTOOLCHAIN=local)
+BUILD_EXIT=0

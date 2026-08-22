@@ -1,0 +1,1213 @@
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+index cc075ce..a2ffcc2 100644
+--- a/docs/BALANCE_MOD.md
++++ b/docs/BALANCE_MOD.md
+@@ -288,3 +288,80 @@ model or duplicate session state.
+ 
+ The v0.7 offline gate must end with `BALANCE_MOD_V07_SMOKE_PASS`. No real
+ provider key is required or used by these tests.
++
++
++## v0.8 — APK control plane, restart-safe policy state, Debian supervisor
++
++v0.8 prepares the already-universal Reasonix backend for an actual Android
++application without moving agent logic into the APK.
++
++### Single APK bootstrap/control surface
++
++`GET /mod/app/bootstrap` returns one bounded machine snapshot containing the
++active workspace, model, project profile, KZT budget, execution router,
++quality/recovery/resource state, tools, skills, persistence status and the
++stable endpoint map the Android UI needs at startup.
++
++`POST /mod/app/apply` atomically validates and applies an idle-session policy
++bundle: project profile, KZT budget, execution model slots, per-tool decisions
++and approval mode. It validates the whole request before mutating state and
++rolls back in-memory policy if a later host apply/persist step fails. Budget
++spend is preserved by default when settings are re-applied; the APK must send
++`resetBudgetSpend:true` explicitly to start a fresh budget ledger.
++
++`POST /mod/app/task/start` and `/mod/app/task/stop` are direct aliases to the
++native Reasonix `submit` / `cancel` handlers. They do not introduce a second
++agent loop, queue, session or provider path.
++
++### Restart-safe workspace policy
++
++APK-owned policy is stored atomically under the Reasonix home, keyed by a hash
++of the canonical workspace path. The state file contains no API keys, prompts,
++source files or hidden model reasoning.
++
++Persisted state includes:
++
++- project profile / Chat-vs-Agent mode / Tool Packs,
++- manual per-tool decisions and approval mode,
++- execution-router model refs/config,
++- KZT budget configuration,
++- **already-accounted KZT and Pro spend**.
++
++Preserving the spend ledger is a hard requirement: restarting the backend must
++not silently grant a fresh budget. Writes use a temporary `0600` file, fsync,
++and atomic rename. Invalid/corrupt/impossible ledgers are rejected fail-closed
++and surfaced in APK bootstrap rather than weakening the budget.
++
++Native Reasonix-owned state remains native: Skills and instruction documents
++continue to use Reasonix's own config/memory persistence rather than being
++copied into this APK state file.
++
++### Debian-side Android supervisor bridge
++
++`scripts/reasonix_android_backend.sh` is a small process wrapper intended to be
++invoked later through Termux `RUN_COMMAND` -> `proot-distro login debian`.
++It supports `start|stop|restart|status|token|log`, binds the Reasonix HTTP/SSE
++backend to localhost, creates a local auth token, stores PID/log/workspace state
++under the Reasonix home, and starts the **same** `reasonix serve` backend in the
++selected workspace.
++
++Workspace switching remains process-level by design:
++
++`APK -> Termux RUN_COMMAND -> Debian supervisor restart -> reasonix serve(CWD)`
++
++This avoids process-wide `chdir` races and keeps one controller/session bound to
++one workspace.
++
++### v0.8 APK endpoints
++
++Added:
++
++- `GET /mod/app/bootstrap`
++- `POST /mod/app/apply`
++- `POST /mod/app/task/start` (native submit alias)
++- `POST /mod/app/task/stop` (native cancel alias)
++- `GET /mod/app/persistence`
++- `POST /mod/app/persistence/save`
++
++The v0.8 offline gate must end with `BALANCE_MOD_V08_SMOKE_PASS`. No real
++provider key is required or used.
+diff --git a/internal/efficiency/budget_persist.go b/internal/efficiency/budget_persist.go
+new file mode 100644
+index 0000000..bf59c66
+--- /dev/null
++++ b/internal/efficiency/budget_persist.go
+@@ -0,0 +1,81 @@
++package efficiency
++
++import (
++	"fmt"
++	"math"
++
++	"reasonix/internal/billing"
++)
++
++// BudgetPersistentState is the crash/restart-safe form of the APK budget.
++// It preserves the hard KZT envelope AND already-accounted spend so restarting
++// the Android/backend process cannot silently reset the user's money limit.
++type BudgetPersistentState struct {
++	Config        BudgetConfig `json:"config"`
++	SpentKZT      float64      `json:"spentKzt"`
++	ProSpentKZT   float64      `json:"proSpentKzt"`
++	UnpricedCalls int          `json:"unpricedCalls"`
++}
++
++func cloneBudgetConfig(c BudgetConfig) BudgetConfig {
++	out := c
++	out.FXKZTPerUnit = make(map[string]float64, len(c.FXKZTPerUnit))
++	for k, v := range c.FXKZTPerUnit {
++		out.FXKZTPerUnit[k] = v
++	}
++	return out
++}
++
++func (g *Governor) PersistentState() BudgetPersistentState {
++	if g == nil {
++		return BudgetPersistentState{Config: DefaultBudgetConfig()}
++	}
++	g.mu.Lock()
++	defer g.mu.Unlock()
++	return BudgetPersistentState{
++		Config:        cloneBudgetConfig(g.cfg),
++		SpentKZT:      g.spent.Float64(),
++		ProSpentKZT:   g.proSpent.Float64(),
++		UnpricedCalls: g.unpriced,
++	}
++}
++
++func validatePersistedMoney(v float64, name string) error {
++	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
++		return fmt.Errorf("%s must be a finite non-negative value", name)
++	}
++	return nil
++}
++
++// RestorePersistentState restores policy and ledger without generating spend.
++// Invalid/corrupt state is rejected instead of weakening a hard budget.
++func (g *Governor) RestorePersistentState(st BudgetPersistentState) (BudgetSnapshot, error) {
++	if g == nil {
++		return BudgetSnapshot{}, fmt.Errorf("budget governor is nil")
++	}
++	if err := ValidateConfig(st.Config); err != nil {
++		return BudgetSnapshot{}, err
++	}
++	if err := validatePersistedMoney(st.SpentKZT, "spentKzt"); err != nil {
++		return BudgetSnapshot{}, err
++	}
++	if err := validatePersistedMoney(st.ProSpentKZT, "proSpentKzt"); err != nil {
++		return BudgetSnapshot{}, err
++	}
++	if st.ProSpentKZT > st.SpentKZT+1e-9 {
++		return BudgetSnapshot{}, fmt.Errorf("proSpentKzt cannot exceed spentKzt")
++	}
++	if st.UnpricedCalls < 0 {
++		return BudgetSnapshot{}, fmt.Errorf("unpricedCalls cannot be negative")
++	}
++
++	cfg := normalizeConfig(st.Config)
++	g.mu.Lock()
++	g.cfg = cfg
++	g.spent = billing.NewAmountFromFloat(st.SpentKZT)
++	g.proSpent = billing.NewAmountFromFloat(st.ProSpentKZT)
++	g.unpriced = st.UnpricedCalls
++	snap := g.snapshotLocked()
++	g.mu.Unlock()
++	return snap, nil
++}
+diff --git a/internal/efficiency/budget_persist_test.go b/internal/efficiency/budget_persist_test.go
+new file mode 100644
+index 0000000..9d4f9b1
+--- /dev/null
++++ b/internal/efficiency/budget_persist_test.go
+@@ -0,0 +1,33 @@
++package efficiency
++
++import "testing"
++
++func TestBudgetPersistentStateRestoresSpendAndHardLimit(t *testing.T) {
++	g := NewGovernor()
++	g.Configure(BudgetConfig{BudgetKZT: 100, ReservePercent: 10, ProMaxPercent: 25, HardStop: true, FXKZTPerUnit: map[string]float64{"KZT": 1}})
++	_, err := g.RestorePersistentState(BudgetPersistentState{
++		Config:   BudgetConfig{BudgetKZT: 100, ReservePercent: 10, ProMaxPercent: 25, HardStop: true, FXKZTPerUnit: map[string]float64{"KZT": 1}},
++		SpentKZT: 80, ProSpentKZT: 20,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	st := g.PersistentState()
++	if st.SpentKZT != 80 || st.ProSpentKZT != 20 {
++		t.Fatalf("restored state = %+v", st)
++	}
++	if ok, _ := g.CanSpend("flash", 11, false); ok {
++		t.Fatal("regular budget reserve must survive restart")
++	}
++	if ok, _ := g.CanSpend("pro", 6, true); ok {
++		t.Fatal("Pro cap must survive restart")
++	}
++}
++
++func TestBudgetPersistentStateRejectsImpossibleLedger(t *testing.T) {
++	g := NewGovernor()
++	_, err := g.RestorePersistentState(BudgetPersistentState{Config: DefaultBudgetConfig(), SpentKZT: 1, ProSpentKZT: 2})
++	if err == nil {
++		t.Fatal("expected impossible ledger rejection")
++	}
++}
+diff --git a/internal/serve/mod_agent_control.go b/internal/serve/mod_agent_control.go
+index 3795a3f..0b1b19d 100644
+--- a/internal/serve/mod_agent_control.go
++++ b/internal/serve/mod_agent_control.go
+@@ -191,6 +191,7 @@ func (s *Server) modAgentToolsSet(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 	payload := map[string]any{"tools": s.modToolViews(), "approvalMode": s.ctl().ToolApprovalMode()}
+ 	s.modHub.Emit("agent.tools.updated", map[string]any{"count": len(body.Decisions), "approvalMode": s.ctl().ToolApprovalMode()})
++	s.persistModAppStateBestEffort()
+ 	writeJSON(w, payload)
+ }
+ 
+diff --git a/internal/serve/mod_app.go b/internal/serve/mod_app.go
+new file mode 100644
+index 0000000..9a5791e
+--- /dev/null
++++ b/internal/serve/mod_app.go
+@@ -0,0 +1,437 @@
++package serve
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"time"
++
++	"reasonix/internal/config"
++	"reasonix/internal/efficiency"
++)
++
++const modAppStateSchema = 1
++const modAPKProtocolVersion = "balance-apk-v1"
++
++type modPersistedAppState struct {
++	SchemaVersion int                              `json:"schemaVersion"`
++	Workspace     string                           `json:"workspace"`
++	SavedAtUnixMS int64                            `json:"savedAtUnixMs"`
++	Profile       efficiency.ProjectProfile        `json:"profile"`
++	ToolDecisions map[string]string                `json:"toolDecisions,omitempty"`
++	ApprovalMode  string                           `json:"approvalMode,omitempty"`
++	Budget        efficiency.BudgetPersistentState `json:"budget"`
++	Execution     efficiency.ExecutionConfig       `json:"execution"`
++}
++
++func canonicalModWorkspace(root string) string {
++	root = strings.TrimSpace(root)
++	if root == "" {
++		root = "."
++	}
++	if abs, err := filepath.Abs(root); err == nil {
++		root = abs
++	}
++	if real, err := filepath.EvalSymlinks(root); err == nil {
++		root = real
++	}
++	return filepath.Clean(root)
++}
++
++func modAppStatePath(root string) string {
++	base := strings.TrimSpace(config.ReasonixHomeDir())
++	if base == "" {
++		return ""
++	}
++	root = canonicalModWorkspace(root)
++	sum := sha256.Sum256([]byte(root))
++	key := hex.EncodeToString(sum[:12])
++	return filepath.Join(base, "balance", "apk-state", key+".json")
++}
++
++func (s *Server) modPersistenceStatus() map[string]any {
++	s.modPersistMu.Lock()
++	defer s.modPersistMu.Unlock()
++	return map[string]any{
++		"enabled":              s.modPersistPath != "",
++		"path":                 s.modPersistPath,
++		"lastError":            s.modPersistErr,
++		"schemaVersion":        modAppStateSchema,
++		"preservesBudgetSpend": true,
++	}
++}
++
++func (s *Server) captureModAppState() modPersistedAppState {
++	return modPersistedAppState{
++		SchemaVersion: modAppStateSchema,
++		Workspace:     canonicalModWorkspace(s.modWorkspacePath()),
++		SavedAtUnixMS: time.Now().UnixMilli(),
++		Profile:       s.modProfile.Snapshot(),
++		ToolDecisions: s.modToolDecisionsSnapshot(),
++		ApprovalMode:  s.ctl().ToolApprovalMode(),
++		Budget:        s.modGov.PersistentState(),
++		Execution:     s.modExec.Snapshot().Config,
++	}
++}
++
++func writeModStateAtomic(path string, state modPersistedAppState) error {
++	if path == "" {
++		return nil
++	}
++	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
++		return err
++	}
++	data, err := json.MarshalIndent(state, "", "  ")
++	if err != nil {
++		return err
++	}
++	tmp, err := os.CreateTemp(filepath.Dir(path), ".apk-state-*.tmp")
++	if err != nil {
++		return err
++	}
++	tmpName := tmp.Name()
++	ok := false
++	defer func() {
++		_ = tmp.Close()
++		if !ok {
++			_ = os.Remove(tmpName)
++		}
++	}()
++	if err := tmp.Chmod(0o600); err != nil {
++		return err
++	}
++	if _, err := tmp.Write(data); err != nil {
++		return err
++	}
++	if err := tmp.Sync(); err != nil {
++		return err
++	}
++	if err := tmp.Close(); err != nil {
++		return err
++	}
++	if err := os.Rename(tmpName, path); err != nil {
++		return err
++	}
++	ok = true
++	if dir, err := os.Open(filepath.Dir(path)); err == nil {
++		_ = dir.Sync()
++		_ = dir.Close()
++	}
++	return nil
++}
++
++func (s *Server) persistModAppState() error {
++	state := s.captureModAppState()
++	s.modPersistMu.Lock()
++	path := s.modPersistPath
++	s.modPersistMu.Unlock()
++	err := writeModStateAtomic(path, state)
++	s.modPersistMu.Lock()
++	if err != nil {
++		s.modPersistErr = err.Error()
++	} else {
++		s.modPersistErr = ""
++	}
++	s.modPersistMu.Unlock()
++	return err
++}
++
++func (s *Server) persistModAppStateBestEffort() {
++	if err := s.persistModAppState(); err != nil && s.modHub != nil {
++		s.modHub.Emit("app.persistence.failed", map[string]any{"reason": err.Error()})
++	}
++}
++
++func (s *Server) loadModAppState() {
++	// No explicit workspace means there is no stable project identity. This is
++	// common in unit tests and utility controllers; do not persist process-CWD
++	// policy under one shared key in that case.
++	if strings.TrimSpace(s.ctl().WorkspaceRoot()) == "" {
++		s.modPersistMu.Lock()
++		s.modPersistPath = ""
++		s.modPersistErr = ""
++		s.modPersistMu.Unlock()
++		return
++	}
++	path := modAppStatePath(s.modWorkspacePath())
++	s.modPersistMu.Lock()
++	s.modPersistPath = path
++	s.modPersistErr = ""
++	s.modPersistMu.Unlock()
++	if path == "" {
++		return
++	}
++	data, err := os.ReadFile(path)
++	if os.IsNotExist(err) {
++		return
++	}
++	if err != nil {
++		s.setModPersistenceError(err)
++		return
++	}
++	if len(data) > 2<<20 {
++		s.setModPersistenceError(fmt.Errorf("persisted APK state is too large"))
++		return
++	}
++	var st modPersistedAppState
++	if err := json.Unmarshal(data, &st); err != nil {
++		s.setModPersistenceError(fmt.Errorf("decode persisted APK state: %w", err))
++		return
++	}
++	if st.SchemaVersion != modAppStateSchema {
++		s.setModPersistenceError(fmt.Errorf("unsupported persisted APK state schema %d", st.SchemaVersion))
++		return
++	}
++	if canonicalModWorkspace(st.Workspace) != canonicalModWorkspace(s.modWorkspacePath()) {
++		s.setModPersistenceError(fmt.Errorf("persisted APK state belongs to another workspace"))
++		return
++	}
++
++	for _, pack := range st.Profile.ToolPacks {
++		if !s.knownModToolPack(pack) {
++			s.setModPersistenceError(fmt.Errorf("persisted state references unknown tool pack %q", pack))
++			return
++		}
++	}
++	if _, err := s.modProfile.Configure(st.Profile); err != nil {
++		s.setModPersistenceError(err)
++		return
++	}
++	decisions, err := s.canonicalModToolDecisions(st.ToolDecisions)
++	if err != nil {
++		s.setModPersistenceError(err)
++		return
++	}
++	s.setModToolDecisions(decisions)
++	if mode := strings.ToLower(strings.TrimSpace(st.ApprovalMode)); mode == "ask" || mode == "auto" || mode == "yolo" {
++		s.ctl().SetToolApprovalMode(mode)
++	}
++	if _, err := s.modGov.RestorePersistentState(st.Budget); err != nil {
++		s.setModPersistenceError(err)
++		return
++	}
++	if err := efficiency.ValidateExecutionConfig(st.Execution); err != nil {
++		s.setModPersistenceError(err)
++		return
++	}
++	if st.Execution.Enabled {
++		refs := []string{st.Execution.FlashPrimaryRef, st.Execution.FlashAlternativeRef, st.Execution.ProRef, st.Execution.FlashRepairRef}
++		for _, ref := range refs {
++			if strings.TrimSpace(ref) != "" && !s.modExecutionRefKnown(ref) {
++				s.setModPersistenceError(fmt.Errorf("persisted execution model ref is unavailable: %s", ref))
++				return
++			}
++		}
++	}
++	if _, err := s.modExec.Configure(st.Execution, currentModelRef(s.ctl())); err != nil {
++		s.setModPersistenceError(err)
++		return
++	}
++	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
++		s.setModPersistenceError(err)
++		return
++	}
++	_ = s.applyModTaskCostBudget()
++	s.modHub.Emit("app.persistence.restored", map[string]any{"workspace": s.modWorkspacePath()})
++}
++
++func (s *Server) setModPersistenceError(err error) {
++	if err == nil {
++		return
++	}
++	s.modPersistMu.Lock()
++	s.modPersistErr = err.Error()
++	s.modPersistMu.Unlock()
++}
++
++type modAppApplyRequest struct {
++	Profile          *efficiency.ProjectProfile  `json:"profile,omitempty"`
++	Budget           *efficiency.BudgetConfig    `json:"budget,omitempty"`
++	ResetBudgetSpend bool                        `json:"resetBudgetSpend,omitempty"`
++	Execution        *efficiency.ExecutionConfig `json:"execution,omitempty"`
++	ToolDecisions    *map[string]string          `json:"toolDecisions,omitempty"`
++	ApprovalMode     *string                     `json:"approvalMode,omitempty"`
++}
++
++func (s *Server) validateModAppApply(req modAppApplyRequest) (map[string]string, error) {
++	var canonical map[string]string
++	if req.ResetBudgetSpend && req.Budget == nil {
++		return nil, fmt.Errorf("resetBudgetSpend requires budget")
++	}
++	if req.Profile != nil {
++		if err := efficiency.ValidateProjectProfile(*req.Profile); err != nil {
++			return nil, err
++		}
++		for _, pack := range req.Profile.ToolPacks {
++			if !s.knownModToolPack(pack) {
++				return nil, fmt.Errorf("unknown tool pack: %s", strings.TrimSpace(pack))
++			}
++		}
++	}
++	if req.Budget != nil {
++		if err := efficiency.ValidateConfig(*req.Budget); err != nil {
++			return nil, err
++		}
++	}
++	if req.Execution != nil {
++		if err := efficiency.ValidateExecutionConfig(*req.Execution); err != nil {
++			return nil, err
++		}
++		if req.Execution.Enabled {
++			for _, ref := range []string{req.Execution.FlashPrimaryRef, req.Execution.FlashAlternativeRef, req.Execution.ProRef, req.Execution.FlashRepairRef} {
++				if strings.TrimSpace(ref) != "" && !s.modExecutionRefKnown(ref) {
++					return nil, fmt.Errorf("unknown model ref: %s", strings.TrimSpace(ref))
++				}
++			}
++		}
++	}
++	if req.ToolDecisions != nil {
++		var err error
++		canonical, err = s.canonicalModToolDecisions(*req.ToolDecisions)
++		if err != nil {
++			return nil, err
++		}
++	}
++	if req.ApprovalMode != nil {
++		mode := strings.ToLower(strings.TrimSpace(*req.ApprovalMode))
++		if mode != "ask" && mode != "auto" && mode != "yolo" {
++			return nil, fmt.Errorf("approvalMode must be ask, auto, or yolo")
++		}
++	}
++	return canonical, nil
++}
++
++func (s *Server) modAppApply(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot change APK control state while a turn is running", http.StatusConflict)
++		return
++	}
++	var req modAppApplyRequest
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 512<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&req); err != nil {
++		http.Error(w, "invalid app config: "+err.Error(), http.StatusBadRequest)
++		return
++	}
++	canonical, err := s.validateModAppApply(req)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++
++	beforeProfile := s.modProfile.Snapshot()
++	beforeTools := s.modToolDecisionsSnapshot()
++	beforeMode := s.ctl().ToolApprovalMode()
++	beforeBudget := s.modGov.PersistentState()
++	beforeExec := s.modExec.Snapshot()
++	rollback := func() {
++		_, _ = s.modProfile.Configure(beforeProfile)
++		s.setModToolDecisions(beforeTools)
++		s.ctl().SetToolApprovalMode(beforeMode)
++		_, _ = s.modGov.RestorePersistentState(beforeBudget)
++		_, _ = s.modExec.Configure(beforeExec.Config, currentModelRef(s.ctl()))
++		_ = s.applyModToolDecisionsToCurrentController()
++		_ = s.applyModTaskCostBudget()
++	}
++
++	if req.ToolDecisions != nil {
++		s.setModToolDecisions(canonical)
++	}
++	if req.Profile != nil {
++		if _, err := s.modProfile.Configure(*req.Profile); err != nil {
++			rollback()
++			http.Error(w, err.Error(), http.StatusConflict)
++			return
++		}
++	}
++	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
++		rollback()
++		http.Error(w, err.Error(), http.StatusConflict)
++		return
++	}
++	if req.ApprovalMode != nil {
++		s.ctl().SetToolApprovalMode(strings.ToLower(strings.TrimSpace(*req.ApprovalMode)))
++	}
++	if req.Budget != nil {
++		if req.ResetBudgetSpend {
++			s.modGov.Configure(*req.Budget)
++		} else {
++			preserved := beforeBudget
++			preserved.Config = *req.Budget
++			if _, err := s.modGov.RestorePersistentState(preserved); err != nil {
++				rollback()
++				http.Error(w, err.Error(), http.StatusConflict)
++				return
++			}
++		}
++		_ = s.applyModTaskCostBudget()
++	}
++	if req.Execution != nil {
++		if _, err := s.modExec.Configure(*req.Execution, currentModelRef(s.ctl())); err != nil {
++			rollback()
++			http.Error(w, err.Error(), http.StatusConflict)
++			return
++		}
++	}
++	if err := s.persistModAppState(); err != nil {
++		rollback()
++		http.Error(w, "persist app config: "+err.Error(), http.StatusInternalServerError)
++		return
++	}
++	s.modHub.Emit("app.config.applied", map[string]any{"workspace": s.modWorkspacePath()})
++	s.modAppBootstrap(w, r)
++}
++
++func (s *Server) modAppBootstrap(w http.ResponseWriter, r *http.Request) {
++	writeJSON(w, map[string]any{
++		"protocolVersion": modAPKProtocolVersion,
++		"modVersion":      balanceModVersion,
++		"workspace":       s.modWorkspacePath(),
++		"running":         s.ctl().Running(),
++		"modelRef":        currentModelRef(s.ctl()),
++		"profile":         s.modProfile.Snapshot(),
++		"budget":          s.modGov.Snapshot(),
++		"execution":       s.modExec.Snapshot(),
++		"quality":         s.modQuality.Snapshot(),
++		"recovery":        s.modRecoverySnapshot(),
++		"resources":       efficiency.ReadResources(s.modWorkspacePath()),
++		"environment":     s.modEnvironmentSnapshot(r.Context(), false),
++		"tools":           s.modToolViews(),
++		"skills":          s.modSkillViews(),
++		"persistence":     s.modPersistenceStatus(),
++		"transport":       map[string]any{"http": true, "sse": true, "hiddenReasoningExported": false},
++		"endpoints": map[string]string{
++			"bootstrap": "/mod/app/bootstrap", "apply": "/mod/app/apply",
++			"startTask": "/mod/app/task/start", "stopTask": "/mod/app/task/stop",
++			"events": "/mod/events", "history": "/mod/live/history",
++			"approve": "/approve", "workspaceValidate": "/mod/workspace/validate",
++		},
++		"workspaceSwitch": map[string]any{
++			"live":   false,
++			"method": "supervisor-restart",
++			"reason": "one Reasonix controller/session stays bound to one process workspace",
++		},
++	})
++}
++
++func (s *Server) modAppPersistenceGet(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, s.modPersistenceStatus())
++}
++
++func (s *Server) modAppPersistenceSave(w http.ResponseWriter, _ *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot force-save app policy while a turn is running", http.StatusConflict)
++		return
++	}
++	if err := s.persistModAppState(); err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++		return
++	}
++	s.modHub.Emit("app.persistence.saved", map[string]any{"workspace": s.modWorkspacePath()})
++	writeJSON(w, s.modPersistenceStatus())
++}
+diff --git a/internal/serve/mod_app_test.go b/internal/serve/mod_app_test.go
+new file mode 100644
+index 0000000..2caa49c
+--- /dev/null
++++ b/internal/serve/mod_app_test.go
+@@ -0,0 +1,143 @@
++package serve
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"reasonix/internal/billing"
++	"reasonix/internal/config"
++	"reasonix/internal/control"
++	"reasonix/internal/event"
++	"reasonix/internal/memory"
++	"reasonix/internal/provider"
++	"reasonix/internal/tool"
++)
++
++func newPersistentModServer(t *testing.T, root string) (*httptest.Server, *Broadcaster) {
++	t.Helper()
++	reg := tool.NewRegistry()
++	reg.Add(modAgentTestTool{name: "read_x", ro: true})
++	reg.Add(modAgentTestTool{name: "write_x"})
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, Registry: reg, WorkspaceRoot: root, SessionDir: filepath.Join(root, ".sessions"), Memory: memory.Load(memory.Options{CWD: root, UserDir: ""}), ModelRef: "mock/flash"})
++	return httptest.NewServer(New(ctrl, bc, config.ServeConfig{}).Handler()), bc
++}
++
++func postJSON(t *testing.T, url, body string) *http.Response {
++	t.Helper()
++	resp, err := http.Post(url, "application/json", strings.NewReader(body))
++	if err != nil {
++		t.Fatal(err)
++	}
++	return resp
++}
++
++func TestModAppBootstrapAndAtomicApply(t *testing.T) {
++	t.Setenv("REASONIX_HOME", t.TempDir())
++	root := t.TempDir()
++	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("test\n"), 0644); err != nil {
++		t.Fatal(err)
++	}
++	ts, _ := newPersistentModServer(t, root)
++	defer ts.Close()
++
++	apply := postJSON(t, ts.URL+"/mod/app/apply", `{
++      "profile":{"name":"Game","mode":"chat","toolPacks":["developer"],"liveDetail":"project"},
++      "budget":{"budgetKzt":1000,"reservePercent":15,"proMaxPercent":25,"hardStop":false,"fxKztPerUnit":{"KZT":1}},
++      "toolDecisions":{"read_x":"deny"},"approvalMode":"ask"
++    }`)
++	raw, _ := io.ReadAll(apply.Body)
++	apply.Body.Close()
++	if apply.StatusCode != http.StatusOK {
++		t.Fatalf("apply=%d %s", apply.StatusCode, raw)
++	}
++	if !strings.Contains(string(raw), `"protocolVersion":"balance-apk-v1"`) {
++		t.Fatalf("bootstrap missing protocol: %s", raw)
++	}
++	if !strings.Contains(string(raw), `"name":"Game"`) {
++		t.Fatalf("profile missing: %s", raw)
++	}
++
++	stop := postJSON(t, ts.URL+"/mod/app/task/stop", `{}`)
++	stop.Body.Close()
++	if stop.StatusCode != http.StatusNoContent {
++		t.Fatalf("stop alias=%d", stop.StatusCode)
++	}
++	badStart := postJSON(t, ts.URL+"/mod/app/task/start", `{}`)
++	badStart.Body.Close()
++	if badStart.StatusCode != http.StatusBadRequest {
++		t.Fatalf("start alias should reuse native submit validation, got %d", badStart.StatusCode)
++	}
++}
++
++func TestModAppStatePersistsBudgetSpendProfileAndToolsAcrossRestart(t *testing.T) {
++	home := t.TempDir()
++	t.Setenv("REASONIX_HOME", home)
++	root := t.TempDir()
++	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("test\n"), 0644); err != nil {
++		t.Fatal(err)
++	}
++
++	ts1, bc := newPersistentModServer(t, root)
++	apply := postJSON(t, ts1.URL+"/mod/app/apply", `{
++      "profile":{"name":"Persisted","mode":"agent","toolPacks":["developer"],"liveDetail":"metadata"},
++      "budget":{"budgetKzt":100,"reservePercent":10,"proMaxPercent":25,"hardStop":false,"fxKztPerUnit":{"KZT":1}},
++      "toolDecisions":{"write_x":"deny"},"approvalMode":"ask"
++    }`)
++	io.Copy(io.Discard, apply.Body)
++	apply.Body.Close()
++	if apply.StatusCode != http.StatusOK {
++		t.Fatalf("apply=%d", apply.StatusCode)
++	}
++	bc.Emit(event.Event{Kind: event.Usage, ModelRef: "mock/flash", Usage: &provider.Usage{PromptTokens: 1}, CostQuote: &billing.CostQuote{Original: billing.Money{Amount: "40", Currency: "KZT"}, CostComplete: true, ModelRef: "mock/flash"}})
++	ts1.Close()
++
++	ts2, _ := newPersistentModServer(t, root)
++	defer ts2.Close()
++	resp, err := http.Get(ts2.URL + "/mod/app/bootstrap")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	var got struct {
++		Profile struct {
++			Name string `json:"name"`
++		} `json:"profile"`
++		Budget struct {
++			SpentKZT  float64 `json:"spentKzt"`
++			BudgetKZT float64 `json:"budgetKzt"`
++		} `json:"budget"`
++		Tools       []modToolView  `json:"tools"`
++		Persistence map[string]any `json:"persistence"`
++	}
++	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
++		t.Fatal(err)
++	}
++	if got.Profile.Name != "Persisted" {
++		t.Fatalf("profile=%+v", got.Profile)
++	}
++	if got.Budget.SpentKZT != 40 || got.Budget.BudgetKZT != 100 {
++		t.Fatalf("budget=%+v", got.Budget)
++	}
++	seen := map[string]modToolView{}
++	for _, v := range got.Tools {
++		seen[v.Name] = v
++	}
++	if seen["write_x"].Decision != "deny" || seen["write_x"].ProviderVisible {
++		t.Fatalf("tool policy not restored: %+v", seen["write_x"])
++	}
++	if enabled, _ := got.Persistence["enabled"].(bool); !enabled {
++		t.Fatalf("persistence=%v", got.Persistence)
++	}
++}
++
++// Compile-time guard: the test tool still satisfies the actual native tool contract.
++var _ tool.Tool = modAgentTestTool{}
++var _ = context.Background
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index f109317..6cb5587 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -16,7 +16,7 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.7"
++const balanceModVersion = "balance-mod-v0.8"
+ 
+ // modEvent is a typed machine event for the Android client. Most Balance Mod
+ // telemetry is content-free; v0.7 live.* events may additionally carry bounded,
+@@ -189,6 +189,7 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 		Execution:   s.modExec.Snapshot(),
+ 		Profile:     s.modProfile.Snapshot(),
+ 		Environment: s.modEnvironmentSnapshot(context.Background(), false),
++		Persistence: s.modPersistenceStatus(),
+ 		Features: map[string]string{
+ 			"budget":               "post-round-gate-v0.1",
+ 			"apkBridge":            "http+sse-v0.2",
+@@ -212,6 +213,9 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 			"environmentDiscovery": "reasonix-native-probes+apk-project-markers-v0.7",
+ 			"projectProfile":       "chat-agent-modes+tool-packs-v0.7",
+ 			"liveProtocol":         "typed-actions-diff-results-no-hidden-reasoning-v0.7",
++			"apkControlPlane":      "bootstrap+atomic-apply+native-task-aliases-v0.8",
++			"apkStatePersistence":  "workspace-scoped-atomic+budget-ledger-v0.8",
++			"androidSupervisor":    "debian-process-wrapper-v0.8",
+ 		},
+ 	})
+ }
+@@ -243,6 +247,7 @@ func (s *Server) modBudgetSet(w http.ResponseWriter, r *http.Request) {
+ 	snap := s.modGov.Configure(cfg)
+ 	gate := s.applyModTaskCostBudget()
+ 	s.modHub.Emit("budget.configured", map[string]any{"budget": snap, "taskCostGate": gate})
++	s.persistModAppStateBestEffort()
+ 	writeJSON(w, map[string]any{"budget": snap, "taskCostGate": gate})
+ }
+ 
+@@ -253,6 +258,7 @@ func (s *Server) modBudgetReset(w http.ResponseWriter, _ *http.Request) {
+ 	}
+ 	snap := s.modGov.ResetSpend()
+ 	s.modHub.Emit("budget.reset", snap)
++	s.persistModAppStateBestEffort()
+ 	writeJSON(w, snap)
+ }
+ 
+@@ -332,6 +338,7 @@ func (s *Server) modExecutionConfigure(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 	s.modHub.Emit("execution.configured", snap)
++	s.persistModAppStateBestEffort()
+ 	writeJSON(w, snap)
+ }
+ 
+@@ -342,6 +349,7 @@ func (s *Server) modExecutionReset(w http.ResponseWriter, _ *http.Request) {
+ 	}
+ 	snap := s.modExec.Reset(currentModelRef(s.ctl()))
+ 	s.modHub.Emit("execution.reset", snap)
++	s.persistModAppStateBestEffort()
+ 	writeJSON(w, snap)
+ }
+ 
+@@ -510,6 +518,7 @@ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ 		"recovery":    s.modRecoverySnapshot(),
+ 		"profile":     s.modProfile.Snapshot(),
+ 		"environment": s.modEnvironmentSnapshot(context.Background(), false),
++		"persistence": s.modPersistenceStatus(),
+ 		"agent":       map[string]any{"workspace": s.ctl().WorkspaceRoot(), "toolOverrides": len(s.modToolDecisionsSnapshot()), "skills": len(s.modSkillViews())},
+ 	})
+ 	if len(initial) > 0 {
+@@ -573,6 +582,9 @@ func (s *Server) observeCoreEvent(e event.Event) {
+ 	if !before.ProLimitReached && after.ProLimitReached {
+ 		s.modHub.Emit("budget.pro_limit_reached", after)
+ 	}
++	// Persist accounted spend after every provider Usage event. This prevents a
++	// backend/process restart from silently granting a fresh KZT budget.
++	s.persistModAppStateBestEffort()
+ }
+ 
+ // applyModTaskCostBudget reuses Reasonix's existing task cost budget as a
+diff --git a/internal/serve/mod_capabilities.go b/internal/serve/mod_capabilities.go
+index 51df3b4..e665319 100644
+--- a/internal/serve/mod_capabilities.go
++++ b/internal/serve/mod_capabilities.go
+@@ -326,8 +326,8 @@ func (s *Server) modProjectGet(w http.ResponseWriter, r *http.Request) {
+ 		"chatEndpoint":       "/submit",
+ 		"eventsEndpoint":     "/mod/events",
+ 		"historyEndpoint":    "/mod/live/history",
+-		"profilePersistence": "apk-owned; re-apply after backend restart",
++		"profilePersistence": "backend-persisted per workspace; APK may re-apply atomically",
+ 		"reasoningPolicy":    "hidden-chain-never-exported; use live plans/actions/results",
+ 	})
+ }
+ 
+@@ -361,5 +361,6 @@ func (s *Server) modProjectSet(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 	s.modHub.Emit("project.profile.updated", map[string]any{"profile": snap, "workspace": s.modWorkspacePath()})
++	s.persistModAppStateBestEffort()
+ 	writeJSON(w, map[string]any{"profile": snap, "tools": s.modToolViews(), "environment": s.modEnvironmentSnapshot(r.Context(), false)})
+ }
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index 85108e1..fc3bd48 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -68,6 +68,11 @@ type Server struct {
+ 	modMu       sync.RWMutex
+ 	modTaskGate modTaskCostGateStatus
+ 	modEnv      modEnvironmentSnapshot
++	// v0.8 persists APK-owned policy per workspace so backend restarts/workspace
++	// supervisor handoffs do not reset the user budget or tool/profile policy.
++	modPersistMu   sync.Mutex
++	modPersistPath string
++	modPersistErr  string
+ 	// modToolDecisions persists APK/session tool overrides across native model rebuilds.
+ 	modToolDecisions map[string]string
+ 	// buildController builds the replacement controller during a model switch.
+@@ -131,6 +136,9 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 	}
+ 	s.modCycle = efficiency.NewRepairCycle(s.modRouter, s.modGov, cache)
+ 	s.modCycle.SetRollback(func(reason string) error { return s.modRollbackLatestCode(reason) })
++	// Restore only APK-owned policy. Native skills/instruction files remain owned
++	// by Reasonix itself. A corrupt state is fail-closed and reported in bootstrap.
++	s.loadModAppState()
+ 	bc.SetEventObserver(s.observeCoreEvent)
+ 	if cfg, err := config.Load(); err == nil {
+ 		bc.SetDisplayCurrency(cfg.ExplicitDisplayCurrency())
+@@ -597,6 +605,14 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("POST /mod/recovery/rollback-last", s.modRecoveryRollbackLast)
+ 	mux.HandleFunc("GET /mod/events", s.modEvents)
+ 	mux.HandleFunc("GET /mod/live/history", s.modLiveHistory)
++	// v0.8 single control-plane surface for the Android APK. Task routes are
++	// aliases to the native submit/cancel handlers, not a second agent loop.
++	mux.HandleFunc("GET /mod/app/bootstrap", s.modAppBootstrap)
++	mux.HandleFunc("POST /mod/app/apply", s.modAppApply)
++	mux.HandleFunc("POST /mod/app/task/start", s.submit)
++	mux.HandleFunc("POST /mod/app/task/stop", s.cancel)
++	mux.HandleFunc("GET /mod/app/persistence", s.modAppPersistenceGet)
++	mux.HandleFunc("POST /mod/app/persistence/save", s.modAppPersistenceSave)
+ 	mux.HandleFunc("GET /sessions", s.sessions)
+ 	mux.HandleFunc("GET /skills", s.skills)
+ 	mux.HandleFunc("GET /todos", s.todos)
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index b81ca2d..c9af18a 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,61 +5,70 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/24] Unit tests: Balance Mod core + APK bridge"
++echo "[1/28] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/24] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++echo "[2/28] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
+ 
+-echo "[3/24] Failure cache: verified-only persistence + corruption recovery"
++echo "[3/28] Failure cache: verified-only persistence + corruption recovery"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
+ 
+-echo "[4/24] Context/patch economy: log reducer + patch governor"
++echo "[4/28] Context/patch economy: log reducer + patch governor"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
+ 
+-echo "[5/24] Unified repair cycle: verifier -> router -> cache"
++echo "[5/28] Unified repair cycle: verifier -> router -> cache"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestVerificationReceiptRequiresHostEvidence|TestRepairCycleFlashFlashProFlashAndVerifiedCache)$' -count=1
+ 
+-echo "[6/24] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
++echo "[6/28] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleDrivenByOfflineMockProvider$' -count=1
+ 
+-echo "[7/24] Recovery policy: regression/oversize rollback + fail-closed conflict"
++echo "[7/28] Recovery policy: regression/oversize rollback + fail-closed conflict"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleRollback' -count=1
+ 
+-echo "[8/24] APK cycle/recovery API integration"
++echo "[8/28] APK cycle/recovery API integration"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModCycleAPIAndHostRepairWiring|TestModRecoveryAPIIsFailClosedWithoutCheckpoint)$' -count=1
+ 
+-echo "[9/24] Execution router: model slots + immediate KZT admission re-check"
++echo "[9/28] Execution router: model slots + immediate KZT admission re-check"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouter' -count=1
+ 
+-echo "[10/24] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
++echo "[10/28] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModExecutionRouterUsesNativeServeModelSwitch$' -count=1
+ 
+-echo "[11/24] APK execution config/status contract"
++echo "[11/28] APK execution config/status contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModExecutionAPIIsStrictAndAPKVisible|TestModStatusExposesTypedAPKSurface)$' -count=1
+ 
+-echo "[12/24] Universal agent control: native per-tool allow/ask/deny + schema trim"
++echo "[12/28] Universal agent control: native per-tool allow/ask/deny + schema trim"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control ./internal/tool -run '^(TestSessionToolDecisions|TestSessionHiddenTools)' -count=1
+ 
+-echo "[13/24] APK agent/tools API contract"
++echo "[13/28] APK agent/tools API contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAgentToolsAPIUsesNativeRuntimePolicy$' -count=1
+ 
+-echo "[14/24] APK instructions + workspace file bridge"
++echo "[14/28] APK instructions + workspace file bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModInstructionsAndWorkspaceFileAPI|TestModWorkspaceFileRejectsTraversal)$' -count=1
+ 
+-echo "[15/24] Provider-agnostic project profile"
++echo "[15/28] Provider-agnostic project profile"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestProjectProfile' -count=1
+ 
+-echo "[16/24] Capability Registry + Chat/Agent mode + Tool Packs"
++echo "[16/28] Capability Registry + Chat/Agent mode + Tool Packs"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProjectChatModeHidesMutatingToolsAndRestoresAgentMode|TestModProjectToolPackRestrictsSurfaceAndManualDenySurvives|TestModEnvironmentAndProjectContract)$' -count=1
+ 
+-echo "[17/24] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
++echo "[17/28] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModLive' -count=1
+ 
+-echo "[18/24] Native Reasonix completion gate regression test"
++echo "[18/28] Restart-safe KZT ledger persistence"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestBudgetPersistentState' -count=1
++
++echo "[19/28] APK bootstrap + atomic apply + restart persistence"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModApp' -count=1
++
++echo "[20/28] Debian Android backend supervisor syntax"
++bash -n ./scripts/reasonix_android_backend.sh
++
++echo "[21/28] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[19/24] Build CLI only (skip example plugin)"
++echo "[22/28] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -85,7 +94,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[20/24] Offline normal tool-loop"
++echo "[23/28] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+@@ -112,7 +121,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[21/24] Offline anti-loop intervention"
++echo "[24/28] Offline anti-loop intervention"
+ LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+@@ -120,20 +129,27 @@ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+   exit 1
+ fi
+ 
+-echo "[22/24] Universal agent-control contract summary"
++echo "[25/28] Universal agent-control contract summary"
+ echo "  - workspace root + confined file browser: PASS"
+ echo "  - per-tool allow/ask/deny via native gate: PASS"
+ echo "  - instruction editor via native memory docs: PASS"
+ echo "  - skill management surface: compiled in core serve tests"
+ 
+-echo "[23/24] Universal APK protocol summary"
++echo "[26/28] Universal APK protocol summary"
+ echo "  - dynamic Capability Registry + Tool Packs: PASS"
+ echo "  - Chat mode denies mutating tools without creating a second agent: PASS"
+ echo "  - APK environment endpoint reuses Reasonix native probes/cache + project markers: PASS"
+ echo "  - project profile is provider-agnostic and APK-replayable: PASS"
+ echo "  - live event history exposes actions/diffs/results but not hidden reasoning: PASS"
+ 
+-echo "[24/24] PASS — no provider API key/network was used"
++echo "[27/28] APK supervisor/control-plane summary"
++echo "  - bootstrap + atomic settings apply: PASS"
++echo "  - task start/stop aliases reuse native submit/cancel: PASS"
++echo "  - workspace-scoped policy survives backend restart: PASS"
++echo "  - KZT/Pro spend ledger survives restart: PASS"
++echo "  - Debian Android supervisor wrapper syntax: PASS"
++
++echo "[28/28] PASS — no provider API key/network was used"
+ echo "  - v0.1 KZT budget/resource telemetry: PASS"
+ echo "  - v0.2 native anti-loop/completion telemetry: PASS"
+ echo "  - v0.3 router/cache/log/patch modules: PASS"
+@@ -141,4 +157,5 @@ echo "  - v0.4 unified repair cycle + native rollback adapter: PASS"
+ echo "  - v0.5 provider-agnostic execution router + native model switching: PASS"
+ echo "  - v0.6 universal APK agent control + workspace bridge: PASS"
+ echo "  - v0.7 capability/environment/project/live APK protocol: PASS"
+-echo "BALANCE_MOD_V07_SMOKE_PASS"
++echo "  - v0.8 APK control plane + restart-safe persistence + supervisor: PASS"
++echo "BALANCE_MOD_V08_SMOKE_PASS"
+diff --git a/scripts/reasonix_android_backend.sh b/scripts/reasonix_android_backend.sh
+new file mode 100755
+index 0000000..270e83c
+--- /dev/null
++++ b/scripts/reasonix_android_backend.sh
+@@ -0,0 +1,99 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Minimal Debian-side supervisor for the future Android APK. It intentionally
++# owns only the Reasonix process; all agent/model/tool policy stays in Reasonix.
++CMD="${1:-status}"
++WORKSPACE="${2:-$PWD}"
++STATE_DIR="${REASONIX_ANDROID_STATE_DIR:-$HOME/.reasonix/balance/android-backend}"
++PORT="${REASONIX_ANDROID_PORT:-8787}"
++BIN="${REASONIX_BIN:-$HOME/DeepSeek-Reasonix/bin/reasonix}"
++PID_FILE="$STATE_DIR/backend.pid"
++TOKEN_FILE="$STATE_DIR/backend.token"
++WORKSPACE_FILE="$STATE_DIR/workspace"
++LOG_FILE="$STATE_DIR/backend.log"
++
++mkdir -p "$STATE_DIR"
++chmod 700 "$STATE_DIR" 2>/dev/null || true
++
++is_running() {
++  [[ -f "$PID_FILE" ]] || return 1
++  local pid
++  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
++  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
++  kill -0 "$pid" 2>/dev/null
++}
++
++make_token() {
++  umask 077
++  if [[ ! -s "$TOKEN_FILE" ]]; then
++    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$TOKEN_FILE"
++  fi
++  chmod 600 "$TOKEN_FILE" 2>/dev/null || true
++}
++
++print_status() {
++  if is_running; then
++    printf 'RUNNING pid=%s port=%s workspace=%s token_file=%s log=%s\n' \
++      "$(cat "$PID_FILE")" "$PORT" "$(cat "$WORKSPACE_FILE" 2>/dev/null || true)" "$TOKEN_FILE" "$LOG_FILE"
++  else
++    printf 'STOPPED port=%s token_file=%s log=%s\n' "$PORT" "$TOKEN_FILE" "$LOG_FILE"
++  fi
++}
++
++case "$CMD" in
++  start)
++    if is_running; then print_status; exit 0; fi
++    [[ -x "$BIN" ]] || { echo "ERROR: reasonix binary not found: $BIN" >&2; exit 2; }
++    [[ -d "$WORKSPACE" ]] || { echo "ERROR: workspace not found: $WORKSPACE" >&2; exit 2; }
++    WORKSPACE="$(cd "$WORKSPACE" && pwd -P)"
++    make_token
++    TOKEN="$(cat "$TOKEN_FILE")"
++    printf '%s\n' "$WORKSPACE" > "$WORKSPACE_FILE"
++    chmod 600 "$WORKSPACE_FILE" 2>/dev/null || true
++    (
++      cd "$WORKSPACE"
++      nohup "$BIN" serve --addr "127.0.0.1:$PORT" --auth token --token "$TOKEN" \
++        </dev/null >>"$LOG_FILE" 2>&1 &
++      echo $! > "$PID_FILE"
++    )
++    sleep 0.25
++    if ! is_running; then
++      echo "ERROR: backend exited during startup" >&2
++      tail -n 30 "$LOG_FILE" >&2 || true
++      exit 3
++    fi
++    print_status
++    ;;
++  stop)
++    if is_running; then
++      pid="$(cat "$PID_FILE")"
++      kill "$pid" 2>/dev/null || true
++      for _ in 1 2 3 4 5 6 7 8 9 10; do
++        kill -0 "$pid" 2>/dev/null || break
++        sleep 0.1
++      done
++      kill -9 "$pid" 2>/dev/null || true
++    fi
++    rm -f "$PID_FILE"
++    print_status
++    ;;
++  restart)
++    "$0" stop "$WORKSPACE" >/dev/null
++    exec "$0" start "$WORKSPACE"
++    ;;
++  status)
++    print_status
++    ;;
++  token)
++    make_token
++    cat "$TOKEN_FILE"
++    ;;
++  log)
++    tail -n "${REASONIX_ANDROID_LOG_LINES:-80}" "$LOG_FILE" 2>/dev/null || true
++    ;;
++  *)
++    echo "Usage: $0 {start|stop|restart|status|token|log} [workspace]" >&2
++    exit 2
++    ;;
++esac

@@ -1,0 +1,732 @@
+REASONIX MOBILE 3.0 — APK BUILD / INTEGRATION / VERIFY MASTER PROMPT
+DATE: 2026-08-21
+MODE: SINGLE OPENCODE PRINCIPAL ANDROID + REASONIX ENGINEER
+PROJECT: EXISTING DEEPSEEK-REASONIX / REASONIX MOBILE
+PRIMARY GOAL: PRODUCE THE REAL REASONIX MOBILE 3.0 APK FROM THE EXISTING LINEAGE
+
+============================================================
+0. ABSOLUTE PRODUCT RULE
+============================================================
+
+DO NOT START A RANDOM NEW ANDROID APP.
+DO NOT CREATE A SECOND AGENT ENGINE INSIDE THE APK.
+DO NOT THROW AWAY THE EXISTING REASONIX MOBILE LINEAGE.
+DO NOT REWRITE THE ALREADY-VALIDATED REASONIX 3.0 CORE WITHOUT A PROVEN APK-INTEGRATION ROOT CAUSE.
+
+Product architecture remains:
+
+Android APK / WebView UI
+→ stable localhost mobile bridge
+→ authenticated Reasonix Serve
+→ Reasonix Controller / Agent
+→ Balance Mod
+→ Tools / Skills / MCP
+→ provider APIs
+→ Reasonix 3.0 Swarm where requested
+
+The APK is the mobile control plane.
+Reasonix remains the runtime.
+
+This run is specifically:
+
+FIND REAL MOBILE SOURCE
+→ VERIFY LINEAGE
+→ INTEGRATE CURRENT REASONIX 3.0 CONTRACTS
+→ BUILD REAL APK 3.0
+→ VERIFY APK
+→ COPY TO DOWNLOADS
+→ PREPARE MANUAL DEVICE TEST
+
+============================================================
+1. REQUIRED LOCAL SKILL / TOOLS
+============================================================
+
+Read completely first:
+
+/root/reasonix-android-tools/SKILL.md
+
+Then:
+
+source /root/reasonix-android-tools/env.sh
+reasonix-toolchain-check
+
+Persistent helper commands:
+
+reasonix-toolchain-check
+reasonix-apk-verify
+reasonix-apk-copy
+reasonix-backend-probe
+
+If a build tool is missing:
+- search existing filesystem/toolchains first;
+- reuse an existing proven mobile build pipeline if present;
+- install only a compatible missing package where possible;
+- never silently use an architecture-incompatible binary;
+- record TOOLING_BLOCKED only after evidence-based attempts fail.
+
+ADB/UI automation is NOT required for this build pass.
+Do not block APK creation because ADB is unavailable.
+
+============================================================
+2. CURRENT REASONIX 3.0 BASELINE — REVERIFY
+============================================================
+
+Read first:
+
+docs/REASONIX_3_MORNING_FINAL_REPORT.md
+
+Known from the completed morning run, subject to re-verification:
+
+- Existing repo: /root/DeepSeek-Reasonix
+- Reasonix 3.0 Swarm implementation exists.
+- Morning run completed M0→M19 and exited rc=0.
+- BALANCE_MOD_V20_REAL_GATE_PASS
+- M5_REAL_CHAT_PASS
+- M6_REAL_TOOL_PASS
+- M7_REAL_APPROVAL_PASS
+- M9_REAL_SWARM_PASS
+- M10_CANCEL_RECOVERY_PASS
+- full Go suite reported 124/124 packages passing.
+- automatic Flash↔Pro escalation remained NOT_VERIFIED.
+- Kimi/heterogeneous runtime remained TESTING_BLOCKED.
+- APK/voice remained READY_FOR_DEVICE_TEST.
+
+Do not claim these as current PASS until relevant artifacts/reports are read.
+
+============================================================
+3. KNOWN MOBILE LINEAGE TO VERIFY
+============================================================
+
+Known latest APK artifact:
+
+/sdcard/Download/Reasonix-Mobile-v2.0.7-RC.apk
+
+Expected package from project handoff:
+
+com.reasonix.mobile.installfix
+
+Expected signing certificate SHA-256 from handoff:
+
+fdf18d0b9d5372d142caf4fe76598e761090db75b5c66165a41b0ce67c65e48c
+
+Known-good host architecture:
+
+ordinary Android Activity + WebView
+
+Historical failures that MUST NOT return:
+
+- NativeActivity → black screen
+- handwritten/manual DEX/bytecode hacks → crash
+- protocol field mismatch (`prompt` vs canonical `input`)
+- dead UI controls
+- approval UI without real backend round-trip
+
+First verify the v2.0.7-RC APK:
+
+reasonix-apk-verify \
+  /sdcard/Download/Reasonix-Mobile-v2.0.7-RC.apk \
+  com.reasonix.mobile.installfix \
+  fdf18d0b9d5372d142caf4fe76598e761090db75b5c66165a41b0ce67c65e48c
+
+If artifact evidence contradicts the handoff:
+STOP package/signing migration work and report the contradiction before changing lineage.
+
+============================================================
+4. FIND THE REAL MOBILE SOURCE — DO NOT GUESS
+============================================================
+
+Search relevant local locations, including:
+
+/root
+/root/DeepSeek-Reasonix
+/root/reasonix-mobile-*
+/sdcard/Download
+
+Find source candidates by evidence:
+
+- AndroidManifest.xml
+- MainActivity.java / MainActivity.kt
+- package com.reasonix.mobile.installfix
+- WebView initialization
+- localhost / 37914 references
+- v2.0.7/versionCode/versionName markers
+- assets/index.html or equivalent frontend
+- keystore/signing scripts
+- APK build scripts
+- v2.0.2/v2.0.5/v2.0.7 lineage markers
+- canonical task field `input`
+- current backend route names
+
+Classify every candidate:
+
+EXACT_SOURCE_LINEAGE
+LIKELY_PREDECESSOR
+UNRELATED
+NOT_VERIFIED
+
+Do not choose by filename alone.
+
+If exact v2.0.7 source exists:
+use it.
+
+If exact source does not exist:
+use the nearest evidence-backed predecessor and perform a CONTROLLED RECONSTRUCTION using:
+- verified v2.0.7 APK artifact,
+- current Reasonix mobile/backend contracts,
+- package/signing lineage,
+- existing source/assets/build scripts.
+
+If reconstruction is required, document it explicitly.
+Never call reconstructed source “exact original source”.
+
+============================================================
+5. SIGNING LINEAGE GATE
+============================================================
+
+Find the real signing mechanism used by v2.0.7-RC.
+
+Search for:
+- .jks
+- .keystore
+- signing.properties
+- apksigner commands
+- build scripts
+- environment variable references
+
+Never print private key/password values.
+
+Required outcome:
+
+SIGNING_LINEAGE_VERIFIED
+
+or, if original key material is genuinely unavailable:
+
+SIGNING_LINEAGE_BLOCKED
+
+Do NOT sign with a random new key and pretend the result is update-compatible.
+
+If original signing is unavailable but a build can still be produced:
+- use a clearly labeled non-update-compatible filename;
+- do not overwrite the final v3.0 release name;
+- report the limitation.
+
+============================================================
+6. CURRENT BACKEND / MOBILE CONTRACT AUDIT
+============================================================
+
+Read current Serve/backend/mobile source and the morning report.
+Resolve live contracts from current code, never from stale assumptions.
+
+At minimum verify exact routes/contracts for:
+
+- health/status
+- task submit
+- canonical JSON submit field
+- approval request / allow / deny
+- tool approval mode
+- plan
+- new/resume/fork/compact/summarize
+- projects
+- tools
+- Skills
+- MCP/plugins
+- model/provider selector
+- integration audit
+- Reasoning events
+- Activity/tool events
+- budget/progress events
+- Swarm:
+  start
+  current
+  get by id
+  history
+  cancel
+  completed-state read-back
+
+No guessed endpoint names.
+No guessed JSON fields.
+
+============================================================
+7. REASONIX MOBILE 3.0 UI CONTRACT
+============================================================
+
+The APK must expose the real current Reasonix runtime without duplicating it.
+
+MAIN CHAT
+- minimal/mostly empty initial screen
+- real history
+- real send
+- real errors
+- real reconnect state
+
+COMPOSER
++ | message | mic | send
+
+SIDEBAR
+New Chat
+Search
+Projects
+history
+
+PLUS MENU
+Hide secondary features here where practical:
+- project/files/photo/camera if actually supported
+- Skills
+- Tools
+- Plugins/MCP
+- rounds/checks/verify
+- system/developer options only where real
+
+THINKING
+- expandable
+- real provider-visible reasoning only
+- never fake Activity as model reasoning
+
+ACTIVITY
+- Codex-like real action timeline/cards
+- reads/edits/tools/tests/actions from real events
+- group repeated events where useful
+
+APPROVAL
+- compact Allow / Deny
+- real diff/context
+- backend round-trip
+- no repeated mutation before approval
+
+MODE
+- Chat / Agent only if current backend really supports both
+
+MODEL
+- compact selector
+- real readiness
+- hide/disable dead duplicate refs
+
+STATUS
+- tiny green backend status
+- tiny budget status
+- no dashboard clutter
+
+============================================================
+8. SWARM MOBILE UX — REAL 3.0 FEATURE
+============================================================
+
+Swarm must be first-class but minimal by default.
+
+Collapsed example:
+
+Working…
+Architect ✓
+Research ×2 ✓
+Coder ×2 …
+Tests …
+Verify …
+
+Expandable detail may show:
+- swarm ID
+- task graph/status
+- worker IDs/profiles
+- provider/model where useful
+- worker state
+- evidence state
+- failures
+- budget/usage
+- cancellation state
+
+Required real controls:
+- start swarm where product flow allows
+- view current swarm
+- view completed swarm
+- history
+- cancel
+
+No fake Swarm badge disconnected from API.
+
+Completed Swarm must remain readable after completion and app refresh/reopen where backend persistence supports it.
+
+============================================================
+9. PROJECTS / TOOLS / SKILLS / MCP
+============================================================
+
+Every visible function must map to a real primitive.
+
+PROJECTS
+- create/open/select
+- workspace/files binding where backend supports it
+- project/chat association
+
+TOOLS
+- real registry state
+- toggles only where backend supports them
+
+SKILLS
+- real detail/toggle where supported
+
+MCP/PLUGINS
+- real installed/configured state
+- no fake catalog state
+
+If a capability is not actually implemented:
+hide or disable it honestly rather than faking behavior.
+
+============================================================
+10. VOICE
+============================================================
+
+If voice source exists or is implemented now, target:
+
+WebView
+↔ normal Java/Kotlin JS bridge
+↔ Android SpeechRecognizer
+↔ composer
+
+Required:
+- RECORD_AUDIO permission
+- runtime permission request
+- start
+- stop
+- cancel
+- partial
+- final
+- error
+- repeat/retry
+
+DO NOT:
+- use NativeActivity
+- handcraft DEX
+- treat Web Speech fallback as the final native implementation
+
+Physical microphone behavior remains READY_FOR_DEVICE_TEST until manually observed.
+
+============================================================
+11. VISUAL CONTRACT
+============================================================
+
+Strict palette:
+- black
+- dark gray
+- gray
+- white
+- tiny green status only
+
+No neon.
+No decorative blue/purple gradients.
+No colorful dashboard.
+No clutter.
+
+Overall mechanics:
+ChatGPT-like minimal chat
++
+DeepSeek-like expandable Thinking
++
+Codex-like Activity/approvals
++
+Reasonix 3.0 Swarm capability
+
+Use proper Android touch targets.
+Keyboard must not cover critical composer controls.
+Back navigation must be intentional.
+
+============================================================
+12. DEAD UI / FALSE PASS AUDIT
+============================================================
+
+Audit all visible controls for:
+
+TODO
+FIXME
+empty handler
+href="#"
+fake onclick
+hardcoded success
+silent error
+mock production state
+fake loading
+unreachable dialog
+swallowed exception
+decorative button
+
+Required invariant:
+
+UI
+→ handler
+→ mobile bridge/backend
+→ real Reasonix primitive
+→ real result
+→ read-back/UI update
+
+No exceptions.
+
+============================================================
+13. BUILD STRATEGY
+============================================================
+
+Prefer the proven existing build path.
+
+Do not introduce an entirely new Android build system merely for style.
+
+If existing lineage uses Gradle:
+use existing wrapper/config.
+
+If existing lineage uses aapt2/d8/apksigner manually:
+reuse it carefully.
+
+Never use architecture-incompatible binaries.
+
+Before changes:
+- preserve rollback/reference to existing source/build scripts
+- identify current versionCode/versionName
+- identify package
+- identify signing path
+
+Target release filename after lineage verification:
+
+Reasonix-Mobile-v3.0.0.apk
+
+Do not overwrite v2.0.7-RC.
+
+============================================================
+14. VERSION / PACKAGE / CERTIFICATE
+============================================================
+
+Verify and report:
+
+package
+versionCode
+versionName
+launchable Activity
+minSdk
+targetSdk
+certificate SHA-256
+APK SHA-256
+
+Expected package:
+
+com.reasonix.mobile.installfix
+
+Expected cert:
+
+fdf18d0b9d5372d142caf4fe76598e761090db75b5c66165a41b0ce67c65e48c
+
+Artifact evidence overrides handoff assumptions.
+
+============================================================
+15. APK LOCAL VERIFICATION GATE
+============================================================
+
+After build run:
+
+reasonix-apk-verify <candidate.apk> \
+  com.reasonix.mobile.installfix \
+  fdf18d0b9d5372d142caf4fe76598e761090db75b5c66165a41b0ce67c65e48c
+
+Required evidence where tools exist:
+
+- ZIP integrity
+- AndroidManifest present
+- classes.dex present
+- resources.arsc present
+- package correct
+- launchable Activity present
+- alignment valid
+- APK signatures valid
+- signing cert lineage matches
+- SHA-256 recorded
+
+If a verifier tool is unavailable:
+mark that sub-gate NOT_VERIFIED.
+Do not silently PASS it.
+
+============================================================
+16. BACKEND INTEGRATION BEFORE DEVICE TEST
+============================================================
+
+Use localhost/backend tests to prove APK-facing contracts without ADB.
+
+At minimum:
+
+- stable bridge reachable
+- integration audit reachable/authenticated as required
+- canonical submit flow
+- approvals
+- tools/Skills/MCP
+- projects
+- Swarm start/current/history/cancel/read-back
+
+If mobile changes alter backend contracts:
+rerun affected Go/integration tests.
+
+Do not repeat paid provider tests if mobile-only changes cannot affect them.
+If an end-to-end protocol changed, rerun the minimum relevant real gate.
+
+============================================================
+17. COPY TO DOWNLOADS / MANUAL DEVICE QA
+============================================================
+
+After local verification:
+
+reasonix-apk-copy <verified.apk> Reasonix-Mobile-v3.0.0.apk
+
+Expected path:
+
+/sdcard/Download/Reasonix-Mobile-v3.0.0.apk
+
+Prepare this manual checklist:
+
+1. install/update
+2. launch
+3. backend indicator
+4. real chat message
+5. Thinking expand/collapse
+6. Activity timeline
+7. tool read
+8. mutation approval deny
+9. mutation approval allow
+10. project create/open
+11. swarm start
+12. swarm worker expansion
+13. swarm cancel
+14. completed swarm read-back
+15. close/reopen
+16. persistence
+17. voice permission + mic
+18. back/keyboard/scroll
+19. backend disconnect/reconnect/error state
+
+These remain READY_FOR_DEVICE_TEST until physically observed.
+
+============================================================
+18. ROOT-CAUSE RULE
+============================================================
+
+Every integration/build defect:
+
+SYMPTOM
+→ REPRODUCE
+→ RESPONSIBLE LAYER
+→ ROOT CAUSE
+→ INVARIANT
+→ MINIMAL FIX
+→ POSITIVE TEST
+→ NEGATIVE/REGRESSION TEST
+→ RELEASE GATE
+
+No symptom-only hacks.
+
+============================================================
+19. RELEASE ARTIFACTS
+============================================================
+
+Produce:
+
+1. verified APK candidate
+2. copied Downloads APK
+3. source/build location
+4. SHA-256
+5. signing certificate evidence
+6. rollback reference to v2.0.7-RC
+7. final report
+
+Do not delete old APKs.
+
+============================================================
+20. FINAL REPORT
+============================================================
+
+Write:
+
+docs/REASONIX_3_APK_BUILD_FINAL_REPORT.md
+
+Required sections:
+
+SOURCE_LINEAGE:
+SOURCE_CLASSIFICATION:
+V2_0_7_APK_VERIFIED:
+PACKAGE_LINEAGE:
+SIGNING_LINEAGE:
+TOOLCHAIN:
+BUILD_SYSTEM:
+FILES_CHANGED:
+MOBILE_BACKEND_CONTRACT:
+UI_IMPLEMENTATION:
+THINKING:
+ACTIVITY:
+APPROVAL:
+PROJECTS:
+TOOLS:
+SKILLS:
+MCP:
+SWARM_UI:
+VOICE:
+DEAD_UI_AUDIT:
+BACKEND_INTEGRATION:
+APK_BUILD:
+APK_VERIFY:
+PACKAGE:
+VERSION_CODE:
+VERSION_NAME:
+CERT_SHA256:
+APK_SHA256:
+DOWNLOADS_PATH:
+PASS:
+NOT_VERIFIED:
+TESTING_BLOCKED:
+READY_FOR_DEVICE_TEST:
+ROLLBACK:
+NEXT_SINGLE_ACTION:
+
+Also include:
+
+FEATURE | TEST | RESULT | EVIDENCE
+
+Never put physical UI behavior under PASS unless physically tested.
+
+============================================================
+21. COMPLETION CONDITION
+============================================================
+
+The run is DONE only when one of these evidence-backed outcomes exists:
+
+A. SUCCESS:
+- real mobile source lineage identified
+- package/signing lineage verified
+- Reasonix 3.0 contracts integrated
+- APK built
+- APK locally verified
+- copied to /sdcard/Download/Reasonix-Mobile-v3.0.0.apk
+- final report written
+- physical UI items marked READY_FOR_DEVICE_TEST
+
+B. BLOCKED:
+- one genuinely non-resolvable blocker is proven
+- exact evidence is recorded
+- no fake replacement artifact is presented as final
+- NEXT_SINGLE_ACTION is explicit
+
+============================================================
+FINAL DIRECTIVE
+============================================================
+
+This is NOT another Reasonix core rewrite.
+This is the REAL REASONIX MOBILE 3.0 BUILD PASS.
+
+Desired finish:
+
+EXISTING MOBILE LINEAGE
+→ CURRENT REASONIX 3.0 CONTRACT
+→ REAL SWARM UI/CONTROL
+→ REAL APPROVAL/TOOLS/PROJECTS INTEGRATION
+→ CORRECT PACKAGE/SIGNING
+→ VERIFIED APK
+→ /sdcard/Download/Reasonix-Mobile-v3.0.0.apk
+→ READY FOR MANUAL DEVICE QA
+
+If exact v2.0.7 source cannot be found:
+perform only an evidence-backed controlled reconstruction from the nearest verified lineage, document it, and preserve update/signing compatibility only if original signing material is actually available.
+
+BEGIN NOW:
+1. read /root/reasonix-android-tools/SKILL.md
+2. run reasonix-toolchain-check
+3. read docs/REASONIX_3_MORNING_FINAL_REPORT.md
+4. verify v2.0.7-RC APK lineage
+5. locate the real mobile source
+6. continue autonomously through final APK/report artifact.

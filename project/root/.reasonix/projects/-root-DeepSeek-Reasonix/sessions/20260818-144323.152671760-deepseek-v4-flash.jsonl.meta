@@ -1,0 +1,12 @@
+{
+  "id": "20260818-144323.152671760-deepseek-v4-flash",
+  "created_at": "2026-08-18T14:43:43.326653861Z",
+  "updated_at": "2026-08-18T14:48:14.027713129Z",
+  "model": "custom-api-deepseek-com/deepseek-v4-flash",
+  "revision": 9,
+  "content_digest": "3c75f8e78e569bef68e0abe197b9d87b9815b8ffadf3ae25255b69eadf496659",
+  "writer_id": "localhost-12370-461df98652c28aef",
+  "schema_version": 2,
+  "turns": 1,
+  "preview": "создай мне кликер"
+}

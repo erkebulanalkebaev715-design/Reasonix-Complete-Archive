@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "revision_known": true,
+  "content_digest": "0cb426d37c851c2d5c684dcb06c4e7b671e9308e88657fb3cc3f31f20f853e39",
+  "transcript_size": 6472,
+  "message_count": 9,
+  "authored_turns": 1,
+  "entries": [
+    {
+      "index": 0,
+      "offset": 0,
+      "length": 4529,
+      "role": "system",
+      "authored_turn": 0
+    },
+    {
+      "index": 1,
+      "offset": 4529,
+      "length": 306,
+      "role": "user",
+      "authored_turn": 1,
+      "starts_turn": true
+    },
+    {
+      "index": 2,
+      "offset": 4835,
+      "length": 157,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 3,
+      "offset": 4992,
+      "length": 224,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 4,
+      "offset": 5216,
+      "length": 157,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 5,
+      "offset": 5373,
+      "length": 224,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 6,
+      "offset": 5597,
+      "length": 157,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 7,
+      "offset": 5754,
+      "length": 641,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 8,
+      "offset": 6395,
+      "length": 77,
+      "role": "assistant",
+      "authored_turn": 1
+    }
+  ],
+  "updated_at": "2026-08-18T08:37:20.920118597Z"
+}

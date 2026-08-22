@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "workspace": "/tmp/tmp.AopKD98gs9",
+  "savedAtUnixMs": 1787046859563,
+  "profile": {
+    "mode": "agent",
+    "liveDetail": "project"
+  },
+  "approvalMode": "ask",
+  "budget": {
+    "config": {
+      "budgetKzt": 10,
+      "reservePercent": 20,
+      "proMaxPercent": 0,
+      "hardStop": true,
+      "fxKztPerUnit": {
+        "KZT": 1,
+        "USD": 461.39
+      }
+    },
+    "spentKzt": 0,
+    "proSpentKzt": 0,
+    "unpricedCalls": 0
+  },
+  "execution": {
+    "enabled": false
+  },
+  "orchestrator": {
+    "enabled": true,
+    "maxContinuations": 4,
+    "idleWaitSeconds": 15
+  },
+  "pendingPower": {
+    "id": "4c4f20b2eab700aaa6a6198a",
+    "strategyId": "native:deepseek-v20/deepseek-v4-flash",
+    "failureFingerprint": "eb816489c0d0fd9b7265c807",
+    "verification": {
+      "requiredChecks": 1,
+      "checksPassed": 0,
+      "checksFailed": 1,
+      "buildObserved": false,
+      "buildExitCode": 0
+    }
+  }
+}

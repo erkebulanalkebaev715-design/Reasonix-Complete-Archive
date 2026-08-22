@@ -1,0 +1,1109 @@
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+index ec392bc..4af1758 100644
+--- a/docs/BALANCE_MOD.md
++++ b/docs/BALANCE_MOD.md
+@@ -151,3 +151,40 @@ The next phase should bind universal workspace/tool/instruction permissions to
+ these execution phases so the future APK can choose project files, tools,
+ system/project instructions and model policy without moving control logic into
+ the Android UI.
++
++## v0.6 — Universal Agent Control / APK workspace contract
++
++v0.6 turns the existing Reasonix controller into the single universal backend
++surface the Android APK will drive. It deliberately reuses native Reasonix
++capabilities instead of creating an APK-only agent implementation.
++
++- `/mod/agent` — aggregate APK-safe control state.
++- `/mod/agent/tools` — enumerate tools and install ephemeral `allow|ask|deny`
++  overrides. The overrides feed the native Reasonix permission gate; explicit
++  upstream/config denies remain authoritative. Denied tools are also removed
++  from the provider schema to save prompt tokens, but indirect capability calls
++  still hit the same native deny gate.
++- `/mod/agent/skills` — enumerate skills and persist enable/disable choices via
++  the existing Reasonix skill configuration path. A toggle takes effect on the
++  next native controller rebuild.
++- `/mod/instructions` — edit recognized `REASONIX.md` / `AGENTS.md` /
++  `CLAUDE.md` instruction documents through Reasonix `MemoryControl.SaveDoc`.
++  This avoids arbitrary-file writes and preserves cache-first semantics: the
++  new text is queued to the next turn and folds into the cache-stable prefix on
++  the next session/rebuild.
++- `/mod/workspace` and `/mod/workspace/validate` — expose the active project
++  root and validate a future APK-selected root. Workspace switching is a
++  supervisor operation: stop/restart `reasonix serve` with the selected project
++  as CWD, rather than calling process-wide `chdir` inside a live agent.
++- `/mod/workspace/files` and `/mod/workspace/file` — symlink-aware, workspace-
++  confined browsing/text preview for the APK. No write endpoint is added; agent
++  writes continue through Reasonix tools, permission gates and checkpoints.
++
++Runtime tool overrides survive Flash/Pro native model switches because `serve`
++re-applies the APK/session policy after a controller rebuild. No provider API key
++is needed by the v0.6 smoke tests.
++
++`POST /mod/agent/reload` performs a same-model native controller rebuild. The
++APK uses it after changing skills or when it wants edited standing instructions
++folded into a fresh cache-stable prefix immediately; runtime tool overrides are
++re-applied to the replacement controller automatically.
+diff --git a/internal/control/approval.go b/internal/control/approval.go
+index dc4fc3e..972dfdd 100644
+--- a/internal/control/approval.go
++++ b/internal/control/approval.go
+@@ -736,3 +736,23 @@ func permissionRequestHookPayload(tool, subject string, args json.RawMessage) (s
+ 		return subject, args, true
+ 	}
+ }
++
++// setPolicy refreshes the policy snapshot used by approval bookkeeping after a
++// runtime-only APK tool policy change.
++func (a *approvalManager) setPolicy(p permission.Policy) {
++	a.mu.Lock()
++	a.policy = p
++	a.mu.Unlock()
++}
++
++// SetPolicy atomically refreshes the shared subagent policy and mode.
++func (g *SharedHeadlessGate) SetPolicy(p permission.Policy, mode string) {
++	if g == nil {
++		return
++	}
++	next := BuildHeadlessApprovalGate(p, mode)
++	g.mu.Lock()
++	g.policy = p
++	g.gate = next
++	g.mu.Unlock()
++}
+diff --git a/internal/control/controller.go b/internal/control/controller.go
+index fc15251..fa39e46 100644
+--- a/internal/control/controller.go
++++ b/internal/control/controller.go
+@@ -114,6 +114,9 @@ type Controller struct {
+ 	goalUsageTee *goalUsageTee
+ 	sink         event.Sink
+ 	policy       permission.Policy
++	// runtimeToolDecisions are ephemeral APK/session overrides. They never
++	// mutate user config: deny > ask > allow through the native permission gate.
++	runtimeToolDecisions map[string]permission.Decision
+ 	// subagentGate is the shared gate every headless-only sub-agent surface
+ 	// reads from (see Options.SubagentGate). Nil when the caller didn't build
+ 	// one — sub-agents then keep whatever gate they were constructed with.
+@@ -614,6 +617,7 @@ func New(opts Options) *Controller {
+ 		goalUsageTee:                      usageTee,
+ 		sink:                              sink,
+ 		policy:                            opts.Policy,
++		runtimeToolDecisions:              map[string]permission.Decision{},
+ 		subagentGate:                      opts.SubagentGate,
+ 		label:                             opts.Label,
+ 		modelRef:                          opts.ModelRef,
+@@ -2261,7 +2265,7 @@ func (p plannerPlanApprover) RunWithPlannerApproval(ctx context.Context, plan st
+ }
+ 
+ func (c *Controller) newInteractiveGate() *permission.Gate {
+-	policy := c.policy
++	policy := c.policyWithRuntimeToolDecisions(c.policy)
+ 	mode := c.approval.mode()
+ 	switch mode {
+ 	case ToolApprovalAuto, ToolApprovalYolo:
+@@ -2308,7 +2312,7 @@ func (c *Controller) allowLowRiskRemember(args json.RawMessage) bool {
+ }
+ 
+ func (c *Controller) newHeadlessGate(mode string) *freshHumanHeadlessGate {
+-	gate := BuildHeadlessApprovalGate(c.policy, mode)
++	gate := BuildHeadlessApprovalGate(c.policyWithRuntimeToolDecisions(c.policy), mode)
+ 	gate.allowLowRiskFreshAction = func(toolName string, args json.RawMessage) bool {
+ 		return toolName == memoryRememberTool && c.allowLowRiskRemember(args)
+ 	}
+diff --git a/internal/control/runtime_tool_policy.go b/internal/control/runtime_tool_policy.go
+new file mode 100644
+index 0000000..d1565f2
+--- /dev/null
++++ b/internal/control/runtime_tool_policy.go
+@@ -0,0 +1,98 @@
++package control
++
++import (
++	"fmt"
++	"sort"
++	"strings"
++
++	"reasonix/internal/permission"
++)
++
++// SessionToolDecisions returns APK/session-only tool policy overrides. The
++// values are allow|ask|deny. Config policy remains authoritative: an existing
++// explicit deny cannot be weakened by an APK allow.
++func (c *Controller) SessionToolDecisions() map[string]string {
++	out := map[string]string{}
++	if c == nil {
++		return out
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	for name, d := range c.runtimeToolDecisions {
++		out[name] = d.String()
++	}
++	return out
++}
++
++// SetSessionToolDecisions installs an ephemeral per-tool policy using the
++// native Reasonix permission gate. Denied tools are also removed from the
++// provider-visible schema to save prompt tokens, while capability resolution
++// remains gated and cannot bypass the deny.
++func (c *Controller) SetSessionToolDecisions(in map[string]string) error {
++	if c == nil {
++		return fmt.Errorf("controller is nil")
++	}
++	known := map[string]string{}
++	for _, e := range c.AllToolContractEntries() {
++		known[strings.ToLower(strings.TrimSpace(e.Name))] = e.Name
++	}
++	next := map[string]permission.Decision{}
++	hidden := []string{}
++	for raw, value := range in {
++		key := strings.ToLower(strings.TrimSpace(raw))
++		name, ok := known[key]
++		if !ok {
++			return fmt.Errorf("unknown tool: %s", strings.TrimSpace(raw))
++		}
++		switch strings.ToLower(strings.TrimSpace(value)) {
++		case "allow":
++			next[name] = permission.Allow
++		case "ask":
++			next[name] = permission.Ask
++		case "deny":
++			next[name] = permission.Deny
++			hidden = append(hidden, name)
++		default:
++			return fmt.Errorf("invalid decision for %s: use allow, ask, or deny", name)
++		}
++	}
++	sort.Strings(hidden)
++	c.mu.Lock()
++	c.runtimeToolDecisions = next
++	c.mu.Unlock()
++	if reg := c.mcp.registry(); reg != nil {
++		reg.SetSessionHiddenTools(hidden)
++	}
++	effective := c.policyWithRuntimeToolDecisions(c.policy)
++	c.approval.setPolicy(effective)
++	if c.subagentGate != nil {
++		c.subagentGate.SetPolicy(effective, c.approval.mode())
++	}
++	if c.writeAccess.interactive {
++		c.refreshInteractiveGate()
++	} else if c.executor != nil {
++		c.executor.SetGate(c.newHeadlessGate(c.approval.mode()))
++	}
++	return nil
++}
++
++func (c *Controller) policyWithRuntimeToolDecisions(base permission.Policy) permission.Policy {
++	c.mu.Lock()
++	rules := make(map[string]permission.Decision, len(c.runtimeToolDecisions))
++	for n, d := range c.runtimeToolDecisions {
++		rules[n] = d
++	}
++	c.mu.Unlock()
++	for name, d := range rules {
++		rule := permission.Rule{Tool: name}
++		switch d {
++		case permission.Deny:
++			base.Deny = append(base.Deny, rule)
++		case permission.Ask:
++			base.Ask = append(base.Ask, rule)
++		case permission.Allow:
++			base.SessionAllow = append(base.SessionAllow, rule)
++		}
++	}
++	return base
++}
+diff --git a/internal/control/runtime_tool_policy_test.go b/internal/control/runtime_tool_policy_test.go
+new file mode 100644
+index 0000000..308b3e2
+--- /dev/null
++++ b/internal/control/runtime_tool_policy_test.go
+@@ -0,0 +1,59 @@
++package control
++
++import (
++	"context"
++	"encoding/json"
++	"testing"
++
++	"reasonix/internal/permission"
++	"reasonix/internal/tool"
++)
++
++type runtimePolicyTestTool struct {
++	name string
++	ro   bool
++}
++
++func (t runtimePolicyTestTool) Name() string            { return t.name }
++func (t runtimePolicyTestTool) Description() string     { return "test tool" }
++func (t runtimePolicyTestTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
++func (t runtimePolicyTestTool) Execute(context.Context, json.RawMessage) (string, error) {
++	return "ok", nil
++}
++func (t runtimePolicyTestTool) ReadOnly() bool { return t.ro }
++
++func TestSessionToolDecisionsUseNativePermissionGateAndHideDeniedSchema(t *testing.T) {
++	reg := tool.NewRegistry()
++	reg.Add(runtimePolicyTestTool{name: "read_x", ro: true})
++	reg.Add(runtimePolicyTestTool{name: "write_x"})
++	c := New(Options{Registry: reg, Policy: permission.New("ask", nil, nil, nil)})
++	c.EnableInteractiveApproval()
++	if err := c.SetSessionToolDecisions(map[string]string{"read_x": "deny", "write_x": "allow"}); err != nil {
++		t.Fatal(err)
++	}
++	if reg.ProviderVisible("read_x") {
++		t.Fatal("denied tool must be hidden from provider schema")
++	}
++	if !reg.ProviderVisible("write_x") {
++		t.Fatal("allowed tool should remain provider-visible")
++	}
++	gate := c.newInteractiveGate()
++	allow, _, err := gate.Check(context.Background(), "read_x", json.RawMessage(`{}`), true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if allow {
++		t.Fatal("runtime deny did not reach native gate")
++	}
++	p := c.policyWithRuntimeToolDecisions(c.policy)
++	if got := p.Decide("write_x", false, json.RawMessage(`{}`)); got != permission.Allow {
++		t.Fatalf("write_x decision=%v", got)
++	}
++}
++
++func TestSessionToolDecisionsRejectUnknownTool(t *testing.T) {
++	c := New(Options{Registry: tool.NewRegistry()})
++	if err := c.SetSessionToolDecisions(map[string]string{"ghost": "deny"}); err == nil {
++		t.Fatal("expected unknown tool error")
++	}
++}
+diff --git a/internal/serve/mod_agent_control.go b/internal/serve/mod_agent_control.go
+new file mode 100644
+index 0000000..29b4094
+--- /dev/null
++++ b/internal/serve/mod_agent_control.go
+@@ -0,0 +1,373 @@
++package serve
++
++import (
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++
++	"reasonix/internal/memory"
++	"reasonix/internal/tool"
++)
++
++type modToolPolicyController interface {
++	AllToolContractEntries() []tool.ContractEntry
++	ToolContractEntries() []tool.ContractEntry
++	SessionToolDecisions() map[string]string
++	SetSessionToolDecisions(map[string]string) error
++}
++
++type modToolView struct {
++	Name            string `json:"name"`
++	Description     string `json:"description,omitempty"`
++	ReadOnly        bool   `json:"readOnly"`
++	ProviderVisible bool   `json:"providerVisible"`
++	Decision        string `json:"decision"`
++}
++
++type modSkillView struct {
++	Name        string `json:"name"`
++	Description string `json:"description,omitempty"`
++	Scope       string `json:"scope"`
++	RunAs       string `json:"runAs"`
++	ReadOnly    bool   `json:"readOnly"`
++	Enabled     bool   `json:"enabled"`
++}
++
++func (s *Server) modToolDecisionsSnapshot() map[string]string {
++	s.modMu.RLock()
++	defer s.modMu.RUnlock()
++	out := make(map[string]string, len(s.modToolDecisions))
++	for k, v := range s.modToolDecisions {
++		out[k] = v
++	}
++	return out
++}
++
++func (s *Server) setModToolDecisions(v map[string]string) {
++	s.modMu.Lock()
++	defer s.modMu.Unlock()
++	s.modToolDecisions = make(map[string]string, len(v))
++	for k, x := range v {
++		s.modToolDecisions[k] = x
++	}
++}
++
++func (s *Server) applyModToolDecisionsToCurrentController() error {
++	ctl, ok := s.ctl().(modToolPolicyController)
++	if !ok {
++		return fmt.Errorf("controller does not expose runtime tool policy")
++	}
++	return ctl.SetSessionToolDecisions(s.modToolDecisionsSnapshot())
++}
++
++func (s *Server) modAgentReload(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot reload agent while a turn is running", http.StatusConflict)
++		return
++	}
++	ref := currentModelRef(s.ctl())
++	if strings.TrimSpace(ref) == "" {
++		http.Error(w, "current model ref unavailable", http.StatusConflict)
++		return
++	}
++	if err := s.switchModel(r.Context(), ref); err != nil {
++		http.Error(w, "reload agent: "+err.Error(), http.StatusConflict)
++		return
++	}
++	s.modHub.Emit("agent.reloaded", map[string]any{"modelRef": currentModelRef(s.ctl()), "workspace": s.ctl().WorkspaceRoot()})
++	writeJSON(w, map[string]any{"ok": true, "modelRef": currentModelRef(s.ctl()), "workspace": s.ctl().WorkspaceRoot()})
++}
++
++func (s *Server) modAgentGet(w http.ResponseWriter, _ *http.Request) {
++	ctl := s.ctl()
++	writeJSON(w, map[string]any{
++		"workspace": ctl.WorkspaceRoot(), "modelRef": ctl.ModelRef(), "running": ctl.Running(),
++		"toolApprovalMode": ctl.ToolApprovalMode(), "tools": s.modToolViews(), "skills": s.modSkillViews(),
++		"instructions": s.modInstructionViews(false),
++	})
++}
++
++func (s *Server) modToolViews() []modToolView {
++	ctl, ok := s.ctl().(modToolPolicyController)
++	if !ok {
++		return nil
++	}
++	visible := map[string]bool{}
++	for _, e := range ctl.ToolContractEntries() {
++		visible[e.Name] = true
++	}
++	decisions := s.modToolDecisionsSnapshot()
++	out := []modToolView{}
++	for _, e := range ctl.AllToolContractEntries() {
++		d := decisions[e.Name]
++		if d == "" {
++			d = "inherit"
++		}
++		out = append(out, modToolView{Name: e.Name, Description: e.Description, ReadOnly: e.ReadOnly, ProviderVisible: visible[e.Name], Decision: d})
++	}
++	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
++	return out
++}
++
++func (s *Server) modAgentToolsGet(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, map[string]any{"tools": s.modToolViews(), "approvalMode": s.ctl().ToolApprovalMode()})
++}
++
++func (s *Server) modAgentToolsSet(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot change tools while a turn is running", http.StatusConflict)
++		return
++	}
++	var body struct {
++		Decisions    map[string]string `json:"decisions"`
++		ApprovalMode string            `json:"approvalMode,omitempty"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&body); err != nil {
++		http.Error(w, "invalid tool policy: "+err.Error(), http.StatusBadRequest)
++		return
++	}
++	if body.Decisions == nil {
++		body.Decisions = map[string]string{}
++	}
++	mode := strings.ToLower(strings.TrimSpace(body.ApprovalMode))
++	if mode != "" && mode != "ask" && mode != "auto" && mode != "yolo" {
++		http.Error(w, "approvalMode must be ask, auto, or yolo", http.StatusBadRequest)
++		return
++	}
++	ctl, ok := s.ctl().(modToolPolicyController)
++	if !ok {
++		http.Error(w, "runtime tool policy unavailable", http.StatusNotImplemented)
++		return
++	}
++	if err := ctl.SetSessionToolDecisions(body.Decisions); err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	s.setModToolDecisions(ctl.SessionToolDecisions())
++	if mode != "" {
++		s.ctl().SetToolApprovalMode(mode)
++	}
++	payload := map[string]any{"tools": s.modToolViews(), "approvalMode": s.ctl().ToolApprovalMode()}
++	s.modHub.Emit("agent.tools.updated", map[string]any{"count": len(body.Decisions), "approvalMode": s.ctl().ToolApprovalMode()})
++	writeJSON(w, payload)
++}
++
++func (s *Server) modSkillViews() []modSkillView {
++	ctl := s.ctl()
++	all := ctl.AllSkills()
++	out := make([]modSkillView, 0, len(all))
++	for _, sk := range all {
++		out = append(out, modSkillView{Name: sk.Name, Description: sk.Description, Scope: string(sk.Scope), RunAs: string(sk.RunAs), ReadOnly: sk.ReadOnly, Enabled: ctl.SkillEnabled(sk.Name)})
++	}
++	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
++	return out
++}
++func (s *Server) modAgentSkillsGet(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, map[string]any{"skills": s.modSkillViews()})
++}
++func (s *Server) modAgentSkillsSet(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot change skills while a turn is running", http.StatusConflict)
++		return
++	}
++	var body struct {
++		Name    string `json:"name"`
++		Enabled bool   `json:"enabled"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&body); err != nil || strings.TrimSpace(body.Name) == "" {
++		http.Error(w, "invalid skill request", http.StatusBadRequest)
++		return
++	}
++	if err := s.ctl().SetSkillEnabled(body.Name, body.Enabled); err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	s.modHub.Emit("agent.skill.updated", map[string]any{"name": body.Name, "enabled": body.Enabled, "takesEffect": "next-controller-rebuild"})
++	writeJSON(w, map[string]any{"ok": true, "name": body.Name, "enabled": body.Enabled, "takesEffect": "next-controller-rebuild"})
++}
++
++type modInstructionView struct {
++	Path  string `json:"path"`
++	Scope string `json:"scope"`
++	Body  string `json:"body,omitempty"`
++}
++
++func (s *Server) modInstructionViews(includeBody bool) []modInstructionView {
++	mem := s.ctl().Memory()
++	if mem == nil {
++		return nil
++	}
++	out := make([]modInstructionView, 0, len(mem.Docs))
++	for _, d := range mem.Docs {
++		v := modInstructionView{Path: d.Path, Scope: string(d.Scope)}
++		if includeBody {
++			v.Body = d.Body
++		}
++		out = append(out, v)
++	}
++	return out
++}
++func (s *Server) modInstructionsGet(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, map[string]any{"documents": s.modInstructionViews(true)})
++}
++func (s *Server) modInstructionsSet(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot edit instructions while a turn is running", http.StatusConflict)
++		return
++	}
++	var body struct {
++		Path string `json:"path"`
++		Body string `json:"body"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 512<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&body); err != nil {
++		http.Error(w, "invalid instruction request: "+err.Error(), http.StatusBadRequest)
++		return
++	}
++	if strings.TrimSpace(body.Path) == "" {
++		mem := s.ctl().Memory()
++		if mem == nil {
++			http.Error(w, "memory/instructions unavailable", http.StatusConflict)
++			return
++		}
++		body.Path = mem.DocPath(memory.ScopeProject)
++	}
++	written, err := s.ctl().SaveDoc(body.Path, body.Body)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	s.modHub.Emit("agent.instructions.updated", map[string]any{"path": written, "bytes": len(body.Body)})
++	writeJSON(w, map[string]any{"ok": true, "path": written, "applies": "next-turn-tail-and-next-session-prefix"})
++}
++
++func (s *Server) modWorkspaceGet(w http.ResponseWriter, _ *http.Request) {
++	root := s.modWorkspacePath()
++	writeJSON(w, map[string]any{"root": root, "switchContract": "APK supervisor restarts reasonix serve with selected directory as cwd", "liveSwitch": false})
++}
++func (s *Server) modWorkspaceValidate(w http.ResponseWriter, r *http.Request) {
++	var body struct {
++		Path string `json:"path"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&body); err != nil {
++		http.Error(w, "bad body", http.StatusBadRequest)
++		return
++	}
++	p, err := filepath.Abs(strings.TrimSpace(body.Path))
++	if err != nil {
++		http.Error(w, "invalid path", http.StatusBadRequest)
++		return
++	}
++	real, err := filepath.EvalSymlinks(p)
++	if err != nil {
++		http.Error(w, "workspace does not exist", http.StatusBadRequest)
++		return
++	}
++	st, err := os.Stat(real)
++	if err != nil || !st.IsDir() {
++		http.Error(w, "workspace is not a directory", http.StatusBadRequest)
++		return
++	}
++	writeJSON(w, map[string]any{"valid": true, "path": real, "restartRequired": real != s.modWorkspacePath()})
++}
++
++func (s *Server) resolveModWorkspaceExisting(rel string) (string, error) {
++	root, err := filepath.Abs(s.modWorkspacePath())
++	if err != nil {
++		return "", err
++	}
++	root, err = filepath.EvalSymlinks(root)
++	if err != nil {
++		return "", err
++	}
++	rel = filepath.Clean(strings.TrimSpace(rel))
++	if rel == "." {
++		rel = ""
++	}
++	if filepath.IsAbs(rel) {
++		return "", fmt.Errorf("absolute paths are not allowed")
++	}
++	cand := filepath.Join(root, rel)
++	real, err := filepath.EvalSymlinks(cand)
++	if err != nil {
++		return "", err
++	}
++	if real != root && !strings.HasPrefix(real, root+string(os.PathSeparator)) {
++		return "", fmt.Errorf("path outside workspace")
++	}
++	return real, nil
++}
++func (s *Server) modWorkspaceFiles(w http.ResponseWriter, r *http.Request) {
++	p, err := s.resolveModWorkspaceExisting(r.URL.Query().Get("path"))
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusForbidden)
++		return
++	}
++	st, err := os.Stat(p)
++	if err != nil || !st.IsDir() {
++		http.Error(w, "not a directory", http.StatusBadRequest)
++		return
++	}
++	ents, err := os.ReadDir(p)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	type item struct {
++		Name string `json:"name"`
++		Dir  bool   `json:"dir"`
++		Size int64  `json:"size,omitempty"`
++	}
++	out := []item{}
++	for i, e := range ents {
++		if i >= 300 {
++			break
++		}
++		v := item{Name: e.Name(), Dir: e.IsDir()}
++		if info, x := e.Info(); x == nil {
++			v.Size = info.Size()
++		}
++		out = append(out, v)
++	}
++	writeJSON(w, map[string]any{"path": p, "entries": out})
++}
++func (s *Server) modWorkspaceFile(w http.ResponseWriter, r *http.Request) {
++	p, err := s.resolveModWorkspaceExisting(r.URL.Query().Get("path"))
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusForbidden)
++		return
++	}
++	st, err := os.Stat(p)
++	if err != nil || st.IsDir() {
++		http.Error(w, "not a file", http.StatusBadRequest)
++		return
++	}
++	if st.Size() > 2<<20 {
++		http.Error(w, "file too large for APK text preview", http.StatusRequestEntityTooLarge)
++		return
++	}
++	f, err := os.Open(p)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	defer f.Close()
++	b, err := io.ReadAll(io.LimitReader(f, (2<<20)+1))
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	writeJSON(w, map[string]any{"path": p, "size": len(b), "text": string(b)})
++}
+diff --git a/internal/serve/mod_agent_control_test.go b/internal/serve/mod_agent_control_test.go
+new file mode 100644
+index 0000000..aabd919
+--- /dev/null
++++ b/internal/serve/mod_agent_control_test.go
+@@ -0,0 +1,127 @@
++package serve
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"reasonix/internal/config"
++	"reasonix/internal/control"
++	"reasonix/internal/memory"
++	"reasonix/internal/tool"
++)
++
++type modAgentTestTool struct {
++	name string
++	ro   bool
++}
++
++func (t modAgentTestTool) Name() string                                             { return t.name }
++func (t modAgentTestTool) Description() string                                      { return "APK test tool" }
++func (t modAgentTestTool) Schema() json.RawMessage                                  { return json.RawMessage(`{"type":"object"}`) }
++func (t modAgentTestTool) Execute(context.Context, json.RawMessage) (string, error) { return "ok", nil }
++func (t modAgentTestTool) ReadOnly() bool                                           { return t.ro }
++
++func newModAgentTestServer(t *testing.T) (*httptest.Server, string) {
++	t.Helper()
++	root := t.TempDir()
++	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("OLD RULE\n"), 0644); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello apk\n"), 0644); err != nil {
++		t.Fatal(err)
++	}
++	reg := tool.NewRegistry()
++	reg.Add(modAgentTestTool{name: "read_x", ro: true})
++	reg.Add(modAgentTestTool{name: "write_x"})
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, Registry: reg, WorkspaceRoot: root, Memory: memory.Load(memory.Options{CWD: root, UserDir: ""})})
++	return httptest.NewServer(New(ctrl, bc, config.ServeConfig{}).Handler()), root
++}
++
++func TestModAgentToolsAPIUsesNativeRuntimePolicy(t *testing.T) {
++	ts, _ := newModAgentTestServer(t)
++	defer ts.Close()
++	resp, err := http.Post(ts.URL+"/mod/agent/tools", "application/json", strings.NewReader(`{"decisions":{"read_x":"deny","write_x":"allow"},"approvalMode":"ask"}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		b, _ := io.ReadAll(resp.Body)
++		t.Fatalf("status=%d %s", resp.StatusCode, b)
++	}
++	got, err := http.Get(ts.URL + "/mod/agent/tools")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer got.Body.Close()
++	var body struct {
++		Tools []modToolView `json:"tools"`
++	}
++	if err := json.NewDecoder(got.Body).Decode(&body); err != nil {
++		t.Fatal(err)
++	}
++	seen := map[string]modToolView{}
++	for _, v := range body.Tools {
++		seen[v.Name] = v
++	}
++	if seen["read_x"].Decision != "deny" || seen["read_x"].ProviderVisible {
++		t.Fatalf("read_x=%+v", seen["read_x"])
++	}
++	if seen["write_x"].Decision != "allow" {
++		t.Fatalf("write_x=%+v", seen["write_x"])
++	}
++}
++
++func TestModInstructionsAndWorkspaceFileAPI(t *testing.T) {
++	ts, root := newModAgentTestServer(t)
++	defer ts.Close()
++	resp, err := http.Post(ts.URL+"/mod/instructions", "application/json", strings.NewReader(`{"path":"`+strings.ReplaceAll(filepath.Join(root, "AGENTS.md"), `\`, `\\`)+`","body":"NEW RULE\\n"}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		b, _ := io.ReadAll(resp.Body)
++		t.Fatalf("instruction status=%d %s", resp.StatusCode, b)
++	}
++	raw, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(raw), "NEW RULE") {
++		t.Fatalf("AGENTS.md=%q", raw)
++	}
++	got, err := http.Get(ts.URL + "/mod/workspace/file?path=hello.txt")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer got.Body.Close()
++	var fileBody map[string]any
++	if err := json.NewDecoder(got.Body).Decode(&fileBody); err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(fileBody["text"].(string), "hello apk") {
++		t.Fatalf("file=%v", fileBody)
++	}
++}
++
++func TestModWorkspaceFileRejectsTraversal(t *testing.T) {
++	ts, _ := newModAgentTestServer(t)
++	defer ts.Close()
++	resp, err := http.Get(ts.URL + "/mod/workspace/file?path=../secret.txt")
++	if err != nil {
++		t.Fatal(err)
++	}
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusForbidden {
++		t.Fatalf("status=%d want 403", resp.StatusCode)
++	}
++}
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index aee02c5..a558aeb 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -16,7 +16,7 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.5"
++const balanceModVersion = "balance-mod-v0.6"
+ 
+ // modEvent is a small, content-free machine event intended for the future
+ // Android client. Human logs stay on the ordinary Reasonix event stream; the
+@@ -167,6 +167,9 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 			"nativeRollback":   "reasonix-checkpoint-transaction-v0.4",
+ 			"executionRouter":  "native-model-switch+budget-admission-v0.5",
+ 			"providerAgnostic": "apk-configured-model-refs-v0.5",
++			"agentControl":     "workspace+tools+skills+instructions-v0.6",
++			"toolPolicy":       "native-permission-gate+schema-trim-v0.6",
++			"workspaceFiles":   "confined-read-preview-v0.6",
+ 		},
+ 	})
+ }
+@@ -463,6 +466,7 @@ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ 		"cycle":     s.modCycle.Snapshot(),
+ 		"execution": s.modExec.Snapshot(),
+ 		"recovery":  s.modRecoverySnapshot(),
++		"agent":     map[string]any{"workspace": s.ctl().WorkspaceRoot(), "toolOverrides": len(s.modToolDecisionsSnapshot()), "skills": len(s.modSkillViews())},
+ 	})
+ 	if len(initial) > 0 {
+ 		fmt.Fprintf(w, "data: %s\n\n", initial)
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index 4a6bc6d..3ca0e2b 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -66,6 +66,8 @@ type Server struct {
+ 	modHub      *modBroadcaster
+ 	modMu       sync.RWMutex
+ 	modTaskGate modTaskCostGateStatus
++	// modToolDecisions persists APK/session tool overrides across native model rebuilds.
++	modToolDecisions map[string]string
+ 	// buildController builds the replacement controller during a model switch.
+ 	// Nil in production (switchModel falls back to boot.Build); tests inject a
+ 	// fake so switchModel can be exercised without real provider IO.
+@@ -96,14 +98,15 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 		bc = NewBroadcaster()
+ 	}
+ 	s := &Server{
+-		ctrl:       ctrl,
+-		bc:         bc,
+-		modGov:     efficiency.NewGovernor(),
+-		modQuality: efficiency.NewQualityMonitor(),
+-		modRouter:  efficiency.NewEscalator(),
+-		modHub:     newModBroadcaster(),
+-		titles:     newTitleCache(ctrl.SessionDir()),
+-		auth:       newAuthGate(serveCfg),
++		ctrl:             ctrl,
++		bc:               bc,
++		modGov:           efficiency.NewGovernor(),
++		modQuality:       efficiency.NewQualityMonitor(),
++		modRouter:        efficiency.NewEscalator(),
++		modHub:           newModBroadcaster(),
++		modToolDecisions: map[string]string{},
++		titles:           newTitleCache(ctrl.SessionDir()),
++		auth:             newAuthGate(serveCfg),
+ 	}
+ 	// v0.5 execution routing stays disabled until explicitly configured. The
+ 	// switch adapter is the native serve model-switch path, so there is still one
+@@ -320,6 +323,10 @@ func (s *Server) switchModelLocked(ctx context.Context, ref string) error {
+ 	}
+ 	s.ctrl = newCtrl
+ 	s.mu.Unlock()
++	// Re-apply runtime-only APK tool policy to the replacement controller.
++	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
++		slog.Warn("serve: reapply Balance Mod tool policy", "err", err)
++	}
+ 	if s.modExec != nil {
+ 		s.modExec.ObserveCurrentModel(currentModelRef(newCtrl))
+ 	}
+@@ -566,6 +573,18 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("GET /mod/execution", s.modExecutionGet)
+ 	mux.HandleFunc("POST /mod/execution/config", s.modExecutionConfigure)
+ 	mux.HandleFunc("POST /mod/execution/reset", s.modExecutionReset)
++	mux.HandleFunc("GET /mod/agent", s.modAgentGet)
++	mux.HandleFunc("POST /mod/agent/reload", s.modAgentReload)
++	mux.HandleFunc("GET /mod/agent/tools", s.modAgentToolsGet)
++	mux.HandleFunc("POST /mod/agent/tools", s.modAgentToolsSet)
++	mux.HandleFunc("GET /mod/agent/skills", s.modAgentSkillsGet)
++	mux.HandleFunc("POST /mod/agent/skills", s.modAgentSkillsSet)
++	mux.HandleFunc("GET /mod/instructions", s.modInstructionsGet)
++	mux.HandleFunc("POST /mod/instructions", s.modInstructionsSet)
++	mux.HandleFunc("GET /mod/workspace", s.modWorkspaceGet)
++	mux.HandleFunc("POST /mod/workspace/validate", s.modWorkspaceValidate)
++	mux.HandleFunc("GET /mod/workspace/files", s.modWorkspaceFiles)
++	mux.HandleFunc("GET /mod/workspace/file", s.modWorkspaceFile)
+ 	mux.HandleFunc("GET /mod/recovery", s.modRecoveryGet)
+ 	mux.HandleFunc("POST /mod/recovery/rollback-last", s.modRecoveryRollbackLast)
+ 	mux.HandleFunc("GET /mod/events", s.modEvents)
+diff --git a/internal/tool/session_hidden_test.go b/internal/tool/session_hidden_test.go
+new file mode 100644
+index 0000000..c44985f
+--- /dev/null
++++ b/internal/tool/session_hidden_test.go
+@@ -0,0 +1,34 @@
++package tool
++
++import (
++	"context"
++	"encoding/json"
++	"testing"
++)
++
++type hiddenTestTool struct{ name string }
++
++func (t hiddenTestTool) Name() string                                             { return t.name }
++func (t hiddenTestTool) Description() string                                      { return "x" }
++func (t hiddenTestTool) Schema() json.RawMessage                                  { return json.RawMessage(`{"type":"object"}`) }
++func (t hiddenTestTool) Execute(context.Context, json.RawMessage) (string, error) { return "", nil }
++func (t hiddenTestTool) ReadOnly() bool                                           { return true }
++func TestSessionHiddenToolsOnlyTrimProviderSchema(t *testing.T) {
++	r := NewRegistry()
++	r.Add(hiddenTestTool{name: "a"})
++	r.Add(hiddenTestTool{name: "b"})
++	r.SetSessionHiddenTools([]string{"a"})
++	if r.ProviderVisible("a") {
++		t.Fatal("a visible")
++	}
++	if _, ok := r.Get("a"); !ok {
++		t.Fatal("hidden tool must remain resolvable for permission-gated capability path")
++	}
++	if got := len(r.Schemas()); got != 1 {
++		t.Fatalf("schemas=%d", got)
++	}
++	r.SetSessionHiddenTools(nil)
++	if !r.ProviderVisible("a") {
++		t.Fatal("clear hidden failed")
++	}
++}
+diff --git a/internal/tool/tool.go b/internal/tool/tool.go
+index ec8b2ba..ec2d740 100644
+--- a/internal/tool/tool.go
++++ b/internal/tool/tool.go
+@@ -291,12 +291,16 @@ type Registry struct {
+ 	// schema. Nil means every registered tool is provider-visible (tests and
+ 	// legacy direct construction).
+ 	providerVisible map[string]bool
+-	schemaRev       atomic.Uint64
++	// sessionHidden is a runtime-only deny projection used by APK/session
++	// policy. It trims denied tools from provider schemas without mutating the
++	// baseline providerVisible contract.
++	sessionHidden map[string]bool
++	schemaRev     atomic.Uint64
+ }
+ 
+ // NewRegistry returns an empty registry.
+ func NewRegistry() *Registry {
+-	return &Registry{tools: map[string]Tool{}, canon: map[string]json.RawMessage{}, suspended: map[string]bool{}}
++	return &Registry{tools: map[string]Tool{}, canon: map[string]json.RawMessage{}, suspended: map[string]bool{}, sessionHidden: map[string]bool{}}
+ }
+ 
+ // SetProviderVisibleTools restricts the provider-visible schema surface to the
+@@ -351,12 +355,45 @@ func (r *Registry) ProviderVisible(name string) bool {
+ }
+ 
+ func (r *Registry) isProviderVisibleLocked(name string) bool {
++	if r.sessionHidden[name] {
++		return false
++	}
+ 	if r.providerVisible == nil {
+ 		return true
+ 	}
+ 	return r.providerVisible[name]
+ }
+ 
++// SetSessionHiddenTools replaces the runtime-only provider-schema deny list.
++// Get/ResolveCall remain intact so the native permission gate is still the
++// authority for indirect use_capability dispatch.
++func (r *Registry) SetSessionHiddenTools(names []string) {
++	if r == nil {
++		return
++	}
++	next := map[string]bool{}
++	for _, name := range names {
++		if name = strings.TrimSpace(name); name != "" {
++			next[name] = true
++		}
++	}
++	r.mu.Lock()
++	changed := len(next) != len(r.sessionHidden)
++	if !changed {
++		for n := range next {
++			if !r.sessionHidden[n] {
++				changed = true
++				break
++			}
++		}
++	}
++	r.sessionHidden = next
++	if changed {
++		r.schemaRev.Add(1)
++	}
++	r.mu.Unlock()
++}
++
+ // Add inserts (or replaces) a tool, preserving first-seen order. The schema is
+ // canonicalized once here — it never changes after registration, so Schemas()
+ // (called every turn) reuses the result instead of re-marshaling.
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index 8e5f04d..a540bf8 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,43 +5,52 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/16] Unit tests: Balance Mod core + APK bridge"
++echo "[1/20] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/16] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++echo "[2/20] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
+ 
+-echo "[3/16] Failure cache: verified-only persistence + corruption recovery"
++echo "[3/20] Failure cache: verified-only persistence + corruption recovery"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
+ 
+-echo "[4/16] Context/patch economy: log reducer + patch governor"
++echo "[4/20] Context/patch economy: log reducer + patch governor"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
+ 
+-echo "[5/16] Unified repair cycle: verifier -> router -> cache"
++echo "[5/20] Unified repair cycle: verifier -> router -> cache"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestVerificationReceiptRequiresHostEvidence|TestRepairCycleFlashFlashProFlashAndVerifiedCache)$' -count=1
+ 
+-echo "[6/16] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
++echo "[6/20] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleDrivenByOfflineMockProvider$' -count=1
+ 
+-echo "[7/16] Recovery policy: regression/oversize rollback + fail-closed conflict"
++echo "[7/20] Recovery policy: regression/oversize rollback + fail-closed conflict"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleRollback' -count=1
+ 
+-echo "[8/16] APK cycle/recovery API integration"
++echo "[8/20] APK cycle/recovery API integration"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModCycleAPIAndHostRepairWiring|TestModRecoveryAPIIsFailClosedWithoutCheckpoint)$' -count=1
+ 
+-echo "[9/16] Execution router: model slots + immediate KZT admission re-check"
++echo "[9/20] Execution router: model slots + immediate KZT admission re-check"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouter' -count=1
+ 
+-echo "[10/16] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
++echo "[10/20] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModExecutionRouterUsesNativeServeModelSwitch$' -count=1
+ 
+-echo "[11/16] APK execution config/status contract"
++echo "[11/20] APK execution config/status contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModExecutionAPIIsStrictAndAPKVisible|TestModStatusExposesTypedAPKSurface)$' -count=1
+ 
+-echo "[12/16] Native Reasonix completion gate regression test"
++echo "[12/20] Universal agent control: native per-tool allow/ask/deny + schema trim"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/control ./internal/tool -run '^(TestSessionToolDecisions|TestSessionHiddenTools)' -count=1
++
++echo "[13/20] APK agent/tools API contract"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAgentToolsAPIUsesNativeRuntimePolicy$' -count=1
++
++echo "[14/20] APK instructions + workspace file bridge"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModInstructionsAndWorkspaceFileAPI|TestModWorkspaceFileRejectsTraversal)$' -count=1
++
++echo "[15/20] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[13/16] Build CLI only (skip example plugin)"
++echo "[16/20] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -67,7 +76,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[14/16] Offline normal tool-loop"
++echo "[17/20] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+@@ -94,7 +103,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[15/16] Offline anti-loop intervention"
++echo "[18/20] Offline anti-loop intervention"
+ LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+@@ -102,10 +111,17 @@ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+   exit 1
+ fi
+ 
+-echo "[16/16] PASS — no provider API key/network was used"
++echo "[19/20] APK universal control contract summary"
++echo "  - workspace root + confined file browser: PASS"
++echo "  - per-tool allow/ask/deny via native gate: PASS"
++echo "  - instruction editor via native memory docs: PASS"
++echo "  - skill management surface: compiled in core serve tests"
++
++echo "[20/20] PASS — no provider API key/network was used"
+ echo "  - v0.1 KZT budget/resource telemetry: PASS"
+ echo "  - v0.2 native anti-loop/completion telemetry: PASS"
+ echo "  - v0.3 router/cache/log/patch modules: PASS"
+ echo "  - v0.4 unified repair cycle + native rollback adapter: PASS"
+ echo "  - v0.5 provider-agnostic execution router + native model switching: PASS"
+-echo "BALANCE_MOD_V05_SMOKE_PASS"
++echo "  - v0.6 universal APK agent control + workspace bridge: PASS"
++echo "BALANCE_MOD_V06_SMOKE_PASS"

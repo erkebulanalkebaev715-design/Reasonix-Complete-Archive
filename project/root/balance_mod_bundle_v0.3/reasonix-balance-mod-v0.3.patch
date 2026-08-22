@@ -1,0 +1,1053 @@
+diff --git a/internal/efficiency/failure_cache.go b/internal/efficiency/failure_cache.go
+new file mode 100644
+index 0000000..876f473
+--- /dev/null
++++ b/internal/efficiency/failure_cache.go
+@@ -0,0 +1,213 @@
++package efficiency
++
++import (
++	"bufio"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"hash/crc32"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"sync"
++	"time"
++)
++
++// FailureRecord stores only a compact proven repair hint. It is intentionally
++// append-only; malformed/corrupt records are skipped during recovery rather
++// than making the whole history unreadable.
++type FailureRecord struct {
++	Fingerprint string   `json:"fingerprint"`
++	Environment string   `json:"environment,omitempty"`
++	Files       []string `json:"files,omitempty"`
++	FixHint     string   `json:"fixHint"`
++	Verified    bool     `json:"verified"`
++	SeenUnixMS  int64    `json:"seenUnixMs"`
++}
++
++type failureEnvelope struct {
++	Payload json.RawMessage `json:"payload"`
++	CRC32   string          `json:"crc32"`
++}
++
++type FailureCacheStats struct {
++	Records        int `json:"records"`
++	CorruptSkipped int `json:"corruptSkipped"`
++}
++
++type FailureCache struct {
++	mu      sync.Mutex
++	path    string
++	records map[string][]FailureRecord
++	corrupt int
++}
++
++func OpenFailureCache(path string) (*FailureCache, error) {
++	c := &FailureCache{path: path, records: make(map[string][]FailureRecord)}
++	if strings.TrimSpace(path) == "" {
++		return c, nil
++	}
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		return nil, err
++	}
++	f, err := os.Open(path)
++	if errors.Is(err, os.ErrNotExist) {
++		return c, nil
++	}
++	if err != nil {
++		return nil, err
++	}
++	defer f.Close()
++	s := bufio.NewScanner(f)
++	buf := make([]byte, 0, 64*1024)
++	s.Buffer(buf, 1024*1024)
++	for s.Scan() {
++		var env failureEnvelope
++		if json.Unmarshal(s.Bytes(), &env) != nil || !validCRC(env) {
++			c.corrupt++
++			continue
++		}
++		var rec FailureRecord
++		if json.Unmarshal(env.Payload, &rec) != nil || strings.TrimSpace(rec.Fingerprint) == "" {
++			c.corrupt++
++			continue
++		}
++		c.records[rec.Fingerprint] = append(c.records[rec.Fingerprint], rec)
++	}
++	return c, s.Err()
++}
++
++func (c *FailureCache) PutVerified(rec FailureRecord) error {
++	if c == nil || !rec.Verified || strings.TrimSpace(rec.Fingerprint) == "" {
++		return nil
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if rec.SeenUnixMS == 0 {
++		rec.SeenUnixMS = time.Now().UnixMilli()
++	}
++	rec.Files = normalizeStringSet(rec.Files)
++	payload, err := json.Marshal(rec)
++	if err != nil {
++		return err
++	}
++	env := failureEnvelope{Payload: payload, CRC32: crcHex(payload)}
++	line, err := json.Marshal(env)
++	if err != nil {
++		return err
++	}
++	if c.path != "" {
++		f, err := os.OpenFile(c.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
++		if err != nil {
++			return err
++		}
++		if _, err = f.Write(append(line, '\n')); err == nil {
++			err = f.Sync()
++		}
++		closeErr := f.Close()
++		if err == nil {
++			err = closeErr
++		}
++		if err != nil {
++			return err
++		}
++	}
++	c.records[rec.Fingerprint] = append(c.records[rec.Fingerprint], rec)
++	return nil
++}
++
++// Lookup returns the newest verified record with the highest environment/file
++// overlap. A caller may use it as a hint; the cache never applies code itself.
++func (c *FailureCache) Lookup(fingerprint, environment string, files []string) (FailureRecord, float64, bool) {
++	if c == nil {
++		return FailureRecord{}, 0, false
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	candidates := c.records[strings.TrimSpace(fingerprint)]
++	if len(candidates) == 0 {
++		return FailureRecord{}, 0, false
++	}
++	files = normalizeStringSet(files)
++	bestScore := -1.0
++	var best FailureRecord
++	for _, rec := range candidates {
++		score := 0.65 // exact fingerprint is the dominant match
++		if strings.EqualFold(strings.TrimSpace(rec.Environment), strings.TrimSpace(environment)) && environment != "" {
++			score += 0.20
++		}
++		score += 0.15 * setJaccard(rec.Files, files)
++		// Small recency tie-break only; never outrank compatibility.
++		if score > bestScore || (score == bestScore && rec.SeenUnixMS > best.SeenUnixMS) {
++			bestScore, best = score, rec
++		}
++	}
++	if bestScore < 0 {
++		return FailureRecord{}, 0, false
++	}
++	return best, bestScore, true
++}
++
++func (c *FailureCache) Stats() FailureCacheStats {
++	if c == nil {
++		return FailureCacheStats{}
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	n := 0
++	for _, rs := range c.records {
++		n += len(rs)
++	}
++	return FailureCacheStats{Records: n, CorruptSkipped: c.corrupt}
++}
++
++func validCRC(env failureEnvelope) bool {
++	return strings.EqualFold(strings.TrimSpace(env.CRC32), crcHex(env.Payload))
++}
++func crcHex(b []byte) string {
++	x := crc32.ChecksumIEEE(b)
++	out := make([]byte, 4)
++	out[0] = byte(x >> 24)
++	out[1] = byte(x >> 16)
++	out[2] = byte(x >> 8)
++	out[3] = byte(x)
++	return hex.EncodeToString(out)
++}
++func normalizeStringSet(in []string) []string {
++	m := map[string]struct{}{}
++	for _, s := range in {
++		s = strings.TrimSpace(s)
++		if s != "" {
++			m[s] = struct{}{}
++		}
++	}
++	out := make([]string, 0, len(m))
++	for s := range m {
++		out = append(out, s)
++	}
++	sort.Strings(out)
++	return out
++}
++func setJaccard(a, b []string) float64 {
++	if len(a) == 0 && len(b) == 0 {
++		return 1
++	}
++	ma := map[string]struct{}{}
++	for _, s := range a {
++		ma[s] = struct{}{}
++	}
++	inter := 0
++	union := len(ma)
++	for _, s := range b {
++		if _, ok := ma[s]; ok {
++			inter++
++		} else {
++			union++
++		}
++	}
++	if union == 0 {
++		return 0
++	}
++	return float64(inter) / float64(union)
++}
+diff --git a/internal/efficiency/failure_cache_test.go b/internal/efficiency/failure_cache_test.go
+new file mode 100644
+index 0000000..62940b4
+--- /dev/null
++++ b/internal/efficiency/failure_cache_test.go
+@@ -0,0 +1,41 @@
++package efficiency
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestFailureCachePersistsAndSkipsCorruption(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "failures.jsonl")
++	c, err := OpenFailureCache(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	rec := FailureRecord{Fingerprint: "abc", Environment: "go1.26/linux-arm64", Files: []string{"b.go", "a.go"}, FixHint: "repair import", Verified: true}
++	if err := c.PutVerified(rec); err != nil {
++		t.Fatal(err)
++	}
++	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
++	_, _ = f.WriteString("{corrupt}\n")
++	_ = f.Close()
++	c2, err := OpenFailureCache(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got, score, ok := c2.Lookup("abc", "go1.26/linux-arm64", []string{"a.go", "b.go"})
++	if !ok || got.FixHint != "repair import" || score < .99 {
++		t.Fatalf("got=%+v score=%v ok=%v", got, score, ok)
++	}
++	if c2.Stats().CorruptSkipped != 1 {
++		t.Fatalf("stats=%+v", c2.Stats())
++	}
++}
++
++func TestFailureCacheNeverStoresUnverified(t *testing.T) {
++	c, _ := OpenFailureCache("")
++	_ = c.PutVerified(FailureRecord{Fingerprint: "x", FixHint: "bad", Verified: false})
++	if c.Stats().Records != 0 {
++		t.Fatal("unverified fix was cached")
++	}
++}
+diff --git a/internal/efficiency/log_reduce.go b/internal/efficiency/log_reduce.go
+new file mode 100644
+index 0000000..ff17611
+--- /dev/null
++++ b/internal/efficiency/log_reduce.go
+@@ -0,0 +1,124 @@
++package efficiency
++
++import (
++	"regexp"
++	"strings"
++)
++
++var ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
++
++// LogSummary is deliberately small enough to feed to an LLM while the complete
++// log remains local on disk/tool history.
++type LogSummary struct {
++	OriginalLines int      `json:"originalLines"`
++	SelectedLines int      `json:"selectedLines"`
++	Truncated     bool     `json:"truncated"`
++	Text          string   `json:"text"`
++	Signals       []string `json:"signals,omitempty"`
++}
++
++type LogReduceConfig struct {
++	MaxLines int
++	Context  int
++	MaxBytes int
++}
++
++func DefaultLogReduceConfig() LogReduceConfig {
++	return LogReduceConfig{MaxLines: 80, Context: 2, MaxBytes: 16 * 1024}
++}
++
++// ReduceBuildLog keeps root-cause/error blocks and local context. If nothing
++// looks like an error, it falls back to the tail because build systems often
++// print the only useful status there.
++func ReduceBuildLog(raw string, cfg LogReduceConfig) LogSummary {
++	if cfg.MaxLines <= 0 {
++		cfg.MaxLines = 80
++	}
++	if cfg.Context < 0 {
++		cfg.Context = 0
++	}
++	if cfg.MaxBytes <= 0 {
++		cfg.MaxBytes = 16 * 1024
++	}
++	clean := ansiRE.ReplaceAllString(strings.ReplaceAll(raw, "\r\n", "\n"), "")
++	lines := strings.Split(clean, "\n")
++	selected := map[int]struct{}{}
++	signalSet := map[string]struct{}{}
++	for i, line := range lines {
++		l := strings.ToLower(line)
++		sig := ""
++		switch {
++		case strings.Contains(l, "caused by:"):
++			sig = "caused_by"
++		case strings.Contains(l, "fatal error") || strings.Contains(l, " fatal:"):
++			sig = "fatal"
++		case strings.Contains(l, "error:") || strings.HasPrefix(strings.TrimSpace(l), "error "):
++			sig = "error"
++		case strings.Contains(l, "failed") && (strings.Contains(l, "task") || strings.Contains(l, "build") || strings.Contains(l, "test")):
++			sig = "failed"
++		case strings.Contains(l, "panic:") || strings.Contains(l, "exception"):
++			sig = "exception"
++		case strings.Contains(l, "undefined") || strings.Contains(l, "unresolved reference"):
++			sig = "symbol"
++		}
++		if sig == "" {
++			continue
++		}
++		signalSet[sig] = struct{}{}
++		for j := i - cfg.Context; j <= i+cfg.Context; j++ {
++			if j >= 0 && j < len(lines) {
++				selected[j] = struct{}{}
++			}
++		}
++	}
++	idx := make([]int, 0, len(selected))
++	for i := range selected {
++		idx = append(idx, i)
++	}
++	// insertion sort keeps package dependency-free and idx is tiny in practice
++	for i := 1; i < len(idx); i++ {
++		for j := i; j > 0 && idx[j] < idx[j-1]; j-- {
++			idx[j], idx[j-1] = idx[j-1], idx[j]
++		}
++	}
++	if len(idx) == 0 {
++		start := len(lines) - minInt(cfg.MaxLines, len(lines))
++		for i := start; i < len(lines); i++ {
++			idx = append(idx, i)
++		}
++	}
++	truncated := false
++	if len(idx) > cfg.MaxLines {
++		idx = idx[:cfg.MaxLines]
++		truncated = true
++	}
++	var b strings.Builder
++	kept := 0
++	for _, i := range idx {
++		row := lines[i]
++		candidate := row + "\n"
++		if b.Len()+len(candidate) > cfg.MaxBytes {
++			truncated = true
++			break
++		}
++		b.WriteString(candidate)
++		kept++
++	}
++	sigs := make([]string, 0, len(signalSet))
++	for s := range signalSet {
++		sigs = append(sigs, s)
++	}
++	for i := 1; i < len(sigs); i++ {
++		for j := i; j > 0 && sigs[j] < sigs[j-1]; j-- {
++			sigs[j], sigs[j-1] = sigs[j-1], sigs[j]
++		}
++	}
++	return LogSummary{OriginalLines: len(lines), SelectedLines: kept, Truncated: truncated || kept < len(idx), Text: strings.TrimSpace(b.String()), Signals: sigs}
++}
++
++func minInt(a, b int) int {
++	if a < b {
++		return a
++	}
++	return b
++}
+diff --git a/internal/efficiency/log_reduce_test.go b/internal/efficiency/log_reduce_test.go
+new file mode 100644
+index 0000000..9a09524
+--- /dev/null
++++ b/internal/efficiency/log_reduce_test.go
+@@ -0,0 +1,24 @@
++package efficiency
++
++import (
++	"strings"
++	"testing"
++)
++
++func TestReduceBuildLogExtractsErrorContext(t *testing.T) {
++	raw := strings.Repeat("noise\n", 100) + "before\nerror: unresolved reference Foo\nafter\n" + strings.Repeat("tail\n", 100)
++	s := ReduceBuildLog(raw, DefaultLogReduceConfig())
++	if !strings.Contains(s.Text, "unresolved reference Foo") || strings.Contains(s.Text, strings.Repeat("noise", 5)) {
++		t.Fatalf("summary=%q", s.Text)
++	}
++	if s.OriginalLines <= s.SelectedLines {
++		t.Fatalf("not reduced: %+v", s)
++	}
++}
++
++func TestReduceBuildLogTailFallback(t *testing.T) {
++	s := ReduceBuildLog("a\nb\nc\nd\n", LogReduceConfig{MaxLines: 2, Context: 0, MaxBytes: 100})
++	if !strings.Contains(s.Text, "d") {
++		t.Fatalf("summary=%q", s.Text)
++	}
++}
+diff --git a/internal/efficiency/patch_guard.go b/internal/efficiency/patch_guard.go
+new file mode 100644
+index 0000000..ed1b1d8
+--- /dev/null
++++ b/internal/efficiency/patch_guard.go
+@@ -0,0 +1,94 @@
++package efficiency
++
++import (
++	"bufio"
++	"fmt"
++	"strconv"
++	"strings"
++)
++
++type PatchPolicy struct {
++	MaxFiles           int `json:"maxFiles"`
++	MaxChangedLines    int `json:"maxChangedLines"`
++	MaxSingleFileLines int `json:"maxSingleFileLines"`
++}
++
++type PatchReport struct {
++	Files            int    `json:"files"`
++	Additions        int    `json:"additions"`
++	Deletions        int    `json:"deletions"`
++	ChangedLines     int    `json:"changedLines"`
++	LargestFileLines int    `json:"largestFileLines"`
++	Allowed          bool   `json:"allowed"`
++	Reason           string `json:"reason,omitempty"`
++}
++
++func DefaultPatchPolicy() PatchPolicy {
++	return PatchPolicy{MaxFiles: 6, MaxChangedLines: 500, MaxSingleFileLines: 300}
++}
++
++// CheckNumstat parses `git diff --numstat`. It is intentionally based on Git's
++// own output rather than a second diff implementation/library.
++func CheckNumstat(numstat string, policy PatchPolicy) (PatchReport, error) {
++	if policy.MaxFiles <= 0 {
++		policy.MaxFiles = 6
++	}
++	if policy.MaxChangedLines <= 0 {
++		policy.MaxChangedLines = 500
++	}
++	if policy.MaxSingleFileLines <= 0 {
++		policy.MaxSingleFileLines = 300
++	}
++	var r PatchReport
++	s := bufio.NewScanner(strings.NewReader(numstat))
++	for s.Scan() {
++		line := strings.TrimSpace(s.Text())
++		if line == "" {
++			continue
++		}
++		parts := strings.SplitN(line, "\t", 3)
++		if len(parts) < 3 {
++			return r, fmt.Errorf("invalid numstat line %q", line)
++		}
++		// Binary files use '-' counts: treat them as one changed file but do not
++		// invent line counts. They still contribute to the file-scope limit.
++		add, del := 0, 0
++		var err error
++		if parts[0] != "-" {
++			add, err = strconv.Atoi(parts[0])
++			if err != nil {
++				return r, err
++			}
++		}
++		if parts[1] != "-" {
++			del, err = strconv.Atoi(parts[1])
++			if err != nil {
++				return r, err
++			}
++		}
++		changed := add + del
++		r.Files++
++		r.Additions += add
++		r.Deletions += del
++		r.ChangedLines += changed
++		if changed > r.LargestFileLines {
++			r.LargestFileLines = changed
++		}
++	}
++	if err := s.Err(); err != nil {
++		return r, err
++	}
++	r.Allowed = true
++	switch {
++	case r.Files > policy.MaxFiles:
++		r.Allowed = false
++		r.Reason = "patch touches too many files; split the repair"
++	case r.ChangedLines > policy.MaxChangedLines:
++		r.Allowed = false
++		r.Reason = "patch changes too many lines; split the repair"
++	case r.LargestFileLines > policy.MaxSingleFileLines:
++		r.Allowed = false
++		r.Reason = "single-file patch is too large; require explicit large-refactor mode"
++	}
++	return r, nil
++}
+diff --git a/internal/efficiency/patch_guard_test.go b/internal/efficiency/patch_guard_test.go
+new file mode 100644
+index 0000000..b842c3a
+--- /dev/null
++++ b/internal/efficiency/patch_guard_test.go
+@@ -0,0 +1,22 @@
++package efficiency
++
++import "testing"
++
++func TestPatchGovernorAllowsSmallFix(t *testing.T) {
++	r, err := CheckNumstat("10\t2\ta.go\n3\t0\tb.go\n", DefaultPatchPolicy())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !r.Allowed || r.Files != 2 || r.ChangedLines != 15 {
++		t.Fatalf("%+v", r)
++	}
++}
++func TestPatchGovernorBlocksOverscope(t *testing.T) {
++	r, err := CheckNumstat("400\t0\ta.go\n200\t0\tb.go\n", DefaultPatchPolicy())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if r.Allowed {
++		t.Fatalf("%+v", r)
++	}
++}
+diff --git a/internal/efficiency/router.go b/internal/efficiency/router.go
+new file mode 100644
+index 0000000..b7c03ab
+--- /dev/null
++++ b/internal/efficiency/router.go
+@@ -0,0 +1,215 @@
++package efficiency
++
++import (
++	"fmt"
++	"strings"
++	"sync"
++	"time"
++)
++
++// RouteAction is a host-owned next-step decision. The model never chooses its
++// own escalation tier; callers feed objective failure/progress facts here.
++type RouteAction string
++
++const (
++	RouteContinueFlash  RouteAction = "continue_flash"
++	RouteRetryFlash     RouteAction = "retry_flash_alternative"
++	RouteDiagnosePro    RouteAction = "diagnose_pro"
++	RouteExecuteFlash   RouteAction = "execute_flash_after_pro"
++	RouteStopBudget     RouteAction = "stop_budget"
++	RouteStopNoProgress RouteAction = "stop_no_progress"
++	RouteFinalize       RouteAction = "finalize"
++)
++
++// RouteInput contains only objective host facts. StrategyID should change when
++// the executor genuinely changes its approach; FailureFingerprint should remain
++// stable for materially the same failure/root cause.
++type RouteInput struct {
++	Passed             bool    `json:"passed"`
++	FailureFingerprint string  `json:"failureFingerprint,omitempty"`
++	StrategyID         string  `json:"strategyId,omitempty"`
++	EstimatedFlashKZT  float64 `json:"estimatedFlashKzt,omitempty"`
++	EstimatedProKZT    float64 `json:"estimatedProKzt,omitempty"`
++	Finalization       bool    `json:"finalization,omitempty"`
++}
++
++// RouteDecision is safe to expose to the APK: it contains no prompts, code or
++// provider reasoning, only policy state and the chosen tier.
++type RouteDecision struct {
++	Action             RouteAction `json:"action"`
++	Reason             string      `json:"reason"`
++	FlashAttempts      int         `json:"flashAttempts"`
++	DistinctStrategies int         `json:"distinctStrategies"`
++	SameFailureStreak  int         `json:"sameFailureStreak"`
++	ProDiagnoses       int         `json:"proDiagnoses"`
++	UpdatedAtUnixMS    int64       `json:"updatedAtUnixMs"`
++}
++
++// Escalator implements the Balance Mod ladder:
++// Flash -> alternative Flash -> short Pro diagnosis -> Flash execution.
++// It deliberately does not call providers itself; that stays transport/runtime
++// plumbing. This state machine is deterministic and independently testable.
++type Escalator struct {
++	mu sync.Mutex
++
++	FlashAttempts     int
++	ProDiagnoses      int
++	SameFailureStreak int
++	LastFailure       string
++	strategies        map[string]struct{}
++	ProDiagnosisArmed bool
++	last              RouteDecision
++}
++
++func NewEscalator() *Escalator {
++	return &Escalator{strategies: make(map[string]struct{})}
++}
++
++func (e *Escalator) Reset() RouteDecision {
++	if e == nil {
++		return RouteDecision{}
++	}
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	e.FlashAttempts = 0
++	e.ProDiagnoses = 0
++	e.SameFailureStreak = 0
++	e.LastFailure = ""
++	e.strategies = make(map[string]struct{})
++	e.ProDiagnosisArmed = false
++	e.last = e.decisionLocked(RouteContinueFlash, "fresh task")
++	return e.last
++}
++
++func (e *Escalator) Snapshot() RouteDecision {
++	if e == nil {
++		return RouteDecision{}
++	}
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	out := e.last
++	out.FlashAttempts = e.FlashAttempts
++	out.ProDiagnoses = e.ProDiagnoses
++	out.SameFailureStreak = e.SameFailureStreak
++	out.DistinctStrategies = len(e.strategies)
++	return out
++}
++
++// Decide consumes one completed attempt/checkpoint. Budget admission uses the
++// existing Governor and therefore cannot be bypassed by model prose.
++func (e *Escalator) Decide(in RouteInput, budget *Governor) RouteDecision {
++	if e == nil {
++		return RouteDecision{Action: RouteContinueFlash, Reason: "router disabled"}
++	}
++	e.mu.Lock()
++	defer e.mu.Unlock()
++
++	if in.Passed {
++		e.last = e.decisionLocked(RouteFinalize, "verification passed")
++		return e.last
++	}
++
++	failure := strings.TrimSpace(in.FailureFingerprint)
++	strategy := strings.TrimSpace(in.StrategyID)
++	if strategy != "" {
++		e.strategies[strategy] = struct{}{}
++	}
++
++	if failure != "" && failure == e.LastFailure {
++		e.SameFailureStreak++
++	} else {
++		e.LastFailure = failure
++		if failure == "" {
++			e.SameFailureStreak = 0
++		} else {
++			e.SameFailureStreak = 1
++		}
++	}
++
++	// After Pro has diagnosed, the expensive tier is not allowed to keep doing
++	// edits. Return immediately to Flash for execution.
++	if e.ProDiagnosisArmed {
++		if budget != nil {
++			if ok, why := budget.CanSpend("flash", in.EstimatedFlashKZT, in.Finalization); !ok {
++				e.last = e.decisionLocked(RouteStopBudget, why)
++				return e.last
++			}
++		}
++		e.ProDiagnosisArmed = false
++		e.FlashAttempts++
++		e.last = e.decisionLocked(RouteExecuteFlash, "Pro diagnosis consumed; execution returns to Flash")
++		return e.last
++	}
++
++	// First failed Flash attempt gets one genuinely different cheap attempt.
++	if e.FlashAttempts == 0 {
++		if budget != nil {
++			if ok, why := budget.CanSpend("flash", in.EstimatedFlashKZT, in.Finalization); !ok {
++				e.last = e.decisionLocked(RouteStopBudget, why)
++				return e.last
++			}
++		}
++		e.FlashAttempts++
++		e.last = e.decisionLocked(RouteRetryFlash, "first failure: try a different Flash strategy")
++		return e.last
++	}
++
++	// Escalate only when a materially same failure survives >=2 distinct
++	// strategies. This avoids paying Pro merely because error text repeats.
++	if e.SameFailureStreak >= 2 && len(e.strategies) >= 2 {
++		if budget != nil {
++			if ok, why := budget.CanSpend("pro", in.EstimatedProKZT, false); !ok {
++				// Budget denied Pro. One more cheap strategy is allowed when
++				// possible; otherwise stop rather than loop forever.
++				if len(e.strategies) < 3 {
++					if ok2, _ := budget.CanSpend("flash", in.EstimatedFlashKZT, in.Finalization); ok2 {
++						e.FlashAttempts++
++						e.last = e.decisionLocked(RouteRetryFlash, "Pro blocked by budget; use one more Flash strategy")
++						return e.last
++					}
++				}
++				e.last = e.decisionLocked(RouteStopBudget, why)
++				return e.last
++			}
++		}
++		e.ProDiagnoses++
++		e.ProDiagnosisArmed = true
++		e.last = e.decisionLocked(RouteDiagnosePro, "same failure survived distinct Flash strategies")
++		return e.last
++	}
++
++	// Different failure/root cause means there is still objective movement.
++	// Keep the cheap tier, but cap unproductive wandering.
++	if len(e.strategies) >= 4 {
++		e.last = e.decisionLocked(RouteStopNoProgress, "too many distinct failed Flash strategies without a stable escalation signal")
++		return e.last
++	}
++	if budget != nil {
++		if ok, why := budget.CanSpend("flash", in.EstimatedFlashKZT, in.Finalization); !ok {
++			e.last = e.decisionLocked(RouteStopBudget, why)
++			return e.last
++		}
++	}
++	e.FlashAttempts++
++	e.last = e.decisionLocked(RouteRetryFlash, "failure changed; continue cheap diagnosis")
++	return e.last
++}
++
++func (e *Escalator) decisionLocked(action RouteAction, reason string) RouteDecision {
++	return RouteDecision{
++		Action:             action,
++		Reason:             reason,
++		FlashAttempts:      e.FlashAttempts,
++		DistinctStrategies: len(e.strategies),
++		SameFailureStreak:  e.SameFailureStreak,
++		ProDiagnoses:       e.ProDiagnoses,
++		UpdatedAtUnixMS:    time.Now().UnixMilli(),
++	}
++}
++
++func ValidateRouteInput(in RouteInput) error {
++	if in.EstimatedFlashKZT < 0 || in.EstimatedProKZT < 0 {
++		return fmt.Errorf("estimated costs must be non-negative")
++	}
++	return nil
++}
+diff --git a/internal/efficiency/router_test.go b/internal/efficiency/router_test.go
+new file mode 100644
+index 0000000..9b881af
+--- /dev/null
++++ b/internal/efficiency/router_test.go
+@@ -0,0 +1,49 @@
++package efficiency
++
++import "testing"
++
++func TestEscalatorFlashFlashProFlash(t *testing.T) {
++	r := NewEscalator()
++	g := NewGovernor()
++	g.Configure(BudgetConfig{BudgetKZT: 1000, ReservePercent: 15, ProMaxPercent: 25, HardStop: true, FXKZTPerUnit: map[string]float64{"KZT": 1}})
++
++	d := r.Decide(RouteInput{FailureFingerprint: "E1", StrategyID: "A", EstimatedFlashKZT: 1}, g)
++	if d.Action != RouteRetryFlash {
++		t.Fatalf("first = %s", d.Action)
++	}
++	d = r.Decide(RouteInput{FailureFingerprint: "E1", StrategyID: "B", EstimatedFlashKZT: 1, EstimatedProKZT: 5}, g)
++	if d.Action != RouteDiagnosePro {
++		t.Fatalf("second = %s (%s)", d.Action, d.Reason)
++	}
++	d = r.Decide(RouteInput{FailureFingerprint: "E1", StrategyID: "B", EstimatedFlashKZT: 1}, g)
++	if d.Action != RouteExecuteFlash {
++		t.Fatalf("after pro = %s", d.Action)
++	}
++	d = r.Decide(RouteInput{Passed: true}, g)
++	if d.Action != RouteFinalize {
++		t.Fatalf("pass = %s", d.Action)
++	}
++}
++
++func TestEscalatorDoesNotEscalateSameStrategy(t *testing.T) {
++	r := NewEscalator()
++	d := r.Decide(RouteInput{FailureFingerprint: "E1", StrategyID: "A"}, nil)
++	if d.Action != RouteRetryFlash {
++		t.Fatal(d.Action)
++	}
++	d = r.Decide(RouteInput{FailureFingerprint: "E1", StrategyID: "A"}, nil)
++	if d.Action == RouteDiagnosePro {
++		t.Fatal("same strategy must not justify Pro")
++	}
++}
++
++func TestEscalatorBudgetBlocksPro(t *testing.T) {
++	r := NewEscalator()
++	g := NewGovernor()
++	g.Configure(BudgetConfig{BudgetKZT: 10, ReservePercent: 0, ProMaxPercent: 10, HardStop: true, FXKZTPerUnit: map[string]float64{"KZT": 1}})
++	_ = r.Decide(RouteInput{FailureFingerprint: "E", StrategyID: "A", EstimatedFlashKZT: .1}, g)
++	d := r.Decide(RouteInput{FailureFingerprint: "E", StrategyID: "B", EstimatedFlashKZT: .1, EstimatedProKZT: 2}, g)
++	if d.Action == RouteDiagnosePro {
++		t.Fatal("Pro should be denied by cap")
++	}
++}
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index b4fa227..01ad690 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -14,7 +14,7 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.2"
++const balanceModVersion = "balance-mod-v0.3"
+ 
+ // modEvent is a small, content-free machine event intended for the future
+ // Android client. Human logs stay on the ordinary Reasonix event stream; the
+@@ -103,6 +103,7 @@ type modStatusPayload struct {
+ 	TaskGate   modTaskCostGateStatus       `json:"taskCostGate"`
+ 	Resources  efficiency.ResourceSnapshot `json:"resources"`
+ 	Quality    efficiency.QualitySnapshot  `json:"quality"`
++	Router     efficiency.RouteDecision    `json:"router"`
+ 	Features   map[string]string           `json:"features"`
+ }
+ 
+@@ -143,6 +144,7 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 		TaskGate:   s.modTaskGateSnapshot(),
+ 		Resources:  efficiency.ReadResources(s.modWorkspacePath()),
+ 		Quality:    s.modQuality.Snapshot(),
++		Router:     s.modRouter.Snapshot(),
+ 		Features: map[string]string{
+ 			"budget":         "post-round-gate-v0.1",
+ 			"apkBridge":      "http+sse-v0.2",
+@@ -151,6 +153,10 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 			"antiLoop":       "reasonix-native+apk-telemetry",
+ 			"completionGate": "reasonix-final-readiness",
+ 			"offlineApiKey":  "not-required",
++			"powerRouter":    "objective-flash-flash-pro-flash-v0.3",
++			"failureCache":   "verified-journal-crc-v0.3",
++			"logReducer":     "root-cause-window-v0.3",
++			"patchGovernor":  "git-numstat-v0.3",
+ 		},
+ 	})
+ }
+@@ -204,6 +210,20 @@ func (s *Server) modQualityGet(w http.ResponseWriter, _ *http.Request) {
+ 	writeJSON(w, s.modQuality.Snapshot())
+ }
+ 
++func (s *Server) modRouterGet(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, s.modRouter.Snapshot())
++}
++
++func (s *Server) modRouterReset(w http.ResponseWriter, _ *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot reset router while a turn is running", http.StatusConflict)
++		return
++	}
++	snap := s.modRouter.Reset()
++	s.modHub.Emit("router.reset", snap)
++	writeJSON(w, snap)
++}
++
+ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ 	flusher, ok := w.(http.Flusher)
+ 	if !ok {
+@@ -221,6 +241,7 @@ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ 		"budget":    s.modGov.Snapshot(),
+ 		"quality":   s.modQuality.Snapshot(),
+ 		"resources": efficiency.ReadResources(s.modWorkspacePath()),
++		"router":    s.modRouter.Snapshot(),
+ 	})
+ 	if len(initial) > 0 {
+ 		fmt.Fprintf(w, "data: %s\n\n", initial)
+diff --git a/internal/serve/mod_bridge_test.go b/internal/serve/mod_bridge_test.go
+index 2623ff5..6bb9654 100644
+--- a/internal/serve/mod_bridge_test.go
++++ b/internal/serve/mod_bridge_test.go
+@@ -116,6 +116,9 @@ func TestModStatusExposesTypedAPKSurface(t *testing.T) {
+ 	if _, ok := body["quality"]; !ok {
+ 		t.Fatal("status missing quality")
+ 	}
++	if _, ok := body["router"]; !ok {
++		t.Fatal("status missing router")
++	}
+ }
+ 
+ func TestModQualityAPITracksLoopAndReadiness(t *testing.T) {
+@@ -153,3 +156,38 @@ func TestModQualityAPITracksLoopAndReadiness(t *testing.T) {
+ 		t.Fatalf("quality missing = %#v", body.Missing)
+ 	}
+ }
++
++func TestModRouterAPIIsAPKVisibleAndResettable(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc})
++	ts := httptest.NewServer(New(ctrl, bc, config.ServeConfig{}).Handler())
++	defer ts.Close()
++
++	resp, err := http.Get(ts.URL + "/mod/router")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("GET /mod/router = %d", resp.StatusCode)
++	}
++	var before map[string]any
++	if err := json.NewDecoder(resp.Body).Decode(&before); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := before["action"]; !ok {
++		t.Fatal("router status missing action")
++	}
++
++	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mod/router/reset", strings.NewReader(`{}`))
++	req.Header.Set("Content-Type", "application/json")
++	reset, err := http.DefaultClient.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer reset.Body.Close()
++	if reset.StatusCode != http.StatusOK {
++		body, _ := io.ReadAll(reset.Body)
++		t.Fatalf("POST /mod/router/reset = %d: %s", reset.StatusCode, body)
++	}
++}
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index d9b3e4d..f621eaa 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -60,6 +60,7 @@ type Server struct {
+ 	// outside SessionAPI so upstream frontend contracts stay source-compatible.
+ 	modGov      *efficiency.Governor
+ 	modQuality  *efficiency.QualityMonitor
++	modRouter   *efficiency.Escalator
+ 	modHub      *modBroadcaster
+ 	modMu       sync.RWMutex
+ 	modTaskGate modTaskCostGateStatus
+@@ -97,6 +98,7 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 		bc:         bc,
+ 		modGov:     efficiency.NewGovernor(),
+ 		modQuality: efficiency.NewQualityMonitor(),
++		modRouter:  efficiency.NewEscalator(),
+ 		modHub:     newModBroadcaster(),
+ 		titles:     newTitleCache(ctrl.SessionDir()),
+ 		auth:       newAuthGate(serveCfg),
+@@ -533,6 +535,8 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("POST /mod/budget/reset", s.modBudgetReset)
+ 	mux.HandleFunc("GET /mod/resources", s.modResources)
+ 	mux.HandleFunc("GET /mod/quality", s.modQualityGet)
++	mux.HandleFunc("GET /mod/router", s.modRouterGet)
++	mux.HandleFunc("POST /mod/router/reset", s.modRouterReset)
+ 	mux.HandleFunc("GET /mod/events", s.modEvents)
+ 	mux.HandleFunc("GET /sessions", s.sessions)
+ 	mux.HandleFunc("GET /skills", s.skills)
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index 3a2f1a3..f22b982 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,13 +5,22 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/7] Unit tests: Balance Mod core + APK bridge"
++echo "[1/10] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/7] Native Reasonix completion gate regression test"
++echo "[2/10] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
++
++echo "[3/10] Failure cache: verified-only persistence + corruption recovery"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
++
++echo "[4/10] Context/patch economy: log reducer + patch governor"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
++
++echo "[5/10] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[3/7] Build CLI only (skip example plugin)"
++echo "[6/10] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -37,9 +46,9 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[4/7] Offline normal tool-loop"
++echo "[7/10] Offline normal tool-loop"
+ cd "$TMP"
+-OUT="$($ROOT/bin/reasonix run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
++OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+ if ! grep -q 'OFFLINE_MOCK_PASS' <<<"$OUT"; then
+   echo "BALANCE_MOD_SMOKE_FAIL: normal mock provider did not reach final pass" >&2
+@@ -64,18 +73,21 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[5/7] Offline anti-loop intervention"
+-LOOP_OUT="$($ROOT/bin/reasonix run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
++echo "[8/10] Offline anti-loop intervention"
++LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+   echo "BALANCE_MOD_SMOKE_FAIL: native loop guard did not redirect the repeat-failure mock" >&2
+   exit 1
+ fi
+ 
+-echo "[6/7] Offline quality/completion telemetry tests passed"
+-echo "  - native loop guard: PASS"
+-echo "  - native final-readiness completion gate: PASS"
+-echo "  - APK quality monitor: PASS"
++echo "[9/10] v0.3 efficiency layer passed"
++echo "  - objective router: PASS"
++echo "  - verified failure cache: PASS"
++echo "  - log reducer: PASS"
++echo "  - patch governor: PASS"
++echo "  - APK router surface: PASS"
++echo "  - native anti-loop/completion gate: PASS"
+ 
+-echo "[7/7] PASS — no provider API key/network was used"
+-echo "BALANCE_MOD_V02_SMOKE_PASS"
++echo "[10/10] PASS — no provider API key/network was used"
++echo "BALANCE_MOD_V03_SMOKE_PASS"

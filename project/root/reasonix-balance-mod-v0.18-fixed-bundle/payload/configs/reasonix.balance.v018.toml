@@ -1,0 +1,20 @@
+# Reasonix Balance Mod v0.18 canonical OFFLINE RC fixture.
+# This file is copied into a temporary workspace by the v0.18 test harness.
+# It is not installed as the user's live reasonix.toml.
+
+default_model = "balance-rc-mock"
+
+[[providers]]
+name = "balance-rc-mock"
+kind = "mock"
+model = "smoke"
+base_url = "http://127.0.0.1"
+context_window = 1000000
+billing_currency = "CNY"
+price = { cache_hit = 0.02, input = 1, output = 2, currency = "CNY" }
+
+[environment]
+offline = true
+
+[sandbox]
+bash = "off"

@@ -1,0 +1,9 @@
+{
+  "steps": 30,
+  "initial_loss": 5.603107929229736,
+  "final_loss": 2.8979835510253906,
+  "best_loss": 2.8979835510253906,
+  "tail_mean_loss": 2.9913081169128417,
+  "elapsed_s": 5.401321279000058,
+  "loss_decreased": true
+}

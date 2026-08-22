@@ -1,0 +1,15 @@
+diff --git a/internal/tool/tool.go b/internal/tool/tool.go
+--- a/internal/tool/tool.go
++++ b/internal/tool/tool.go
+@@ -348,10 +348,7 @@
+ 	}
+ 	r.mu.RLock()
+ 	defer r.mu.RUnlock()
+-	if r.providerVisible == nil {
+-		return true
+-	}
+-	return r.providerVisible[strings.TrimSpace(name)]
++	return r.isProviderVisibleLocked(strings.TrimSpace(name))
+ }
+ 
+ func (r *Registry) isProviderVisibleLocked(name string) bool {

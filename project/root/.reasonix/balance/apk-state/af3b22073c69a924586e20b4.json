@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "workspace": "/tmp/tmp.Fb0dUws8Ss",
+  "savedAtUnixMs": 1787256483977,
+  "profile": {
+    "mode": "agent",
+    "liveDetail": "project"
+  },
+  "approvalMode": "ask",
+  "budget": {
+    "config": {
+      "budgetKzt": 0,
+      "reservePercent": 15,
+      "proMaxPercent": 25,
+      "hardStop": true
+    },
+    "spentKzt": 0,
+    "proSpentKzt": 0,
+    "unpricedCalls": 2
+  },
+  "execution": {
+    "enabled": false
+  },
+  "orchestrator": {
+    "enabled": true,
+    "maxContinuations": 4,
+    "idleWaitSeconds": 15
+  }
+}

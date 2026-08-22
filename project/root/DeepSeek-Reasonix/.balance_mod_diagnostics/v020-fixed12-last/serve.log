@@ -1,0 +1,12 @@
+reasonix serve — deepseek-v4-flash on http://127.0.0.1:40481
+  auth: token
+  share: http://127.0.0.1:40481/ (token in /tmp/tmp.dRf26TbbL9/token)
+2026/08/21 09:13:54 INFO serve: request method=POST path=/auth/token status=204 duration=529.846µs
+2026/08/21 09:13:54 INFO serve: request method=GET path=/mod/status status=200 duration=7.090154ms
+2026/08/21 09:13:55 INFO serve: request method=POST path=/mod/budget status=200 duration=201.254653ms
+  balance: $3.32
+2026/08/21 09:13:56 INFO serve: request method=POST path=/mod/app/task/start status=202 duration=8.343ms
+2026/08/21 09:13:56 INFO serve: request method=GET path=/mod/live/history status=200 duration=331.423µs
+2026/08/21 09:13:56 INFO serve: request method=GET path=/mod/budget status=200 duration=273.577µs
+2026/08/21 09:13:58 INFO serve: request method=GET path=/mod/live/history status=200 duration=887.5µs
+2026/08/21 09:13:58 INFO serve: request method=GET path=/mod/budget status=200 duration=259.731µs

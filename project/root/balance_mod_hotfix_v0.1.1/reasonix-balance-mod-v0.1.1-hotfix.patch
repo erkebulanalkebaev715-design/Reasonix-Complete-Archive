@@ -1,0 +1,64 @@
+--- a/internal/provider/mock/mock.go
++++ b/internal/provider/mock/mock.go
+@@ -117,6 +117,9 @@
+ 					return
+ 				}
+ 			case 1:
++				// Reasonix keeps optional tools such as grep behind the stable
++				// provider-visible use_capability proxy. Prefer direct grep when a
++				// custom surface exposes it, otherwise exercise the real proxy path.
+ 				if hasTool(req.Tools, "grep") {
+ 					if !emit(provider.Chunk{Type: provider.ChunkToolCall, ToolCall: &provider.ToolCall{
+ 						ID:        "mock-grep-2",
+@@ -126,7 +129,19 @@
+ 						return
+ 					}
+ 					calledTool = true
+-				} else if !emit(provider.Chunk{Type: provider.ChunkText, Text: "MOCK_NO_GREP_TOOL"}) {
++				} else if hasTool(req.Tools, "use_capability") {
++					if !emit(provider.Chunk{Type: provider.ChunkToolCall, ToolCall: &provider.ToolCall{
++						ID:   "mock-grep-proxy-2",
++						Name: "use_capability",
++						Arguments: fmt.Sprintf(
++							`{"action":"call","capability_id":"tool:grep","arguments":{"pattern":"TEST OK","path":%q}}`,
++							p.path,
++						),
++					}}) {
++						return
++					}
++					calledTool = true
++				} else if !emit(provider.Chunk{Type: provider.ChunkText, Text: "MOCK_NO_SEARCH_TOOL"}) {
+ 					return
+ 				}
+ 			default:
+--- a/internal/provider/mock/mock_test.go
++++ b/internal/provider/mock/mock_test.go
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"context"
++	"strings"
+ 	"testing"
+ 
+ 	"reasonix/internal/provider"
+@@ -25,15 +26,18 @@
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	tools := []provider.ToolSchema{{Name: "read_file"}, {Name: "grep"}}
++	tools := []provider.ToolSchema{{Name: "read_file"}, {Name: "use_capability"}}
+ 	first := collect(t, p, provider.Request{Tools: tools})
+ 	if len(first) == 0 || first[0].Type != provider.ChunkToolCall || first[0].ToolCall.Name != "read_file" {
+ 		t.Fatalf("first = %#v", first)
+ 	}
+ 	second := collect(t, p, provider.Request{Tools: tools, Messages: []provider.Message{{Role: provider.RoleTool}}})
+-	if len(second) == 0 || second[0].Type != provider.ChunkToolCall || second[0].ToolCall.Name != "grep" {
++	if len(second) == 0 || second[0].Type != provider.ChunkToolCall || second[0].ToolCall.Name != "use_capability" {
+ 		t.Fatalf("second = %#v", second)
+ 	}
++	if !strings.Contains(second[0].ToolCall.Arguments, `"capability_id":"tool:grep"`) {
++		t.Fatalf("second args = %q", second[0].ToolCall.Arguments)
++	}
+ 	third := collect(t, p, provider.Request{Tools: tools, Messages: []provider.Message{{Role: provider.RoleTool}, {Role: provider.RoleTool}}})
+ 	if len(third) == 0 || third[0].Type != provider.ChunkText || third[0].Text != "OFFLINE_MOCK_PASS" {
+ 		t.Fatalf("third = %#v", third)

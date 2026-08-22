@@ -1,0 +1,1305 @@
+## main-v2...origin/main-v2
+ M cmd/reasonix/main.go
+ M internal/agent/agent.go
+ M internal/agent/compact.go
+ M internal/agent/coordinator.go
+ M internal/agent/execute_one.go
+ M internal/agent/reasoning_replay.go
+ M internal/agent/run_budget.go
+ M internal/agent/run_loop.go
+ M internal/agent/run_usage.go
+ M internal/agent/sampling_request.go
+ M internal/control/approval.go
+ M internal/control/capability.go
+ M internal/control/controller.go
+ M internal/control/inbox.go
+ M internal/control/inbox_run.go
+ M internal/provider/retry.go
+ M internal/serve/broadcaster.go
+ M internal/serve/serve.go
+ M internal/sessioninbox/manifest.go
+ M internal/sessioninbox/ops.go
+ M internal/sessioninbox/recovery.go
+ M internal/sessioninbox/store.go
+ M internal/sessioninbox/types.go
+ M internal/tool/tool.go
+?? .balance_mod_backups/
+?? .mcp.json
+?? balance_mod_hotfix_v0.8.2/
+?? configs/
+?? docs/BALANCE_MOD.md
+?? docs/BALANCE_MOD_V017.md
+?? docs/BALANCE_MOD_V018.md
+?? docs/BALANCE_MOD_V019.md
+?? docs/BALANCE_MOD_V020.md
+?? docs/BALANCE_MOD_V020_FIXED.md
+?? docs/BALANCE_MOD_V020_FIXED10.md
+?? docs/BALANCE_MOD_V020_FIXED12.md
+?? docs/BALANCE_MOD_V020_FIXED5.md
+?? docs/BALANCE_MOD_V020_FIXED9.md
+?? internal/agent/balance_strict_retry_fixed9_test.go
+?? internal/agent/balance_v20_usage_receipt_fixed12.go
+?? internal/agent/balance_v20_usage_receipt_fixed12_test.go
+?? internal/agent/precall_budget_test.go
+?? internal/agent/strict_budget_tools.go
+?? internal/control/inbox_budget.go
+?? internal/control/inbox_budget_test.go
+?? internal/control/inbox_completion_receipt_test.go
+?? internal/control/precall_budget_setter.go
+?? internal/control/precall_budget_setter.go.v016bak
+?? internal/control/runtime_tool_policy.go
+?? internal/control/runtime_tool_policy_test.go
+?? internal/control/task_budget_setter.go
+?? internal/efficiency/
+?? internal/provider/balance_strict_retry_fixed9_test.go
+?? internal/provider/mock/
+?? internal/serve/mod_agent_control.go
+?? internal/serve/mod_agent_control_test.go
+?? internal/serve/mod_app.go
+?? internal/serve/mod_app_test.go
+?? internal/serve/mod_bridge.go
+?? internal/serve/mod_bridge_test.go
+?? internal/serve/mod_capabilities.go
+?? internal/serve/mod_capabilities_test.go
+?? internal/serve/mod_contract.go
+?? internal/serve/mod_contract_test.go
+?? internal/serve/mod_live.go
+?? internal/serve/mod_live_test.go
+?? internal/serve/mod_orchestrator.go
+?? internal/serve/mod_orchestrator_test.go
+?? internal/serve/mod_power.go
+?? internal/serve/mod_power_turn.go
+?? internal/serve/mod_power_turn_test.go
+?? internal/serve/mod_projects.go
+?? internal/serve/mod_projects_test.go
+?? internal/serve/mod_queue.go
+?? internal/serve/mod_queue_test.go
+?? internal/serve/precall_switch_test.go
+?? internal/serve/precall_switch_test.go.v016bak
+?? internal/sessioninbox/completion_receipt.go
+?? internal/sessioninbox/completion_receipt.go.v017bak
+?? internal/sessioninbox/completion_receipt_test.go
+?? internal/tool/session_hidden_test.go
+?? reasonix-balance-mod-v0.15-bundle.tar.gz
+?? reasonix-balance-mod-v0.15-bundle/
+?? reasonix-balance-mod-v0.16-bundle.tar.gz
+?? reasonix-balance-mod-v0.16-bundle/
+?? reasonix-balance-mod-v0.19-bundle.tar.gz
+?? reasonix-balance-mod-v0.19-bundle/
+?? reasonix-balance-mod-v0.20-fixed-bundle.tar.gz
+?? reasonix-balance-mod-v0.20-fixed-bundle/
+?? reasonix-balance-mod-v0.20-fixed3-bundle.tar.gz
+?? reasonix-balance-mod-v0.20-fixed3-bundle/
+?? reasonix-balance-mod-v0.20-fixed4-bundle.tar.gz
+?? reasonix-balance-mod-v0.20-fixed4-bundle/
+?? reasonix-balance-mod-v0.8.2-hotfix.tar.gz
+?? reasonix.toml.bak-context
+?? reasonix.toml.bak-final
+?? reasonix.toml.bak-router-20260819-141452
+?? scripts/balance_mod_offline_prototype.sh
+?? scripts/balance_mod_offline_stress.sh
+?? scripts/balance_mod_precall_budget.sh
+?? scripts/balance_mod_smoke.sh
+?? scripts/balance_mod_smoke_quick.sh
+?? scripts/balance_mod_smoke_quick_v017.sh
+?? scripts/balance_mod_smoke_quick_v018.sh
+?? scripts/balance_mod_smoke_quick_v019.sh
+?? scripts/balance_mod_smoke_quick_v020.sh
+?? scripts/balance_mod_smoke_v017.sh
+?? scripts/balance_mod_smoke_v018.sh
+?? scripts/balance_mod_smoke_v019.sh
+?? scripts/balance_mod_smoke_v020.sh
+?? scripts/balance_mod_v017_targeted.sh
+?? scripts/balance_mod_v018_rc.sh
+?? scripts/balance_mod_v018_targeted.sh
+?? scripts/balance_mod_v019_contract_probe.py
+?? scripts/balance_mod_v019_targeted.sh
+?? scripts/balance_mod_v019_targeted.sh.v019-sse-bak
+?? scripts/balance_mod_v019_targeted.sh.v019bak
+?? scripts/balance_mod_v020_completion_check.py
+?? scripts/balance_mod_v020_preflight.sh
+?? scripts/balance_mod_v020_real_gate.sh
+?? scripts/balance_mod_v020_real_gate.sh.before-verbose
+?? scripts/balance_mod_v020_reconcile.py
+?? scripts/balance_mod_v020_targeted.sh
+?? scripts/reasonix_android_backend.sh
+?? "tHardPreCallBudgetSurvivesNativeModelSwitch$' "
+
+diff --git a/cmd/reasonix/main.go b/cmd/reasonix/main.go
+index 14ee0fe..343cb0e 100644
+--- a/cmd/reasonix/main.go
++++ b/cmd/reasonix/main.go
+@@ -11,6 +11,7 @@ import (
+ 
+ 	// Blank imports wire compile-time built-ins into their registries.
+ 	_ "reasonix/internal/provider/anthropic"
++	_ "reasonix/internal/provider/mock"
+ 	_ "reasonix/internal/provider/openai"
+ 	_ "reasonix/internal/provider/responses"
+ 	_ "reasonix/internal/tool/builtin"
+diff --git a/internal/agent/agent.go b/internal/agent/agent.go
+index 4ea600b..61420b3 100644
+--- a/internal/agent/agent.go
++++ b/internal/agent/agent.go
+@@ -341,6 +341,12 @@ type Agent struct {
+ 	// instead of leaving them in a queue no loop will ever consume.
+ 	steerRunActive bool
+ 
++	// strictPreCallBudget enables the Balance Mod hard admission gate. It is
++	// host-controlled and never enters prompts/session state. When enabled, every
++	// provider request is conservatively capped before network I/O so a hard cost
++	// budget cannot rely only on post-round accounting.
++	strictPreCallBudget atomic.Bool
++
+ 	// task is the state shared by every Run continuing one delivery scope: the
+ 	// receipt ledger complete_step validates citations against, the spend that
+ 	// outlives a single Run, and the guards keyed to the task rather than the
+diff --git a/internal/agent/compact.go b/internal/agent/compact.go
+index 6a19406..ba1e2df 100644
+--- a/internal/agent/compact.go
++++ b/internal/agent/compact.go
+@@ -406,6 +406,12 @@ func (a *Agent) summarize(ctx context.Context, region []provider.Message, instru
+ 	if req.MaxTokens > summaryOutputMaxTokens {
+ 		req.MaxTokens = summaryOutputMaxTokens
+ 	}
++	// Compaction is provider I/O too. Apply the same strict hard-budget cap
++	// before the minimum useful-summary check so a tiny remaining budget fails
++	// closed instead of paying for a knowingly truncated digest.
++	if err := a.applyStrictPreCallBudget(ctx, &req); err != nil {
++		return "", usage, err
++	}
+ 	if req.MaxTokens < 256 {
+ 		return "", usage, fmt.Errorf("summary output budget too small (%d tokens)", req.MaxTokens)
+ 	}
+diff --git a/internal/agent/coordinator.go b/internal/agent/coordinator.go
+index 668447e..5975cf9 100644
+--- a/internal/agent/coordinator.go
++++ b/internal/agent/coordinator.go
+@@ -5,6 +5,7 @@ import (
+ 	"fmt"
+ 	"slices"
+ 	"strings"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"reasonix/internal/event"
+@@ -123,6 +124,11 @@ type Coordinator struct {
+ 	// behavior used by direct Coordinator callers.
+ 	plannerPolicy       PlannerPolicy
+ 	plannerPlanApprover PlannerPlanApprover
++	// strictBudgetExecutorOnly disables the second planner provider while a
++	// host promises a hard pre-call spend ceiling. Until all secondary agents
++	// share one reservation ledger, paying for an independent planner would
++	// make that promise mathematically false.
++	strictBudgetExecutorOnly atomic.Bool
+ }
+ 
+ // NewCoordinator wires a planner provider (with its own session) to an executor.
+@@ -222,6 +228,17 @@ func (c *Coordinator) PlannerAgent() *Agent {
+ 	return c.plannerAgent
+ }
+ 
++// SetStrictPreCallBudget makes hard-budget turns single-provider-agent turns.
++// The ordinary planner policy remains intact and resumes when the hard budget
++// is disabled. This is intentionally conservative until planner/subagent calls
++// participate in the same host reservation ledger as the executor.
++func (c *Coordinator) SetStrictPreCallBudget(enabled bool) {
++	if c == nil {
++		return
++	}
++	c.strictBudgetExecutorOnly.Store(enabled)
++}
++
+ // SetReasoningLanguage updates both agents in two-model mode. The raw planner
+ // path receives controller-composed input directly, but a tool-enabled planner
+ // owns its own Agent and must clear stale zh/en preferences on live changes.
+@@ -331,6 +348,9 @@ func (c *Coordinator) Run(ctx context.Context, input string) error {
+ 	if c.plannerPolicy != nil {
+ 		decision = normalizePlannerDecision(c.plannerPolicy(ctx, input))
+ 	}
++	if c.strictBudgetExecutorOnly.Load() {
++		decision = PlannerDecision{Route: PlannerRouteExecutorOnly, Reason: "hard_budget_single_agent"}
++	}
+ 	routeDetail := fmt.Sprintf("planner route=%s reason=%s", decision.Route, decision.Reason)
+ 	if decision.Route == PlannerRouteExecutorOnly {
+ 		c.sink.Emit(event.Event{Kind: event.Phase, Text: c.executor.svc.prov.Name() + " · executing", Detail: routeDetail, Source: event.UsageSourceExecutor})
+diff --git a/internal/agent/execute_one.go b/internal/agent/execute_one.go
+index 63dd884..b55492b 100644
+--- a/internal/agent/execute_one.go
++++ b/internal/agent/execute_one.go
+@@ -285,6 +285,9 @@ func (a *Agent) applyPlanModeAndProxy(ctx context.Context, plan *toolCallPlan) (
+ 		if outcome, blocked := a.readOnlyExecutionBlock(t, &rc); blocked {
+ 			return blockedShellOutcome(outcome, plan), true
+ 		}
++		if outcome, blocked := a.strictBudgetDelegationBlock(t, &rc); blocked {
++			return outcome, true
++		}
+ 		if rc.Commit != nil {
+ 			if err := rc.Commit(); err != nil {
+ 				return toolOutcome{
+@@ -319,6 +322,8 @@ func (a *Agent) applyPlanModeAndProxy(ctx context.Context, plan *toolCallPlan) (
+ 		}
+ 	} else if outcome, blocked := a.readOnlyExecutionBlock(t, nil); blocked {
+ 		return blockedShellOutcome(outcome, plan), true
++	} else if outcome, blocked := a.strictBudgetDelegationBlock(t, nil); blocked {
++		return outcome, true
+ 	}
+ 
+ 	// A proxy resolution can point at a target with an explicit planning-phase
+diff --git a/internal/agent/reasoning_replay.go b/internal/agent/reasoning_replay.go
+index 2d10026..30bcf77 100644
+--- a/internal/agent/reasoning_replay.go
++++ b/internal/agent/reasoning_replay.go
+@@ -18,6 +18,11 @@ func (a *Agent) runMissingReasoningFallback(
+ 	billable *provider.Usage,
+ 	discarded ...*deferredStreamSink,
+ ) (streamedTurn, bool) {
++	if a.StrictPreCallBudget() {
++		// strict-one-paid-attempt-v0.20-fixed9: fallback would be a second paid call
++		// before the host ledger has admitted another provider attempt.
++		return streamedTurn{}, false
++	}
+ 	if !a.activateMissingReasoningFallback() {
+ 		return streamedTurn{}, false
+ 	}
+diff --git a/internal/agent/run_budget.go b/internal/agent/run_budget.go
+index 48490ff..5510fc7 100644
+--- a/internal/agent/run_budget.go
++++ b/internal/agent/run_budget.go
+@@ -2,7 +2,9 @@ package agent
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"fmt"
++	"math"
+ 	"time"
+ 
+ 	"reasonix/internal/event"
+@@ -167,3 +169,159 @@ func taskBudgetFromContext(ctx context.Context) (TaskBudget, bool) {
+ 	b, ok := ctx.Value(taskBudgetContextKey{}).(TaskBudget)
+ 	return b, ok
+ }
++
++// strictTaskBudgetLimit preserves the controller's global hard cost ceiling even
++// when a queued/automatic turn supplies only token or wall limits. A context
++// budget may tighten an axis but must never erase the configured hard bound.
++func (a *Agent) strictTaskBudgetLimit(ctx context.Context) TaskBudget {
++	base := normalizeTaskBudget(a.task.budget.limit)
++	override, ok := taskBudgetFromContext(ctx)
++	if !ok {
++		return base
++	}
++	override = normalizeTaskBudget(override)
++	tighter := func(global, local float64) float64 {
++		switch {
++		case global > 0 && local > 0:
++			return math.Min(global, local)
++		case global > 0:
++			return global
++		default:
++			return local
++		}
++	}
++	base.Cost = tighter(base.Cost, override.Cost)
++	if base.Tokens > 0 && override.Tokens > 0 {
++		base.Tokens = min(base.Tokens, override.Tokens)
++	} else if base.Tokens <= 0 {
++		base.Tokens = override.Tokens
++	}
++	if base.Wall > 0 && override.Wall > 0 {
++		base.Wall = min(base.Wall, override.Wall)
++	} else if base.Wall <= 0 {
++		base.Wall = override.Wall
++	}
++	return base
++}
++
++// SetTaskCostBudget updates the configured cost ceiling for subsequent Runs.
++// The host must call it only while this Agent is idle; Controller enforces that
++// boundary for HTTP/APK callers. Existing task usage is preserved so lowering a
++// budget never erases already-spent cost.
++func (a *Agent) SetTaskCostBudget(cost float64) {
++	if a == nil {
++		return
++	}
++	if cost < 0 {
++		cost = 0
++	}
++	a.task.budget.limit.Cost = cost
++}
++
++// SetStrictPreCallBudget toggles the host-owned pre-network budget guard. The
++// controller exposes this only as an optional idle-only capability; ordinary
++// Reasonix users that never enable Balance hard budgets keep historical behavior.
++func (a *Agent) SetStrictPreCallBudget(enabled bool) {
++	if a == nil {
++		return
++	}
++	a.strictPreCallBudget.Store(enabled)
++}
++
++// StrictPreCallBudget reports whether provider requests are currently guarded.
++func (a *Agent) StrictPreCallBudget() bool {
++	return a != nil && a.strictPreCallBudget.Load()
++}
++
++// strict-one-paid-attempt-v0.20-fixed9: strict hard-budget mode disables
++// hidden provider/header retries and agent stream/reasoning replays. Therefore
++// this guard admits exactly the current paid attempt against the current
++// remaining allowance. A later paid attempt must return through host admission
++// after the ledger has observed the previous attempt.
++const strictPreCallInputChargeMultiplier = 2.0
++
++// applyStrictPreCallBudget caps req.MaxTokens before provider network I/O. The
++// prompt estimate is intentionally an upper bound based on the complete JSON
++// request byte size plus framing headroom. Byte count is conservative for the
++// byte-backed tokenizers used by supported providers and avoids needing another
++// tokenizer/model/API call on Android.
++func (a *Agent) applyStrictPreCallBudget(ctx context.Context, req *provider.Request) error {
++	if a == nil || req == nil || !a.StrictPreCallBudget() {
++		return nil
++	}
++	limit := a.strictTaskBudgetLimit(ctx)
++	if limit.Cost <= 0 && limit.Tokens <= 0 {
++		// Strict mode is only enabled by a host that promised a hard ceiling.
++		// Zero therefore means no allowance remains, not "unconfigured".
++		return fmt.Errorf("pre-call hard budget has no remaining allowance")
++	}
++
++	promptUpper := providerRequestTokenUpperBound(*req)
++	cap := req.MaxTokens
++	setCap := func(v int) {
++		if v <= 0 {
++			return
++		}
++		if cap <= 0 || v < cap {
++			cap = v
++		}
++	}
++
++	if limit.Tokens > 0 {
++		used := a.task.budget.promptTokens + a.task.budget.outputTokens
++		remaining := limit.Tokens - used
++		if remaining <= 0 {
++			return fmt.Errorf("pre-call token budget exhausted: used %d of %d", used, limit.Tokens)
++		}
++		share := remaining
++		if share <= promptUpper {
++			return fmt.Errorf("pre-call token budget cannot safely admit request: current-attempt allowance %d <= prompt upper bound %d", share, promptUpper)
++		}
++		setCap(share - promptUpper)
++	}
++
++	if limit.Cost > 0 {
++		pricing := a.svc.pricing
++		if pricing == nil {
++			return fmt.Errorf("pre-call cost budget cannot be enforced without model pricing")
++		}
++		remaining := limit.Cost - a.task.budget.cost
++		if remaining <= 0 {
++			return fmt.Errorf("pre-call cost budget exhausted: %.6f of %.6f spent", a.task.budget.cost, limit.Cost)
++		}
++		share := remaining
++		inputRate := math.Max(pricing.Input, pricing.CacheHit)
++		inputUpper := float64(promptUpper) * inputRate * strictPreCallInputChargeMultiplier / 1e6
++		if inputUpper >= share {
++			return fmt.Errorf("pre-call cost budget cannot safely admit prompt: estimated input %.6f >= current-attempt allowance %.6f %s", inputUpper, share, pricing.Symbol())
++		}
++		if pricing.Output > 0 {
++			out := int(math.Floor((share - inputUpper) * 1e6 / pricing.Output))
++			if out <= 0 {
++				return fmt.Errorf("pre-call cost budget leaves no completion tokens")
++			}
++			setCap(out)
++		}
++	}
++
++	if cap > 0 {
++		req.MaxTokens = cap
++	}
++	return nil
++}
++
++func providerRequestTokenUpperBound(req provider.Request) int {
++	clone := req
++	clone.MaxTokens = 0
++	b, err := json.Marshal(clone)
++	if err != nil {
++		// Fail closed with a deliberately large bound rather than pretending an
++		// unserializable request is cheap.
++		return 1 << 30
++	}
++	overhead := 4096 + 128*(len(req.Messages)+len(req.Tools))
++	if n := len(b) + overhead; n > 0 {
++		return n
++	}
++	return 1
++}
+diff --git a/internal/agent/run_loop.go b/internal/agent/run_loop.go
+index bde3f2c..e94b2b1 100644
+--- a/internal/agent/run_loop.go
++++ b/internal/agent/run_loop.go
+@@ -401,6 +401,10 @@ func (a *Agent) streamWithSamplingRecovery(ctx context.Context, turn int) stream
+ 			// streak and eventually re-arm recovery for a future regression.
+ 			a.observeMissingAssistantReasoning(result.assistantMessage(), result.reasoningComplete)
+ 		}
++		if a.StrictPreCallBudget() {
++			// strict-one-paid-attempt-v0.20-fixed9: a replay is another paid request.
++			shouldRetry = false
++		}
+ 		if issue == ReasoningReplayOverflow {
+ 			event.RecordProtocolRecovery(a.svc.sink, event.ProtocolRecoveryAudit{Kind: event.ProtocolRecoveryReasoningOverflowDetected})
+ 			result.usage = finalizeSamplingUsage(billable, result.usage)
+diff --git a/internal/agent/run_usage.go b/internal/agent/run_usage.go
+index 20d2df1..623ac93 100644
+--- a/internal/agent/run_usage.go
++++ b/internal/agent/run_usage.go
+@@ -279,4 +279,5 @@ func (a *Agent) emitTurnUsage(usage *provider.Usage, cacheDiagnostics *CacheDiag
+ 		UsageSource:      a.usageSource,
+ 		CacheDiagnostics: cacheDiagnostics,
+ 		SessionHit:       int(a.sess.cacheHit.Load()), SessionMiss: int(a.sess.cacheMiss.Load())})
++	writeBalanceV20UsageReceipt(a.modelRef, usage)
+ }
+diff --git a/internal/agent/sampling_request.go b/internal/agent/sampling_request.go
+index 0d01c23..7730298 100644
+--- a/internal/agent/sampling_request.go
++++ b/internal/agent/sampling_request.go
+@@ -48,6 +48,14 @@ func (a *Agent) normalizeModelRequestMessages(msgs []provider.Message) []provide
+ }
+ 
+ func (a *Agent) streamProviderRequest(ctx context.Context, req provider.Request) (<-chan provider.Chunk, error) {
++	if err := a.applyStrictPreCallBudget(ctx, &req); err != nil {
++		return nil, err
++	}
++	if a.StrictPreCallBudget() {
++		// strict-one-paid-attempt-v0.20-fixed9: no hidden header/status retry
++		// may start another billable HTTP request without a fresh ledger gate.
++		ctx = provider.WithRequestRetryLimit(ctx, 0)
++	}
+ 	return a.svc.prov.Stream(ctx, req)
+ }
+ 
+@@ -60,7 +68,7 @@ func (a *Agent) handleSamplingError(
+ 	result, last streamedTurn,
+ 	billable *provider.Usage,
+ ) (retry bool, terminal streamedTurn) {
+-	if provider.IsStreamInterrupted(result.err) && attempt < maxSamplingAttempts {
++	if !a.StrictPreCallBudget() && provider.IsStreamInterrupted(result.err) && attempt < maxSamplingAttempts {
+ 		streamSink.Discard()
+ 		reason := provider.StreamInterruptReason(result.err)
+ 		a.emitStreamAttempt(attemptID, event.StreamAttemptDiscard, attempt, reason, result.err)
+diff --git a/internal/control/approval.go b/internal/control/approval.go
+index dc4fc3e..972dfdd 100644
+--- a/internal/control/approval.go
++++ b/internal/control/approval.go
+@@ -736,3 +736,23 @@ func permissionRequestHookPayload(tool, subject string, args json.RawMessage) (s
+ 		return subject, args, true
+ 	}
+ }
++
++// setPolicy refreshes the policy snapshot used by approval bookkeeping after a
++// runtime-only APK tool policy change.
++func (a *approvalManager) setPolicy(p permission.Policy) {
++	a.mu.Lock()
++	a.policy = p
++	a.mu.Unlock()
++}
++
++// SetPolicy atomically refreshes the shared subagent policy and mode.
++func (g *SharedHeadlessGate) SetPolicy(p permission.Policy, mode string) {
++	if g == nil {
++		return
++	}
++	next := BuildHeadlessApprovalGate(p, mode)
++	g.mu.Lock()
++	g.policy = p
++	g.gate = next
++	g.mu.Unlock()
++}
+diff --git a/internal/control/capability.go b/internal/control/capability.go
+index 306a0e3..cf38196 100644
+--- a/internal/control/capability.go
++++ b/internal/control/capability.go
+@@ -103,7 +103,11 @@ func (c *Controller) routeCapabilities(ctx context.Context, routeInput string) c
+ 		}
+ 	}
+ 	ambiguous := !strong && len(decision.Candidates) > 1
+-	if ambiguous && c.semanticRouter != nil {
++	// Semantic routing is an extra provider call. While Balance hard-budget
++	// admission is active, deterministic routing wins so every billable request
++	// stays on the guarded executor provider seam.
++	strictBudget := c.executor != nil && c.executor.StrictPreCallBudget()
++	if ambiguous && c.semanticRouter != nil && !strictBudget {
+ 		before := len(decision.Candidates)
+ 		decision = c.semanticRouter.RouteSemantic(ctx, routeInput, catalog, decision)
+ 		if c.capabilityProxy {
+diff --git a/internal/control/controller.go b/internal/control/controller.go
+index fc15251..fa39e46 100644
+--- a/internal/control/controller.go
++++ b/internal/control/controller.go
+@@ -114,6 +114,9 @@ type Controller struct {
+ 	goalUsageTee *goalUsageTee
+ 	sink         event.Sink
+ 	policy       permission.Policy
++	// runtimeToolDecisions are ephemeral APK/session overrides. They never
++	// mutate user config: deny > ask > allow through the native permission gate.
++	runtimeToolDecisions map[string]permission.Decision
+ 	// subagentGate is the shared gate every headless-only sub-agent surface
+ 	// reads from (see Options.SubagentGate). Nil when the caller didn't build
+ 	// one — sub-agents then keep whatever gate they were constructed with.
+@@ -614,6 +617,7 @@ func New(opts Options) *Controller {
+ 		goalUsageTee:                      usageTee,
+ 		sink:                              sink,
+ 		policy:                            opts.Policy,
++		runtimeToolDecisions:              map[string]permission.Decision{},
+ 		subagentGate:                      opts.SubagentGate,
+ 		label:                             opts.Label,
+ 		modelRef:                          opts.ModelRef,
+@@ -2261,7 +2265,7 @@ func (p plannerPlanApprover) RunWithPlannerApproval(ctx context.Context, plan st
+ }
+ 
+ func (c *Controller) newInteractiveGate() *permission.Gate {
+-	policy := c.policy
++	policy := c.policyWithRuntimeToolDecisions(c.policy)
+ 	mode := c.approval.mode()
+ 	switch mode {
+ 	case ToolApprovalAuto, ToolApprovalYolo:
+@@ -2308,7 +2312,7 @@ func (c *Controller) allowLowRiskRemember(args json.RawMessage) bool {
+ }
+ 
+ func (c *Controller) newHeadlessGate(mode string) *freshHumanHeadlessGate {
+-	gate := BuildHeadlessApprovalGate(c.policy, mode)
++	gate := BuildHeadlessApprovalGate(c.policyWithRuntimeToolDecisions(c.policy), mode)
+ 	gate.allowLowRiskFreshAction = func(toolName string, args json.RawMessage) bool {
+ 		return toolName == memoryRememberTool && c.allowLowRiskRemember(args)
+ 	}
+diff --git a/internal/control/inbox.go b/internal/control/inbox.go
+index 403a6e9..de843be 100644
+--- a/internal/control/inbox.go
++++ b/internal/control/inbox.go
+@@ -653,6 +653,21 @@ func (c *Controller) onInboxTurnDone() {
+ 		sessioninbox.NoteUncertain()
+ 		return
+ 	}
++	// Persist one atomic completion marker for the entire active set after the
++	// transcript snapshot and before any dequeue. A crash after this commit can
++	// be recovered by finalizing the inbox items without replaying the turn.
++	if err := st.CommitCompletion(ids); err != nil {
++		slog.Warn("controller: inbox completion receipt", "err", err)
++		for _, id := range ids {
++			_ = st.SetState(id, sessioninbox.StateUncertain, "turn completed but durable completion receipt failed")
++		}
++		_ = st.SetPaused(true)
++		c.inbox.mu.Lock()
++		c.inbox.untrackActiveSet(ids)
++		c.inbox.mu.Unlock()
++		sessioninbox.NoteUncertain()
++		return
++	}
+ 	// Keep ownership published through every durable acknowledgement. Recovery
+ 	// can run concurrently, sees these IDs as live without a Controller lock,
+ 	// and ownership is removed only after dequeue or uncertain state is durable.
+diff --git a/internal/control/inbox_run.go b/internal/control/inbox_run.go
+index 28f6502..2d2c805 100644
+--- a/internal/control/inbox_run.go
++++ b/internal/control/inbox_run.go
+@@ -48,6 +48,10 @@ func (c *Controller) RunInboxTurn(ctx context.Context, id string) error {
+ }
+ 
+ func (c *Controller) prepareInboxRun(env sessioninbox.PromptEnvelope) (func(context.Context) error, string, error) {
++	budget, budgetErr := parseInboxTaskBudget(env.Extra)
++	if budgetErr != nil {
++		return nil, "invalid queued task budget: " + budgetErr.Error(), nil
++	}
+ 	submit, frozenImages, block, err := applyInboxReferences(env)
+ 	if err != nil || block != "" {
+ 		return nil, block, err
+@@ -57,6 +61,7 @@ func (c *Controller) prepareInboxRun(env sessioninbox.PromptEnvelope) (func(cont
+ 	requests := controlInvocationsFromInbox(env)
+ 	if len(requests) == 0 {
+ 		return func(ctx context.Context) error {
++			ctx = budget.withContext(ctx)
+ 			return c.runGoalLoopWithFrozenImagesRawDisplay(c.withTurnFormat(ctx, strings.TrimSpace(env.Format)), submit, raw, display, frozenImages)
+ 		}, "", nil
+ 	}
+@@ -65,6 +70,7 @@ func (c *Controller) prepareInboxRun(env sessioninbox.PromptEnvelope) (func(cont
+ 		return nil, err.Error(), nil
+ 	}
+ 	return func(ctx context.Context) error {
++		ctx = budget.withContext(ctx)
+ 		return c.runPreparedInvocationTurn(c.withTurnFormat(ctx, strings.TrimSpace(env.Format)), prepared, submit, raw, display, frozenImages)
+ 	}, "", nil
+ }
+diff --git a/internal/provider/retry.go b/internal/provider/retry.go
+index 546f775..d8f274a 100644
+--- a/internal/provider/retry.go
++++ b/internal/provider/retry.go
+@@ -66,6 +66,37 @@ type RetryNotify func(RetryInfo)
+ type retryNotifyKey struct{}
+ 
+ type requestAttemptCounterKey struct{}
++type requestRetryLimitKey struct{}
++
++// WithRequestRetryLimit caps SendWithRetry retries for this logical request.
++// A value of 0 means exactly one HTTP attempt. The default remains MaxRetries.
++func WithRequestRetryLimit(ctx context.Context, max int) context.Context {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	if max < 0 {
++		max = 0
++	}
++	if max > MaxRetries {
++		max = MaxRetries
++	}
++	return context.WithValue(ctx, requestRetryLimitKey{}, max)
++}
++
++func requestRetryLimit(ctx context.Context) int {
++	if ctx != nil {
++		if max, ok := ctx.Value(requestRetryLimitKey{}).(int); ok {
++			if max < 0 {
++				return 0
++			}
++			if max > MaxRetries {
++				return MaxRetries
++			}
++			return max
++		}
++	}
++	return MaxRetries
++}
+ 
+ type requestAttemptCounter struct {
+ 	count atomic.Int64
+@@ -278,15 +309,16 @@ func readErrorBody(resp *http.Response) []byte {
+ // failures are not retried (the model has already emitted tokens).
+ func SendWithRetry(ctx context.Context, httpClient *http.Client, opts SendOptions, newReq func(context.Context) (*http.Request, error)) (*http.Response, error) {
+ 	notify := retryNotifyFromContext(ctx)
++	maxRetries := requestRetryLimit(ctx)
+ 	var lastErr error
+ 	var retryAfter time.Duration
+ 	authRetries := 0
+ 
+-	for attempt := 0; attempt <= MaxRetries; attempt++ {
++	for attempt := 0; attempt <= maxRetries; attempt++ {
+ 		if attempt > 0 {
+ 			delay := backoffDelay(attempt, retryAfter)
+ 			if notify != nil {
+-				notify(RetryInfo{Attempt: attempt, Max: MaxRetries, Delay: delay, Err: lastErr})
++				notify(RetryInfo{Attempt: attempt, Max: maxRetries, Delay: delay, Err: lastErr})
+ 			}
+ 			select {
+ 			case <-ctx.Done():
+diff --git a/internal/serve/broadcaster.go b/internal/serve/broadcaster.go
+index 3312673..b870f50 100644
+--- a/internal/serve/broadcaster.go
++++ b/internal/serve/broadcaster.go
+@@ -8,6 +8,7 @@ import (
+ 	"reasonix/internal/billing"
+ 	"reasonix/internal/event"
+ 	"reasonix/internal/eventwire"
++	"reasonix/internal/sessioninbox"
+ )
+ 
+ // Broadcaster is the event.Sink the controller emits to in server mode. It
+@@ -20,6 +21,11 @@ type Broadcaster struct {
+ 	subs            map[chan []byte]struct{}
+ 	ledger          *billing.Ledger
+ 	displayCurrency string
++
++	observerMu      sync.RWMutex
++	observer        func(event.Event)
++	inboxObserverMu sync.RWMutex
++	inboxObserver   func(sessioninbox.InboxSnapshot)
+ }
+ 
+ // NewBroadcaster returns an empty Broadcaster ready to accept subscribers.
+@@ -39,6 +45,54 @@ func (b *Broadcaster) SetDisplayCurrency(currency string) {
+ 	b.mu.Unlock()
+ }
+ 
++// SetEventObserver installs one content-agnostic observer invoked after an
++// event has been accounted/fanned out. The observer is separate from SSE
++// subscribers so APK-side accounting can watch Usage without changing the core
++// event schema or feeding anything back into the agent.
++func (b *Broadcaster) SetEventObserver(fn func(event.Event)) {
++	if b == nil {
++		return
++	}
++	b.observerMu.Lock()
++	b.observer = fn
++	b.observerMu.Unlock()
++}
++
++// SetInboxObserver installs the APK-side observer for the native durable
++// session inbox. Broadcaster implements the optional InboxChanged sink
++// capability, so Controller queue transitions remain visible without polling
++// or introducing a second queue state machine.
++func (b *Broadcaster) SetInboxObserver(fn func(sessioninbox.InboxSnapshot)) {
++	if b == nil {
++		return
++	}
++	b.inboxObserverMu.Lock()
++	b.inboxObserver = fn
++	b.inboxObserverMu.Unlock()
++}
++
++func (b *Broadcaster) InboxChanged(snap sessioninbox.InboxSnapshot) {
++	if b == nil {
++		return
++	}
++	b.inboxObserverMu.RLock()
++	fn := b.inboxObserver
++	b.inboxObserverMu.RUnlock()
++	if fn != nil {
++		fn(snap)
++	}
++}
++
++func (b *Broadcaster) eventObserver() func(event.Event) {
++	if b == nil {
++		return nil
++	}
++	b.observerMu.RLock()
++	fn := b.observer
++	b.observerMu.RUnlock()
++	return fn
++}
++
+ // ResetSession clears the usage ledger for /new, /resume and /fork.
+ func (b *Broadcaster) ResetSession() {
+ 	if b == nil {
+@@ -71,7 +125,6 @@ func (b *Broadcaster) Emit(e event.Event) {
+ 		return
+ 	}
+ 	b.mu.Lock()
+-	defer b.mu.Unlock()
+ 	if e.Kind == event.Usage && e.Usage != nil && e.CostQuote != nil {
+ 		if b.ledger == nil {
+ 			b.ledger = billing.NewLedger()
+@@ -89,6 +142,13 @@ func (b *Broadcaster) Emit(e event.Event) {
+ 		default: // subscriber is behind; drop this frame for it
+ 		}
+ 	}
++	b.mu.Unlock()
++
++	// Run observers outside the broadcaster lock: observers may publish to a
++	// different stream or read session state and must never stall core SSE fanout.
++	if observe := b.eventObserver(); observe != nil {
++		observe(e)
++	}
+ }
+ 
+ // EmitTo delivers an event only to the supplied subscriber. It is used for
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index 73b1199..36561c9 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -25,6 +25,7 @@ import (
+ 	"reasonix/internal/boot"
+ 	"reasonix/internal/config"
+ 	"reasonix/internal/control"
++	"reasonix/internal/efficiency"
+ 	"reasonix/internal/event"
+ 	"reasonix/internal/jobs"
+ 	"reasonix/internal/nilutil"
+@@ -54,6 +55,34 @@ type Server struct {
+ 	bindMu sync.Mutex
+ 	ctrl   control.SessionAPI
+ 	bc     *Broadcaster
++
++	// Balance mod v0.1: APK-facing economy/control telemetry. These are kept
++	// outside SessionAPI so upstream frontend contracts stay source-compatible.
++	modGov       *efficiency.Governor
++	modQuality   *efficiency.QualityMonitor
++	modRouter    *efficiency.Escalator
++	modCycle     *efficiency.RepairCycle
++	modExec      *efficiency.ExecutionRouter
++	modPower     *efficiency.PowerEngine
++	modPowerTurn *modPowerTurnTracker
++	modAuto      *modAutoOrchestrator
++	modProfile   *efficiency.ProjectProfileManager
++	modHub       *modBroadcaster
++	modMu        sync.RWMutex
++	modTaskGate  modTaskCostGateStatus
++	modEnv       modEnvironmentSnapshot
++	// v0.8 persists APK-owned policy per workspace so backend restarts/workspace
++	// supervisor handoffs do not reset the user budget or tool/profile policy.
++	modPersistMu   sync.Mutex
++	modProjectsMu  sync.Mutex
++	modPersistPath string
++	modPersistErr  string
++	// modToolDecisions persists APK/session tool overrides across native model rebuilds.
++	modToolDecisions map[string]string
++	// modExecutionPolicyMode is the host-owned tool-policy overlay selected by
++	// the execution router. Pro diagnosis is physically read-only at the native
++	// permission/schema layer; it is not merely a prompt instruction.
++	modExecutionPolicyMode efficiency.ExecutionMode
+ 	// buildController builds the replacement controller during a model switch.
+ 	// Nil in production (switchModel falls back to boot.Build); tests inject a
+ 	// fake so switchModel can be exercised without real provider IO.
+@@ -84,11 +113,48 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 		bc = NewBroadcaster()
+ 	}
+ 	s := &Server{
+-		ctrl:   ctrl,
+-		bc:     bc,
+-		titles: newTitleCache(ctrl.SessionDir()),
+-		auth:   newAuthGate(serveCfg),
+-	}
++		ctrl:             ctrl,
++		bc:               bc,
++		modGov:           efficiency.NewGovernor(),
++		modQuality:       efficiency.NewQualityMonitor(),
++		modRouter:        efficiency.NewEscalator(),
++		modProfile:       efficiency.NewProjectProfileManager(),
++		modHub:           newModBroadcaster(),
++		modToolDecisions: map[string]string{},
++		titles:           newTitleCache(ctrl.SessionDir()),
++		auth:             newAuthGate(serveCfg),
++	}
++	// v0.5 execution routing stays disabled until explicitly configured. The
++	// switch adapter is the native serve model-switch path, so there is still one
++	// controller/session implementation rather than a Balance Mod fork.
++	s.modEnv = discoverModEnvironment(context.Background(), s.modWorkspacePath(), false)
++	s.modExec = efficiency.NewExecutionRouter(s.modGov)
++	s.modExec.SetModeGuard(func(ctx context.Context, mode efficiency.ExecutionMode, _ string) (func(), error) {
++		return s.prepareModExecutionPolicyMode(mode)
++	})
++	s.modExec.SetSwitcher(func(ctx context.Context, ref string) error { return s.switchModel(ctx, ref) })
++	s.modExec.ObserveCurrentModel(currentModelRef(ctrl))
++	// v0.4 wires the previously independent policy pieces into one repair cycle.
++	// The cache lives beside session state (not in the project tree), while
++	// rollback delegates to Reasonix's native checkpoint transaction engine.
++	cachePath := ""
++	if dir := strings.TrimSpace(ctrl.SessionDir()); dir != "" {
++		cachePath = filepath.Join(dir, "balance", "failure-cache.jsonl")
++	}
++	cache, err := efficiency.OpenFailureCache(cachePath)
++	if err != nil {
++		cache, _ = efficiency.OpenFailureCache("")
++	}
++	s.modCycle = efficiency.NewRepairCycle(s.modRouter, s.modGov, cache)
++	s.modCycle.SetRollback(func(reason string) error { return s.modRollbackLatestCode(reason) })
++	s.modPower = efficiency.NewPowerEngine(s.modCycle, s.modExec, s.modGov)
++	s.modPowerTurn = newModPowerTurnTracker()
++	s.modAuto = newModAutoOrchestrator()
++	// Restore only APK-owned policy. Native skills/instruction files remain owned
++	// by Reasonix itself. A corrupt state is fail-closed and reported in bootstrap.
++	s.loadModAppState()
++	bc.SetEventObserver(s.observeCoreEvent)
++	bc.SetInboxObserver(s.observeModInboxSnapshot)
+ 	if cfg, err := config.Load(); err == nil {
+ 		bc.SetDisplayCurrency(cfg.ExplicitDisplayCurrency())
+ 	}
+@@ -284,6 +350,19 @@ func (s *Server) switchModelLocked(ctx context.Context, ref string) error {
+ 	}
+ 	s.ctrl = newCtrl
+ 	s.mu.Unlock()
++	// Re-apply runtime-only APK policy to the replacement controller. Tool
++	// decisions and hard-budget admission live on the controller/agent instance,
++	// so a model rebuild must restore both before another turn can start.
++	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
++		slog.Warn("serve: reapply Balance Mod tool policy", "err", err)
++	}
++	gate := s.applyModTaskCostBudget()
++	if snap := s.modGov.Snapshot(); snap.Enabled && snap.HardStop && !gate.PreCall {
++		slog.Warn("serve: Balance Mod hard pre-call budget is not active after model switch", "reason", gate.Reason)
++	}
++	if s.modExec != nil {
++		s.modExec.ObserveCurrentModel(currentModelRef(newCtrl))
++	}
+ 	s.refreshProviderSetup(currentModelRef(newCtrl))
+ 
+ 	// Off-lock: tear down the old controller. Close can block up to 15s.
+@@ -372,6 +451,16 @@ func (s *Server) reloadExtensions(ctx context.Context) error {
+ 	}
+ 	s.ctrl = newCtrl
+ 	s.mu.Unlock()
++	// Extension reload replaces the controller generation just like a model
++	// switch. Restore runtime-only APK permissions and the hard pre-call budget
++	// before another turn can be admitted.
++	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
++		slog.Warn("serve: reapply Balance Mod tool policy after extension reload", "err", err)
++	}
++	gate := s.applyModTaskCostBudget()
++	if snap := s.modGov.Snapshot(); snap.Enabled && snap.HardStop && !gate.PreCall {
++		slog.Warn("serve: Balance Mod hard pre-call budget is not active after extension reload", "reason", gate.Reason)
++	}
+ 	s.refreshProviderSetup(currentModelRef(newCtrl))
+ 
+ 	cur.Close()
+@@ -511,6 +600,78 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("GET /models", s.models)
+ 	mux.HandleFunc("POST /extensions/reload", s.reloadExtensionsHTTP)
+ 	mux.HandleFunc("GET /status", s.status)
++	// Balance mod API is intentionally namespaced so upstream Reasonix web
++	// clients remain untouched while the future Android APK gets a stable,
++	// machine-readable surface.
++	mux.HandleFunc("GET /mod/status", s.modStatus)
++	mux.HandleFunc("GET /mod/budget", s.modBudgetGet)
++	mux.HandleFunc("POST /mod/budget", s.modBudgetSet)
++	mux.HandleFunc("POST /mod/budget/reset", s.modBudgetReset)
++	mux.HandleFunc("GET /mod/resources", s.modResources)
++	mux.HandleFunc("GET /mod/quality", s.modQualityGet)
++	mux.HandleFunc("GET /mod/router", s.modRouterGet)
++	mux.HandleFunc("POST /mod/router/reset", s.modRouterReset)
++	mux.HandleFunc("GET /mod/cycle", s.modCycleGet)
++	mux.HandleFunc("POST /mod/cycle/reset", s.modCycleReset)
++	mux.HandleFunc("GET /mod/execution", s.modExecutionGet)
++	mux.HandleFunc("GET /mod/power", s.modPowerGet)
++	mux.HandleFunc("POST /mod/power/reset", s.modPowerReset)
++	mux.HandleFunc("POST /mod/power/apply-pending", s.modPowerApplyPending)
++	mux.HandleFunc("GET /mod/orchestrator", s.modAutoGet)
++	mux.HandleFunc("POST /mod/orchestrator/config", s.modAutoConfigure)
++	mux.HandleFunc("POST /mod/orchestrator/stop", s.modAutoStop)
++	mux.HandleFunc("POST /mod/orchestrator/resume", s.modAutoResume)
++	mux.HandleFunc("POST /mod/execution/config", s.modExecutionConfigure)
++	mux.HandleFunc("POST /mod/execution/reset", s.modExecutionReset)
++	mux.HandleFunc("GET /mod/agent", s.modAgentGet)
++	mux.HandleFunc("POST /mod/agent/reload", s.modAgentReload)
++	mux.HandleFunc("GET /mod/capabilities", s.modCapabilitiesGet)
++	mux.HandleFunc("GET /mod/environment", s.modEnvironmentGet)
++	mux.HandleFunc("GET /mod/project", s.modProjectGet)
++	mux.HandleFunc("POST /mod/project", s.modProjectSet)
++	mux.HandleFunc("GET /mod/agent/tools", s.modAgentToolsGet)
++	mux.HandleFunc("POST /mod/agent/tools", s.modAgentToolsSet)
++	mux.HandleFunc("GET /mod/agent/skills", s.modAgentSkillsGet)
++	mux.HandleFunc("POST /mod/agent/skills", s.modAgentSkillsSet)
++	mux.HandleFunc("GET /mod/instructions", s.modInstructionsGet)
++	mux.HandleFunc("POST /mod/instructions", s.modInstructionsSet)
++	mux.HandleFunc("GET /mod/workspace", s.modWorkspaceGet)
++	mux.HandleFunc("POST /mod/workspace/validate", s.modWorkspaceValidate)
++	mux.HandleFunc("GET /mod/workspace/files", s.modWorkspaceFiles)
++	mux.HandleFunc("GET /mod/workspace/file", s.modWorkspaceFile)
++	mux.HandleFunc("GET /mod/recovery", s.modRecoveryGet)
++	mux.HandleFunc("POST /mod/recovery/rollback-last", s.modRecoveryRollbackLast)
++	mux.HandleFunc("GET /mod/events", s.modEvents)
++	mux.HandleFunc("GET /mod/live/history", s.modLiveHistory)
++	// v0.8 single control-plane surface for the Android APK. Task routes are
++	// aliases to the native submit/cancel handlers, not a second agent loop.
++	mux.HandleFunc("GET /mod/app/bootstrap", s.modAppBootstrap)
++	mux.HandleFunc("GET /mod/app/contract", s.modAppContract)
++	mux.HandleFunc("POST /mod/app/apply", s.modAppApply)
++	mux.HandleFunc("POST /mod/app/task/start", s.submit)
++	mux.HandleFunc("POST /mod/app/task/stop", s.cancel)
++	mux.HandleFunc("GET /mod/app/persistence", s.modAppPersistenceGet)
++	mux.HandleFunc("POST /mod/app/persistence/save", s.modAppPersistenceSave)
++	// v0.9 project/task manager. Project switching remains supervisor-owned;
++	// task history reuses native Reasonix sessions and never calls a provider.
++	mux.HandleFunc("GET /mod/projects", s.modProjectsGet)
++	mux.HandleFunc("POST /mod/projects/register", s.modProjectsRegister)
++	mux.HandleFunc("POST /mod/projects/remove", s.modProjectsRemove)
++	mux.HandleFunc("POST /mod/projects/open", s.modProjectsOpen)
++	mux.HandleFunc("GET /mod/tasks", s.modTasksGet)
++	mux.HandleFunc("POST /mod/tasks/rename", s.modTasksRename)
++	// v0.10 APK task queue/recovery facade. Every mutation delegates to the
++	// native durable session inbox; there is no Balance-owned queue database.
++	mux.HandleFunc("GET /mod/queue", s.modQueueGet)
++	mux.HandleFunc("POST /mod/queue/items", s.modQueueEnqueue)
++	mux.HandleFunc("PATCH /mod/queue/items/{id}", s.modQueueUpdate)
++	mux.HandleFunc("DELETE /mod/queue/items/{id}", s.modQueueDelete)
++	mux.HandleFunc("POST /mod/queue/move", s.modQueueMove)
++	mux.HandleFunc("POST /mod/queue/pause", s.modQueuePause)
++	mux.HandleFunc("POST /mod/queue/resume", s.modQueueResume)
++	mux.HandleFunc("POST /mod/queue/items/{id}/retry", s.modQueueRetry)
++	mux.HandleFunc("GET /mod/queue/recovery", s.modQueueRecoveryGet)
++	mux.HandleFunc("POST /mod/queue/recovery/retry", s.modQueueRecoveryRetry)
+ 	mux.HandleFunc("GET /sessions", s.sessions)
+ 	mux.HandleFunc("GET /skills", s.skills)
+ 	mux.HandleFunc("GET /todos", s.todos)
+@@ -720,6 +881,10 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "shell commands are unavailable over HTTP", http.StatusForbidden)
+ 		return
+ 	}
++	if s.modAuto != nil && s.modAuto.BlocksSubmit() {
++		http.Error(w, "automatic continuation is transitioning; queue user input with POST /mod/queue/items or stop the orchestrator first", http.StatusConflict)
++		return
++	}
+ 	// Intercept /model <ref> for runtime model switching (the controller's
+ 	// Submit path only lists models — switching is frontend-specific).
+ 	if strings.HasPrefix(trimmed, "/model ") {
+@@ -751,6 +916,15 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
+ 	// published replacement. This closes the check/build/swap race where a
+ 	// request could otherwise start on cur after reload's initial busy check.
+ 	s.bindMu.Lock()
++	if ok, reason := s.modHardBudgetAdmissionReady(); !ok {
++		status := http.StatusConflict
++		if s.modGov.Snapshot().Exhausted {
++			status = http.StatusPaymentRequired
++		}
++		s.bindMu.Unlock()
++		http.Error(w, "hard budget blocked task admission: "+reason, status)
++		return
++	}
+ 	ctrl := s.ctl()
+ 	// Fix false 202 while a turn is active: SubmitHTTPFormat silently drops
+ 	// concurrent input. Clients must use POST /inbox/items for durable follow-up.
+@@ -1413,6 +1587,15 @@ func titleSource(first string) string {
+ // generateTitle calls a lightweight LLM to produce a short session title.
+ // Returns empty string on any error — callers should fall back to a preview.
+ func (s *Server) generateTitle(ctx context.Context, firstMsg string) string {
++	// Title generation is cosmetic and uses a separate provider path. Under a
++	// hard KZT budget, skip it entirely rather than allow unreserved spend that
++	// sits outside the guarded executor turn. Session previews remain the fallback.
++	if s.modGov != nil {
++		snap := s.modGov.Snapshot()
++		if snap.Enabled && snap.HardStop {
++			return ""
++		}
++	}
+ 	firstMsg = titleSource(firstMsg)
+ 	if nilutil.IsNil(s.titleProv) || firstMsg == "" {
+ 		return ""
+diff --git a/internal/sessioninbox/manifest.go b/internal/sessioninbox/manifest.go
+index 122c359..bf753e9 100644
+--- a/internal/sessioninbox/manifest.go
++++ b/internal/sessioninbox/manifest.go
+@@ -215,6 +215,14 @@ func validateManifest(m *manifest, allowUnknownEnums bool) error {
+ 		if item.Checksum != "" && !validSHA256(item.Checksum) {
+ 			return fmt.Errorf("invalid inbox item checksum")
+ 		}
++		hasCompletionReceipt := item.CompletionReceipt != ""
++		hasCompletionTime := !item.CompletionCommittedAt.IsZero()
++		if hasCompletionReceipt != hasCompletionTime {
++			return fmt.Errorf("incomplete inbox completion receipt")
++		}
++		if hasCompletionReceipt && !validSHA256(item.CompletionReceipt) {
++			return fmt.Errorf("invalid inbox completion receipt")
++		}
+ 	}
+ 	if allowUnknownEnums {
+ 		return nil
+diff --git a/internal/sessioninbox/ops.go b/internal/sessioninbox/ops.go
+index d51e817..c939c28 100644
+--- a/internal/sessioninbox/ops.go
++++ b/internal/sessioninbox/ops.go
+@@ -478,6 +478,9 @@ func (s *Store) RetryItem(id string) error {
+ 	if i < 0 {
+ 		return ErrNotFound
+ 	}
++	if hasDurableCompletion(next.Items[i]) {
++		return ErrInvalidState
++	}
+ 	switch next.Items[i].State {
+ 	case StateUncertain, StateBlocked:
+ 		next.Items[i].State = StateQueued
+diff --git a/internal/sessioninbox/recovery.go b/internal/sessioninbox/recovery.go
+index 4b82806..b4e3737 100644
+--- a/internal/sessioninbox/recovery.go
++++ b/internal/sessioninbox/recovery.go
+@@ -3,8 +3,9 @@ package sessioninbox
+ import "time"
+ 
+ // RecoverOrphanedInFlight converts admitted items that no live Controller owns
+-// into reviewable pending work. The transition is atomic so a crash cannot
+-// leave only part of a multi-item active set recoverable.
++// into reviewable pending work. A completed item carrying a durable completion
++// receipt is finalized instead of replayed. The transition is atomic across the
++// whole manifest transaction.
+ func (s *Store) RecoverOrphanedInFlight(ownedIDs []string) (int, error) {
+ 	owned := make(map[string]struct{}, len(ownedIDs))
+ 	for _, id := range ownedIDs {
+@@ -37,6 +38,10 @@ func (s *Store) RecoverOrphanedInFlightOwnedBy(ownedBy func(string) bool) (int,
+ 		if isOwned(s.man.Items[i].ID) {
+ 			continue
+ 		}
++		if hasDurableCompletion(s.man.Items[i]) {
++			needsRecovery = true
++			continue
++		}
+ 		switch s.man.Items[i].State {
+ 		case StateRunning, StateSteerAccepted, StateSteerConsumed:
+ 			needsRecovery = true
+@@ -56,6 +61,7 @@ func (s *Store) RecoverOrphanedInFlightOwnedBy(ownedBy func(string) bool) (int,
+ 
+ 	next := s.man.clone()
+ 	now := time.Now().UTC()
++	completedBlobs := finalizeCommittedOrphans(next, isOwned, now)
+ 	recovered := 0
+ 	for i := range next.Items {
+ 		if isOwned(next.Items[i].ID) {
+@@ -69,15 +75,22 @@ func (s *Store) RecoverOrphanedInFlightOwnedBy(ownedBy func(string) bool) (int,
+ 			recovered++
+ 		}
+ 	}
+-	if recovered == 0 {
++	if recovered == 0 && len(completedBlobs) == 0 {
+ 		return 0, nil
+ 	}
+-	next.Paused = true
+-	next.Recovered = true
+-	next.RecoveredN = min(len(next.Items), next.RecoveredN+recovered)
++	if recovered > 0 {
++		next.Paused = true
++		next.Recovered = true
++		next.RecoveredN = min(len(next.Items), next.RecoveredN+recovered)
++	} else {
++		clearPauseIfEmpty(next)
++	}
+ 	if err := s.commitManifestLocked(next); err != nil {
+ 		return 0, err
+ 	}
++	for _, blob := range completedBlobs {
++		s.removeBlobLocked(blob)
++	}
+ 	s.notifyLocked(s.snapshotLocked())
+ 	return recovered, nil
+ }
+diff --git a/internal/sessioninbox/store.go b/internal/sessioninbox/store.go
+index 13fe479..307cc61 100644
+--- a/internal/sessioninbox/store.go
++++ b/internal/sessioninbox/store.go
+@@ -209,14 +209,21 @@ func (s *Store) loadOrInitLocked() error {
+ 		}
+ 		man.SchemaVersion = SchemaVersion
+ 	}
+-	// Cross-process recovery: another run left in-flight items.
++	// Cross-process recovery: another run left in-flight items. A durable
++	// completion receipt proves that SnapshotActivity crossed its commit
++	// boundary, so such an orphan is finalized without replay. Uncommitted
++	// in-flight work remains fail-closed as uncertain.
+ 	recovered := 0
++	completedBlobs := []string{}
+ 	if man.RunID != "" && man.RunID != s.runID {
++		now := time.Now().UTC()
++		completedBlobs = finalizeCommittedOrphans(man, nil, now)
+ 		for i := range man.Items {
+ 			switch man.Items[i].State {
+ 			case StateRunning, StateSteerAccepted, StateSteerConsumed:
+ 				man.Items[i].State = StateUncertain
+-				man.Items[i].UpdatedAt = time.Now().UTC()
++				man.Items[i].BlockReason = "in-flight owner was lost before durable completion receipt"
++				man.Items[i].UpdatedAt = now
+ 				recovered++
+ 			case StateQueued, StateBlocked, StateUncertain:
+ 				recovered++
+@@ -226,13 +233,21 @@ func (s *Store) loadOrInitLocked() error {
+ 			man.Paused = true
+ 			man.Recovered = true
+ 			man.RecoveredN = recovered
++		} else {
++			clearPauseIfEmpty(man)
+ 		}
+ 	}
+ 	man.RunID = s.runID
+ 	s.man = man
+ 	s.readonly = false
+-	if recovered > 0 || migrated {
+-		return s.commitManifestLocked(man)
++	if recovered > 0 || migrated || len(completedBlobs) > 0 {
++		if err := s.commitManifestLocked(man); err != nil {
++			return err
++		}
++		for _, blob := range completedBlobs {
++			s.removeBlobLocked(blob)
++		}
++		return nil
+ 	}
+ 	// GC orphan blobs without holding callers longer than needed.
+ 	s.gcOrphansLocked()
+diff --git a/internal/sessioninbox/types.go b/internal/sessioninbox/types.go
+index c5d5c83..eeab68b 100644
+--- a/internal/sessioninbox/types.go
++++ b/internal/sessioninbox/types.go
+@@ -7,7 +7,7 @@ import (
+ 
+ // SchemaVersion is the on-disk format version. Unknown higher versions load
+ // read-only and force pause; they never auto-execute.
+-const SchemaVersion = 2
++const SchemaVersion = 3
+ 
+ // Default capacity limits.
+ const (
+@@ -87,6 +87,11 @@ type InboxItemMeta struct {
+ 	Refs        []RefSummary `json:"refs,omitempty"`
+ 	BlockReason string       `json:"blockReason,omitempty"`
+ 	RunID       string       `json:"runId,omitempty"`
++	// CompletionReceipt is a durable task-level marker written only after the
++	// controller has committed the transcript/activity snapshot for this turn.
++	// Recovery may finalize an orphan carrying this marker without replaying it.
++	CompletionReceipt     string    `json:"completionReceipt,omitempty"`
++	CompletionCommittedAt time.Time `json:"completionCommittedAt,omitempty"`
+ }
+ 
+ // RefSummary is a short reference summary stored in the manifest.
+diff --git a/internal/tool/tool.go b/internal/tool/tool.go
+index ec8b2ba..fd1238a 100644
+--- a/internal/tool/tool.go
++++ b/internal/tool/tool.go
+@@ -291,12 +291,16 @@ type Registry struct {
+ 	// schema. Nil means every registered tool is provider-visible (tests and
+ 	// legacy direct construction).
+ 	providerVisible map[string]bool
+-	schemaRev       atomic.Uint64
++	// sessionHidden is a runtime-only deny projection used by APK/session
++	// policy. It trims denied tools from provider schemas without mutating the
++	// baseline providerVisible contract.
++	sessionHidden map[string]bool
++	schemaRev     atomic.Uint64
+ }
+ 
+ // NewRegistry returns an empty registry.
+ func NewRegistry() *Registry {
+-	return &Registry{tools: map[string]Tool{}, canon: map[string]json.RawMessage{}, suspended: map[string]bool{}}
++	return &Registry{tools: map[string]Tool{}, canon: map[string]json.RawMessage{}, suspended: map[string]bool{}, sessionHidden: map[string]bool{}}
+ }
+ 
+ // SetProviderVisibleTools restricts the provider-visible schema surface to the
+@@ -344,19 +348,49 @@ func (r *Registry) ProviderVisible(name string) bool {
+ 	}
+ 	r.mu.RLock()
+ 	defer r.mu.RUnlock()
+-	if r.providerVisible == nil {
+-		return true
+-	}
+-	return r.providerVisible[strings.TrimSpace(name)]
++	return r.isProviderVisibleLocked(strings.TrimSpace(name))
+ }
+ 
+ func (r *Registry) isProviderVisibleLocked(name string) bool {
++	if r.sessionHidden[name] {
++		return false
++	}
+ 	if r.providerVisible == nil {
+ 		return true
+ 	}
+ 	return r.providerVisible[name]
+ }
+ 
++// SetSessionHiddenTools replaces the runtime-only provider-schema deny list.
++// Get/ResolveCall remain intact so the native permission gate is still the
++// authority for indirect use_capability dispatch.
++func (r *Registry) SetSessionHiddenTools(names []string) {
++	if r == nil {
++		return
++	}
++	next := map[string]bool{}
++	for _, name := range names {
++		if name = strings.TrimSpace(name); name != "" {
++			next[name] = true
++		}
++	}
++	r.mu.Lock()
++	changed := len(next) != len(r.sessionHidden)
++	if !changed {
++		for n := range next {
++			if !r.sessionHidden[n] {
++				changed = true
++				break
++			}
++		}
++	}
++	r.sessionHidden = next
++	if changed {
++		r.schemaRev.Add(1)
++	}
++	r.mu.Unlock()
++}
++
+ // Add inserts (or replaces) a tool, preserving first-seen order. The schema is
+ // canonicalized once here — it never changes after registration, so Schemas()
+ // (called every turn) reuses the result instead of re-marshaling.
+

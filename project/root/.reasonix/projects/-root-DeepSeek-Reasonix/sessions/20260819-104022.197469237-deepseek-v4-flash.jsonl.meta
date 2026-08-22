@@ -1,0 +1,12 @@
+{
+  "id": "20260819-104022.197469237-deepseek-v4-flash",
+  "created_at": "2026-08-19T10:40:36.832713496Z",
+  "updated_at": "2026-08-19T11:40:49.042489797Z",
+  "model": "custom-api-deepseek-com/deepseek-v4-flash",
+  "revision": 19,
+  "content_digest": "e028b5778813cfa7fa926c5f60fa45c81ca5f885140238442d17422e4684eef7",
+  "writer_id": "localhost-29614-e72da7b672516ab8",
+  "schema_version": 2,
+  "turns": 13,
+  "preview": "[Проверка: перед финальным ответом проверь изменения подходящими инструментам…"
+}

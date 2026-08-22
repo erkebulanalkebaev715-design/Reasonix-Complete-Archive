@@ -1,0 +1,1167 @@
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+index 543f2d6..8081fee 100644
+--- a/docs/BALANCE_MOD.md
++++ b/docs/BALANCE_MOD.md
+@@ -430,3 +430,72 @@ Added:
+ 
+ The v0.9 offline gate must end with `BALANCE_MOD_V09_SMOKE_PASS`. No real
+ provider key is required or used.
++
++
++## v0.10 — Native durable task queue + reviewed recovery + per-turn budgets
++
++v0.10 does **not** add a Balance-owned scheduler. Reasonix already ships a
++transactional per-session instruction queue in `internal/sessioninbox`, with
++FIFO ordering, idempotency, bounded capacity, crash recovery, pause/resume,
++reordering, retry and atomic per-item blobs. The APK layer now exposes that same
++queue through a stable `/mod/queue/*` facade.
++
++### Queue and crash recovery
++
++`GET /mod/queue` projects the native inbox as APK-safe metadata: item id,
++position, state, bounded preview, capacity and recovery status. Listing does not
++call a provider. Queue bodies stay in the native per-session inbox blobs and are
++not copied into a second Balance database.
++
++The native recovery contract is preserved: a process interruption that leaves
++owned/running work ambiguous moves it to `uncertain` and pauses the inbox. The
++APK must review the recovery state. `POST /mod/queue/recovery/retry` accepts only
++explicit ids currently in `uncertain|blocked`; it never blindly retries every
++item. Automatic resume is intentionally false.
++
++The server `Broadcaster` now forwards Reasonix's optional `InboxChanged`
++capability into typed `queue.updated` Balance events, so the APK can redraw the
++queue from native state changes without parsing terminal output or polling each
++turn.
++
++### Per-turn task budget
++
++A queued APK item may carry a `taskBudget`:
++
++- `budgetKzt`
++- `tokenLimit`
++- `wallSeconds`
++
++Token/time ceilings are stored as typed inbox metadata and injected into the
++existing `agent.WithTaskBudget` context when that durable item is actually run.
++A KZT ceiling is converted to the active provider's price-book currency using
++the workspace FX map and then uses the same native Agent task-cost gate. The
++workspace KZT Governor remains authoritative and may stop work earlier; a queued
++task never reserves or grants additional workspace money.
++
++KZT admission is fail-closed: when the active provider has no billing currency
++or the APK has not supplied the required KZT FX rate, the task is rejected
++rather than being queued with an unenforceable money limit. If the workspace
++hard budget has less money remaining than the requested task ceiling, the
++effective task ceiling is clamped to that remaining workspace amount.
++
++The generic inbox budget keys are interpreted only when the queued turn starts,
++so normal chat and other frontends keep their existing budget behavior.
++
++### v0.10 APK endpoints
++
++Added:
++
++- `GET /mod/queue`
++- `POST /mod/queue/items`
++- `PATCH /mod/queue/items/{id}`
++- `DELETE /mod/queue/items/{id}`
++- `POST /mod/queue/move`
++- `POST /mod/queue/pause`
++- `POST /mod/queue/resume`
++- `POST /mod/queue/items/{id}/retry`
++- `GET /mod/queue/recovery`
++- `POST /mod/queue/recovery/retry`
++
++The v0.10 offline gate must end with `BALANCE_MOD_V10_SMOKE_PASS`. No real
++provider key is required or used.
+diff --git a/internal/control/inbox_budget.go b/internal/control/inbox_budget.go
+new file mode 100644
+index 0000000..bd15094
+--- /dev/null
++++ b/internal/control/inbox_budget.go
+@@ -0,0 +1,62 @@
++package control
++
++import (
++	"context"
++	"fmt"
++	"math"
++	"strconv"
++	"strings"
++	"time"
++
++	"reasonix/internal/agent"
++)
++
++const (
++	inboxTaskBudgetCostKey   = "reasonix.task_budget.cost"
++	inboxTaskBudgetTokensKey = "reasonix.task_budget.tokens"
++	inboxTaskBudgetWallMSKey = "reasonix.task_budget.wall_ms"
++)
++
++type inboxTaskBudgetSpec struct {
++	budget     agent.TaskBudget
++	configured bool
++}
++
++func parseInboxTaskBudget(extra map[string]string) (inboxTaskBudgetSpec, error) {
++	var out inboxTaskBudgetSpec
++	if len(extra) == 0 {
++		return out, nil
++	}
++	if raw := strings.TrimSpace(extra[inboxTaskBudgetCostKey]); raw != "" {
++		v, err := strconv.ParseFloat(raw, 64)
++		if err != nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
++			return out, fmt.Errorf("invalid task cost budget")
++		}
++		out.budget.Cost = v
++		out.configured = out.configured || v > 0
++	}
++	if raw := strings.TrimSpace(extra[inboxTaskBudgetTokensKey]); raw != "" {
++		v, err := strconv.ParseInt(raw, 10, 64)
++		if err != nil || v < 0 || v > 1_000_000_000 {
++			return out, fmt.Errorf("invalid task token budget")
++		}
++		out.budget.Tokens = int(v)
++		out.configured = out.configured || v > 0
++	}
++	if raw := strings.TrimSpace(extra[inboxTaskBudgetWallMSKey]); raw != "" {
++		v, err := strconv.ParseInt(raw, 10, 64)
++		if err != nil || v < 0 || v > int64((7*24*time.Hour)/time.Millisecond) {
++			return out, fmt.Errorf("invalid task wall-time budget")
++		}
++		out.budget.Wall = time.Duration(v) * time.Millisecond
++		out.configured = out.configured || v > 0
++	}
++	return out, nil
++}
++
++func (s inboxTaskBudgetSpec) withContext(ctx context.Context) context.Context {
++	if !s.configured {
++		return ctx
++	}
++	return agent.WithTaskBudget(ctx, s.budget)
++}
+diff --git a/internal/control/inbox_budget_test.go b/internal/control/inbox_budget_test.go
+new file mode 100644
+index 0000000..fe61652
+--- /dev/null
++++ b/internal/control/inbox_budget_test.go
+@@ -0,0 +1,34 @@
++package control
++
++import (
++	"context"
++	"testing"
++	"time"
++)
++
++func TestParseInboxTaskBudgetIsStrictAndContextScoped(t *testing.T) {
++	spec, err := parseInboxTaskBudget(map[string]string{
++		inboxTaskBudgetCostKey:   "2.5",
++		inboxTaskBudgetTokensKey: "1200",
++		inboxTaskBudgetWallMSKey: "30000",
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !spec.configured || spec.budget.Cost != 2.5 || spec.budget.Tokens != 1200 || spec.budget.Wall != 30*time.Second {
++		t.Fatalf("spec=%+v", spec)
++	}
++	if got := spec.withContext(context.Background()); got == nil {
++		t.Fatal("budget context is nil")
++	}
++	for _, extra := range []map[string]string{
++		{inboxTaskBudgetCostKey: "NaN"},
++		{inboxTaskBudgetCostKey: "-1"},
++		{inboxTaskBudgetTokensKey: "-1"},
++		{inboxTaskBudgetWallMSKey: "999999999999999"},
++	} {
++		if _, err := parseInboxTaskBudget(extra); err == nil {
++			t.Fatalf("invalid budget accepted: %v", extra)
++		}
++	}
++}
+diff --git a/internal/control/inbox_run.go b/internal/control/inbox_run.go
+index 28f6502..2d2c805 100644
+--- a/internal/control/inbox_run.go
++++ b/internal/control/inbox_run.go
+@@ -48,6 +48,10 @@ func (c *Controller) RunInboxTurn(ctx context.Context, id string) error {
+ }
+ 
+ func (c *Controller) prepareInboxRun(env sessioninbox.PromptEnvelope) (func(context.Context) error, string, error) {
++	budget, budgetErr := parseInboxTaskBudget(env.Extra)
++	if budgetErr != nil {
++		return nil, "invalid queued task budget: " + budgetErr.Error(), nil
++	}
+ 	submit, frozenImages, block, err := applyInboxReferences(env)
+ 	if err != nil || block != "" {
+ 		return nil, block, err
+@@ -57,6 +61,7 @@ func (c *Controller) prepareInboxRun(env sessioninbox.PromptEnvelope) (func(cont
+ 	requests := controlInvocationsFromInbox(env)
+ 	if len(requests) == 0 {
+ 		return func(ctx context.Context) error {
++			ctx = budget.withContext(ctx)
+ 			return c.runGoalLoopWithFrozenImagesRawDisplay(c.withTurnFormat(ctx, strings.TrimSpace(env.Format)), submit, raw, display, frozenImages)
+ 		}, "", nil
+ 	}
+@@ -65,6 +70,7 @@ func (c *Controller) prepareInboxRun(env sessioninbox.PromptEnvelope) (func(cont
+ 		return nil, err.Error(), nil
+ 	}
+ 	return func(ctx context.Context) error {
++		ctx = budget.withContext(ctx)
+ 		return c.runPreparedInvocationTurn(c.withTurnFormat(ctx, strings.TrimSpace(env.Format)), prepared, submit, raw, display, frozenImages)
+ 	}, "", nil
+ }
+diff --git a/internal/serve/broadcaster.go b/internal/serve/broadcaster.go
+index dfada7b..b870f50 100644
+--- a/internal/serve/broadcaster.go
++++ b/internal/serve/broadcaster.go
+@@ -8,6 +8,7 @@ import (
+ 	"reasonix/internal/billing"
+ 	"reasonix/internal/event"
+ 	"reasonix/internal/eventwire"
++	"reasonix/internal/sessioninbox"
+ )
+ 
+ // Broadcaster is the event.Sink the controller emits to in server mode. It
+@@ -21,8 +22,10 @@ type Broadcaster struct {
+ 	ledger          *billing.Ledger
+ 	displayCurrency string
+ 
+-	observerMu sync.RWMutex
+-	observer   func(event.Event)
++	observerMu      sync.RWMutex
++	observer        func(event.Event)
++	inboxObserverMu sync.RWMutex
++	inboxObserver   func(sessioninbox.InboxSnapshot)
+ }
+ 
+ // NewBroadcaster returns an empty Broadcaster ready to accept subscribers.
+@@ -55,6 +58,31 @@ func (b *Broadcaster) SetEventObserver(fn func(event.Event)) {
+ 	b.observerMu.Unlock()
+ }
+ 
++// SetInboxObserver installs the APK-side observer for the native durable
++// session inbox. Broadcaster implements the optional InboxChanged sink
++// capability, so Controller queue transitions remain visible without polling
++// or introducing a second queue state machine.
++func (b *Broadcaster) SetInboxObserver(fn func(sessioninbox.InboxSnapshot)) {
++	if b == nil {
++		return
++	}
++	b.inboxObserverMu.Lock()
++	b.inboxObserver = fn
++	b.inboxObserverMu.Unlock()
++}
++
++func (b *Broadcaster) InboxChanged(snap sessioninbox.InboxSnapshot) {
++	if b == nil {
++		return
++	}
++	b.inboxObserverMu.RLock()
++	fn := b.inboxObserver
++	b.inboxObserverMu.RUnlock()
++	if fn != nil {
++		fn(snap)
++	}
++}
++
+ func (b *Broadcaster) eventObserver() func(event.Event) {
+ 	if b == nil {
+ 		return nil
+diff --git a/internal/serve/mod_app.go b/internal/serve/mod_app.go
+index b953034..ca267d2 100644
+--- a/internal/serve/mod_app.go
++++ b/internal/serve/mod_app.go
+@@ -405,6 +405,7 @@ func (s *Server) modAppBootstrap(w http.ResponseWriter, r *http.Request) {
+ 		"skills":          s.modSkillViews(),
+ 		"persistence":     s.modPersistenceStatus(),
+ 		"projectManager":  map[string]any{"registryScope": "reasonix-home", "budgetScope": "workspace", "switchMethod": "supervisor-restart"},
++		"taskQueue":       s.modQueueView(),
+ 		"transport":       map[string]any{"http": true, "sse": true, "hiddenReasoningExported": false},
+ 		"endpoints": map[string]string{
+ 			"bootstrap": "/mod/app/bootstrap", "apply": "/mod/app/apply",
+@@ -414,7 +415,10 @@ func (s *Server) modAppBootstrap(w http.ResponseWriter, r *http.Request) {
+ 			"projects": "/mod/projects", "registerProject": "/mod/projects/register",
+ 			"openProject": "/mod/projects/open", "removeProject": "/mod/projects/remove",
+ 			"tasks": "/mod/tasks", "renameTask": "/mod/tasks/rename",
+-			"newTask": "/new", "resumeTask": "/resume", "deleteTask": "/delete-session",
++			"queue": "/mod/queue", "enqueueTask": "/mod/queue/items",
++			"pauseQueue": "/mod/queue/pause", "resumeQueue": "/mod/queue/resume",
++			"queueRecovery": "/mod/queue/recovery",
++			"newTask":       "/new", "resumeTask": "/resume", "deleteTask": "/delete-session",
+ 		},
+ 		"workspaceSwitch": map[string]any{
+ 			"live":   false,
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index f3278ec..0dd48e9 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -16,7 +16,7 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.9"
++const balanceModVersion = "balance-mod-v0.10"
+ 
+ // modEvent is a typed machine event for the Android client. Most Balance Mod
+ // telemetry is content-free; v0.7 live.* events may additionally carry bounded,
+@@ -217,6 +217,7 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 			"apkStatePersistence":  "workspace-scoped-atomic+budget-ledger-v0.8",
+ 			"projectManager":       "global-registry+supervisor-handoff-v0.9",
+ 			"taskManager":          "native-session-catalog-no-provider-v0.9",
++			"taskQueue":            "native-sessioninbox+reviewed-recovery+per-turn-budget-v0.10",
+ 			"androidSupervisor":    "debian-process-wrapper-v0.8",
+ 		},
+ 	})
+diff --git a/internal/serve/mod_queue.go b/internal/serve/mod_queue.go
+new file mode 100644
+index 0000000..130b6a3
+--- /dev/null
++++ b/internal/serve/mod_queue.go
+@@ -0,0 +1,492 @@
++package serve
++
++import (
++	"encoding/json"
++	"fmt"
++	"math"
++	"net/http"
++	"strconv"
++	"strings"
++
++	"reasonix/internal/billing"
++	"reasonix/internal/config"
++	"reasonix/internal/control"
++	"reasonix/internal/sessioninbox"
++)
++
++const (
++	modTaskBudgetCostKey         = "reasonix.task_budget.cost"
++	modTaskBudgetTokensKey       = "reasonix.task_budget.tokens"
++	modTaskBudgetWallMSKey       = "reasonix.task_budget.wall_ms"
++	modTaskBudgetKZTKey          = "balance.task_budget.kzt"
++	modTaskBudgetRequestedKZTKey = "balance.task_budget.requested_kzt"
++	modTaskBudgetCurrencyKey     = "balance.task_budget.currency"
++)
++
++type modQueueBudgetRequest struct {
++	BudgetKZT   float64 `json:"budgetKzt,omitempty"`
++	TokenLimit  int     `json:"tokenLimit,omitempty"`
++	WallSeconds int     `json:"wallSeconds,omitempty"`
++}
++
++type modQueueBudgetView struct {
++	RequestedKZT      float64 `json:"requestedKzt,omitempty"`
++	EffectiveKZT      float64 `json:"effectiveKzt,omitempty"`
++	ProviderCurrency  string  `json:"providerCurrency,omitempty"`
++	ProviderCostLimit float64 `json:"providerCostLimit,omitempty"`
++	TokenLimit        int     `json:"tokenLimit,omitempty"`
++	WallSeconds       int     `json:"wallSeconds,omitempty"`
++	Enforcement       string  `json:"enforcement,omitempty"`
++}
++
++type modQueueItemView struct {
++	ID          string             `json:"id"`
++	Intent      string             `json:"intent"`
++	State       string             `json:"state"`
++	Position    int                `json:"position"`
++	Preview     string             `json:"preview,omitempty"`
++	Source      string             `json:"source,omitempty"`
++	CreatedAtMS int64              `json:"createdAtUnixMs,omitempty"`
++	UpdatedAtMS int64              `json:"updatedAtUnixMs,omitempty"`
++	BlockReason string             `json:"blockReason,omitempty"`
++	TaskBudget  modQueueBudgetView `json:"taskBudget,omitempty"`
++}
++
++func validateModQueueBudget(req modQueueBudgetRequest) error {
++	if math.IsNaN(req.BudgetKZT) || math.IsInf(req.BudgetKZT, 0) || req.BudgetKZT < 0 || req.BudgetKZT > 1_000_000_000 {
++		return fmt.Errorf("budgetKzt must be a finite value between 0 and 1000000000")
++	}
++	if req.TokenLimit < 0 || req.TokenLimit > 1_000_000_000 {
++		return fmt.Errorf("tokenLimit must be between 0 and 1000000000")
++	}
++	if req.WallSeconds < 0 || req.WallSeconds > 7*24*60*60 {
++		return fmt.Errorf("wallSeconds must be between 0 and 604800")
++	}
++	return nil
++}
++
++func (s *Server) modQueueBudgetExtras(req modQueueBudgetRequest) (map[string]string, modQueueBudgetView, error) {
++	if err := validateModQueueBudget(req); err != nil {
++		return nil, modQueueBudgetView{}, err
++	}
++	view := modQueueBudgetView{RequestedKZT: req.BudgetKZT, EffectiveKZT: req.BudgetKZT, TokenLimit: req.TokenLimit, WallSeconds: req.WallSeconds}
++	extra := map[string]string{}
++	if req.TokenLimit > 0 {
++		extra[modTaskBudgetTokensKey] = strconv.Itoa(req.TokenLimit)
++	}
++	if req.WallSeconds > 0 {
++		extra[modTaskBudgetWallMSKey] = strconv.FormatInt(int64(req.WallSeconds)*1000, 10)
++	}
++	if req.BudgetKZT <= 0 {
++		if req.TokenLimit > 0 || req.WallSeconds > 0 {
++			view.Enforcement = "native-agent-task-budget"
++		}
++		return extra, view, nil
++	}
++
++	workspaceBudget := s.modGov.Snapshot()
++	if workspaceBudget.Enabled && workspaceBudget.HardStop {
++		if workspaceBudget.RemainingKZT <= 0 {
++			return nil, view, fmt.Errorf("workspace KZT budget is exhausted")
++		}
++		if view.EffectiveKZT > workspaceBudget.RemainingKZT {
++			view.EffectiveKZT = workspaceBudget.RemainingKZT
++		}
++	}
++	currency, reason := s.modQueueBillingCurrency()
++	if currency == "" {
++		return nil, view, fmt.Errorf("cannot enforce task KZT budget: %s", reason)
++	}
++	currency = billing.NormalizeCurrency(currency)
++	rate := workspaceBudget.FXKZTPerUnit[currency]
++	if currency == "KZT" && rate == 0 {
++		rate = 1
++	}
++	if rate <= 0 {
++		return nil, view, fmt.Errorf("cannot enforce task KZT budget: missing KZT FX rate for %s", currency)
++	}
++	providerLimit := view.EffectiveKZT / rate
++	if providerLimit <= 0 || math.IsNaN(providerLimit) || math.IsInf(providerLimit, 0) {
++		return nil, view, fmt.Errorf("cannot enforce task KZT budget for active provider")
++	}
++	extra[modTaskBudgetCostKey] = strconv.FormatFloat(providerLimit, 'g', -1, 64)
++	extra[modTaskBudgetRequestedKZTKey] = strconv.FormatFloat(view.RequestedKZT, 'g', -1, 64)
++	extra[modTaskBudgetKZTKey] = strconv.FormatFloat(view.EffectiveKZT, 'g', -1, 64)
++	extra[modTaskBudgetCurrencyKey] = currency
++	view.ProviderCurrency = currency
++	view.ProviderCostLimit = providerLimit
++	view.Enforcement = "native-agent-task-budget+workspace-kzt-budget"
++	return extra, view, nil
++}
++
++func uniqueModBillingCurrency(currencies []string) (string, bool) {
++	seen := map[string]struct{}{}
++	for _, raw := range currencies {
++		cur := billing.NormalizeCurrency(raw)
++		if cur == "" {
++			return "", false
++		}
++		seen[cur] = struct{}{}
++	}
++	if len(seen) != 1 {
++		return "", false
++	}
++	for cur := range seen {
++		return cur, true
++	}
++	return "", false
++}
++
++// modQueueBillingCurrency returns one currency only when every model that the
++// configured execution router may select prices in that same currency. Native
++// Agent TaskBudget.Cost accumulates a scalar and therefore must never be used
++// across mixed billing currencies. Mixed/unpriced routing fails closed.
++func (s *Server) modQueueBillingCurrency() (string, string) {
++	cfg, err := config.Load()
++	if err != nil {
++		return "", "cannot load provider config"
++	}
++	refs := []string{}
++	execSnap := s.modExec.Snapshot()
++	if execSnap.Enabled {
++		for _, ref := range []string{execSnap.Config.FlashPrimaryRef, execSnap.Config.FlashAlternativeRef, execSnap.Config.ProRef, execSnap.Config.FlashRepairRef} {
++			ref = strings.TrimSpace(ref)
++			if ref != "" {
++				refs = append(refs, ref)
++			}
++		}
++	}
++	if len(refs) == 0 {
++		ref := strings.TrimSpace(s.ctl().ModelRef())
++		if ref == "" {
++			ref = strings.TrimSpace(cfg.DefaultModel)
++		}
++		if ref != "" {
++			refs = append(refs, ref)
++		}
++	}
++	if len(refs) == 0 {
++		return "", "no active model is configured"
++	}
++	currencies := make([]string, 0, len(refs))
++	seenRefs := map[string]bool{}
++	for _, ref := range refs {
++		if seenRefs[ref] {
++			continue
++		}
++		seenRefs[ref] = true
++		entry, ok := cfg.ResolveModel(ref)
++		if !ok || entry == nil {
++			return "", "execution model pricing is unavailable: " + ref
++		}
++		cur := billing.NormalizeCurrency(entry.ProviderBillingCurrency())
++		if cur == "" {
++			return "", "execution model has no billing currency: " + ref
++		}
++		currencies = append(currencies, cur)
++	}
++	cur, ok := uniqueModBillingCurrency(currencies)
++	if !ok {
++		return "", "execution models use mixed billing currencies"
++	}
++	return cur, ""
++}
++
++func modQueueBudgetFromExtra(extra map[string]string) modQueueBudgetView {
++	var out modQueueBudgetView
++	if len(extra) == 0 {
++		return out
++	}
++	if v, err := strconv.ParseFloat(strings.TrimSpace(extra[modTaskBudgetRequestedKZTKey]), 64); err == nil && v > 0 {
++		out.RequestedKZT = v
++	}
++	if v, err := strconv.ParseFloat(strings.TrimSpace(extra[modTaskBudgetKZTKey]), 64); err == nil && v > 0 {
++		out.EffectiveKZT = v
++		if out.RequestedKZT == 0 {
++			out.RequestedKZT = v
++		}
++	}
++	out.ProviderCurrency = strings.TrimSpace(extra[modTaskBudgetCurrencyKey])
++	if v, err := strconv.ParseFloat(strings.TrimSpace(extra[modTaskBudgetCostKey]), 64); err == nil && v > 0 {
++		out.ProviderCostLimit = v
++	}
++	if v, err := strconv.Atoi(strings.TrimSpace(extra[modTaskBudgetTokensKey])); err == nil && v > 0 {
++		out.TokenLimit = v
++	}
++	if v, err := strconv.ParseInt(strings.TrimSpace(extra[modTaskBudgetWallMSKey]), 10, 64); err == nil && v > 0 {
++		out.WallSeconds = int(v / 1000)
++	}
++	if out.ProviderCostLimit > 0 || out.TokenLimit > 0 || out.WallSeconds > 0 {
++		out.Enforcement = "native-agent-task-budget"
++	}
++	if out.EffectiveKZT > 0 {
++		out.Enforcement = "native-agent-task-budget+workspace-kzt-budget"
++	}
++	return out
++}
++
++func modQueueStateCounts(items []sessioninbox.InboxItemMeta) map[string]int {
++	out := map[string]int{}
++	for _, item := range items {
++		out[string(item.State)]++
++	}
++	return out
++}
++
++func modQueueRecoverySummary(snap sessioninbox.InboxSnapshot) map[string]any {
++	counts := modQueueStateCounts(snap.Items)
++	return map[string]any{
++		"recovered":       snap.Recovered,
++		"recoveredCount":  snap.RecoveredN,
++		"paused":          snap.Paused,
++		"uncertain":       counts[string(sessioninbox.StateUncertain)],
++		"blocked":         counts[string(sessioninbox.StateBlocked)],
++		"requiresReview":  snap.Paused && (snap.Recovered || counts[string(sessioninbox.StateUncertain)] > 0 || counts[string(sessioninbox.StateBlocked)] > 0),
++		"automaticResume": false,
++	}
++}
++
++func (s *Server) modQueueView() map[string]any {
++	snap := s.ctl().InboxSnapshot()
++	items := make([]modQueueItemView, 0, len(snap.Items))
++	for i, meta := range snap.Items {
++		view := modQueueItemView{
++			ID: meta.ID, Intent: string(meta.Intent), State: string(meta.State), Position: i,
++			Preview: modBoundedRedacted(meta.Preview, 512), Source: modBoundedRedacted(meta.Source, 64),
++			CreatedAtMS: meta.CreatedAt.UnixMilli(), UpdatedAtMS: meta.UpdatedAt.UnixMilli(),
++			BlockReason: modBoundedRedacted(meta.BlockReason, 512),
++		}
++		if _, env, err := s.ctl().ReadInboxItem(meta.ID); err == nil {
++			view.TaskBudget = modQueueBudgetFromExtra(env.Extra)
++		}
++		items = append(items, view)
++	}
++	return map[string]any{
++		"schemaVersion":  snap.SchemaVersion,
++		"revision":       snap.Revision,
++		"paused":         snap.Paused,
++		"recovered":      snap.Recovered,
++		"recoveredCount": snap.RecoveredN,
++		"readonly":       snap.Readonly,
++		"items":          items,
++		"count":          len(items),
++		"stateCounts":    modQueueStateCounts(snap.Items),
++		"capacity":       snap.Capacity,
++		"recovery":       modQueueRecoverySummary(snap),
++		"native": map[string]any{
++			"backend":                 "reasonix-sessioninbox",
++			"durable":                 true,
++			"fifo":                    true,
++			"providerCallsForListing": false,
++			"storage":                 "per-session transactional inbox",
++		},
++	}
++}
++
++func (s *Server) modQueueGet(w http.ResponseWriter, _ *http.Request) { writeJSON(w, s.modQueueView()) }
++
++func modEnsureInboxSession(api control.SessionAPI) {
++	if ensurer, ok := any(api).(interface{ EnsureSessionPath() }); ok {
++		ensurer.EnsureSessionPath()
++	}
++}
++
++func (s *Server) modQueueEnqueue(w http.ResponseWriter, r *http.Request) {
++	var body struct {
++		Input          string                `json:"input"`
++		Intent         string                `json:"intent,omitempty"`
++		IdempotencyKey string                `json:"idempotencyKey,omitempty"`
++		FreezeRefs     []string              `json:"freezeRefs,omitempty"`
++		TaskBudget     modQueueBudgetRequest `json:"taskBudget,omitempty"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&body); err != nil || strings.TrimSpace(body.Input) == "" {
++		http.Error(w, "invalid queue item", http.StatusBadRequest)
++		return
++	}
++	extra, budgetView, err := s.modQueueBudgetExtras(body.TaskBudget)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusConflict)
++		return
++	}
++	intent := sessioninbox.IntentFollowup
++	if strings.EqualFold(strings.TrimSpace(body.Intent), string(sessioninbox.IntentSteer)) {
++		intent = sessioninbox.IntentSteer
++	} else if v := strings.TrimSpace(body.Intent); v != "" && !strings.EqualFold(v, string(sessioninbox.IntentFollowup)) {
++		http.Error(w, "intent must be followup or steer", http.StatusBadRequest)
++		return
++	}
++	api := s.ctl()
++	modEnsureInboxSession(api)
++	req := control.InboxRequest{
++		Intent: intent, Display: body.Input, Raw: body.Input, Submit: body.Input,
++		Source: "apk", Idempotency: strings.TrimSpace(body.IdempotencyKey),
++		FreezeRefs: append([]string(nil), body.FreezeRefs...), Extra: extra,
++	}
++	var rec sessioninbox.InboxReceipt
++	if intent == sessioninbox.IntentSteer {
++		rec, err = api.TryEnqueueAndSteer(req)
++	} else {
++		rec, err = api.TryEnqueueFollowup(req)
++	}
++	if err != nil {
++		writeInboxError(w, err)
++		return
++	}
++	s.modHub.Emit("queue.item.admitted", map[string]any{"id": rec.ItemID, "disposition": rec.Disposition, "taskBudget": budgetView})
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(http.StatusAccepted)
++	_ = json.NewEncoder(w).Encode(map[string]any{"receipt": rec, "taskBudget": budgetView})
++}
++
++func (s *Server) modQueueUpdate(w http.ResponseWriter, r *http.Request) {
++	id := strings.TrimSpace(r.PathValue("id"))
++	var body struct {
++		Input string `json:"input"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20))
++	dec.DisallowUnknownFields()
++	if id == "" || dec.Decode(&body) != nil || strings.TrimSpace(body.Input) == "" {
++		http.Error(w, "id and input are required", http.StatusBadRequest)
++		return
++	}
++	meta, err := s.ctl().UpdateInboxItem(id, body.Input, body.Input, body.Input)
++	if err != nil {
++		writeInboxError(w, err)
++		return
++	}
++	s.modHub.Emit("queue.item.updated", map[string]any{"id": id, "state": meta.State})
++	writeJSON(w, meta)
++}
++
++func (s *Server) modQueueDelete(w http.ResponseWriter, r *http.Request) {
++	id := strings.TrimSpace(r.PathValue("id"))
++	if id == "" {
++		http.Error(w, "id is required", http.StatusBadRequest)
++		return
++	}
++	if err := s.ctl().DeleteInboxItem(id); err != nil {
++		writeInboxError(w, err)
++		return
++	}
++	s.modHub.Emit("queue.item.deleted", map[string]any{"id": id})
++	w.WriteHeader(http.StatusNoContent)
++}
++
++func (s *Server) modQueueMove(w http.ResponseWriter, r *http.Request) {
++	var body struct {
++		ID      string `json:"id"`
++		ToIndex int    `json:"toIndex"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&body); err != nil || strings.TrimSpace(body.ID) == "" || body.ToIndex < 0 {
++		http.Error(w, "valid id and toIndex are required", http.StatusBadRequest)
++		return
++	}
++	if err := s.ctl().MoveInboxItem(strings.TrimSpace(body.ID), body.ToIndex); err != nil {
++		writeInboxError(w, err)
++		return
++	}
++	s.modHub.Emit("queue.reordered", map[string]any{"id": strings.TrimSpace(body.ID), "toIndex": body.ToIndex})
++	w.WriteHeader(http.StatusNoContent)
++}
++
++func (s *Server) modQueuePause(w http.ResponseWriter, _ *http.Request) {
++	api := s.ctl()
++	modEnsureInboxSession(api)
++	if err := api.SetInboxPaused(true); err != nil {
++		writeInboxError(w, err)
++		return
++	}
++	s.modHub.Emit("queue.paused", map[string]any{"source": "apk"})
++	w.WriteHeader(http.StatusNoContent)
++}
++
++func (s *Server) modQueueResume(w http.ResponseWriter, _ *http.Request) {
++	api := s.ctl()
++	modEnsureInboxSession(api)
++	if err := api.SetInboxPaused(false); err != nil {
++		writeInboxError(w, err)
++		return
++	}
++	s.modHub.Emit("queue.resumed", map[string]any{"source": "apk"})
++	w.WriteHeader(http.StatusNoContent)
++}
++
++func (s *Server) modQueueRetry(w http.ResponseWriter, r *http.Request) {
++	id := strings.TrimSpace(r.PathValue("id"))
++	if id == "" {
++		http.Error(w, "id is required", http.StatusBadRequest)
++		return
++	}
++	if err := s.ctl().RetryInboxItem(id); err != nil {
++		writeInboxError(w, err)
++		return
++	}
++	s.modHub.Emit("queue.item.retried", map[string]any{"id": id})
++	w.WriteHeader(http.StatusNoContent)
++}
++
++func (s *Server) modQueueRecoveryGet(w http.ResponseWriter, _ *http.Request) {
++	snap := s.ctl().InboxSnapshot()
++	writeJSON(w, map[string]any{"recovery": modQueueRecoverySummary(snap), "items": s.modQueueView()["items"]})
++}
++
++func (s *Server) modQueueRecoveryRetry(w http.ResponseWriter, r *http.Request) {
++	var body struct {
++		IDs    []string `json:"ids"`
++		Resume bool     `json:"resume"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&body); err != nil || len(body.IDs) == 0 || len(body.IDs) > sessioninbox.DefaultMaxItems {
++		http.Error(w, "ids are required", http.StatusBadRequest)
++		return
++	}
++	snap := s.ctl().InboxSnapshot()
++	states := make(map[string]sessioninbox.InboxState, len(snap.Items))
++	for _, item := range snap.Items {
++		states[item.ID] = item.State
++	}
++	ids := make([]string, 0, len(body.IDs))
++	seen := map[string]bool{}
++	for _, raw := range body.IDs {
++		id := strings.TrimSpace(raw)
++		state, ok := states[id]
++		if id == "" || !ok || (state != sessioninbox.StateUncertain && state != sessioninbox.StateBlocked) {
++			http.Error(w, "every id must refer to an uncertain or blocked queue item", http.StatusConflict)
++			return
++		}
++		if !seen[id] {
++			seen[id] = true
++			ids = append(ids, id)
++		}
++	}
++	for _, id := range ids {
++		if err := s.ctl().RetryInboxItem(id); err != nil {
++			writeInboxError(w, err)
++			return
++		}
++	}
++	if body.Resume {
++		if err := s.ctl().SetInboxPaused(false); err != nil {
++			writeInboxError(w, err)
++			return
++		}
++	}
++	s.modHub.Emit("queue.recovery.reviewed", map[string]any{"retried": len(ids), "resumed": body.Resume})
++	writeJSON(w, map[string]any{"retried": ids, "resumed": body.Resume, "queue": s.modQueueView()})
++}
++
++func (s *Server) observeModInboxSnapshot(snap sessioninbox.InboxSnapshot) {
++	if s == nil || s.modHub == nil {
++		return
++	}
++	s.modHub.Emit("queue.updated", map[string]any{
++		"revision": snap.Revision, "paused": snap.Paused, "recovered": snap.Recovered,
++		"count": len(snap.Items), "stateCounts": modQueueStateCounts(snap.Items),
++		"capacity": snap.Capacity, "recovery": modQueueRecoverySummary(snap),
++	})
++}
+diff --git a/internal/serve/mod_queue_test.go b/internal/serve/mod_queue_test.go
+new file mode 100644
+index 0000000..52c3154
+--- /dev/null
++++ b/internal/serve/mod_queue_test.go
+@@ -0,0 +1,146 @@
++package serve
++
++import (
++	"encoding/json"
++	"io"
++	"net/http"
++	"strings"
++	"testing"
++)
++
++func patchJSON(t *testing.T, url, body string) *http.Response {
++	t.Helper()
++	req, err := http.NewRequest(http.MethodPatch, url, strings.NewReader(body))
++	if err != nil {
++		t.Fatal(err)
++	}
++	req.Header.Set("Content-Type", "application/json")
++	resp, err := http.DefaultClient.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return resp
++}
++
++func deleteURL(t *testing.T, url string) *http.Response {
++	t.Helper()
++	req, err := http.NewRequest(http.MethodDelete, url, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	resp, err := http.DefaultClient.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return resp
++}
++
++func TestModQueueUsesNativeDurableInboxAndTaskBudgetMetadata(t *testing.T) {
++	t.Setenv("REASONIX_HOME", t.TempDir())
++	root := t.TempDir()
++	ts, _ := newPersistentModServer(t, root)
++	defer ts.Close()
++
++	resp := postJSON(t, ts.URL+"/mod/queue/pause", `{}`)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusNoContent {
++		t.Fatalf("pause=%d", resp.StatusCode)
++	}
++
++	resp = postJSON(t, ts.URL+"/mod/queue/items", `{
++      "input":"offline queued task",
++      "idempotencyKey":"apk-q-1",
++      "taskBudget":{"tokenLimit":1234,"wallSeconds":30}
++    }`)
++	body, _ := io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusAccepted {
++		t.Fatalf("enqueue=%d %s", resp.StatusCode, body)
++	}
++	var admitted struct {
++		Receipt struct {
++			ItemID string `json:"itemId"`
++		} `json:"receipt"`
++	}
++	if err := json.Unmarshal(body, &admitted); err != nil || admitted.Receipt.ItemID == "" {
++		t.Fatalf("enqueue body=%s err=%v", body, err)
++	}
++
++	resp, err := http.Get(ts.URL + "/mod/queue")
++	if err != nil {
++		t.Fatal(err)
++	}
++	body, _ = io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"backend":"reasonix-sessioninbox"`) ||
++		!strings.Contains(string(body), `"providerCallsForListing":false`) ||
++		!strings.Contains(string(body), `"tokenLimit":1234`) || !strings.Contains(string(body), `"wallSeconds":30`) {
++		t.Fatalf("queue=%d %s", resp.StatusCode, body)
++	}
++
++	resp = patchJSON(t, ts.URL+"/mod/queue/items/"+admitted.Receipt.ItemID, `{"input":"updated offline queued task"}`)
++	body, _ = io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("update=%d %s", resp.StatusCode, body)
++	}
++
++	resp = deleteURL(t, ts.URL+"/mod/queue/items/"+admitted.Receipt.ItemID)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusNoContent {
++		t.Fatalf("delete=%d", resp.StatusCode)
++	}
++	resp, err = http.Get(ts.URL + "/mod/queue")
++	if err != nil {
++		t.Fatal(err)
++	}
++	body, _ = io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if !strings.Contains(string(body), `"count":0`) {
++		t.Fatalf("queue after delete=%s", body)
++	}
++}
++
++func TestModQueueKZTBudgetFailsClosedWithoutPricedProvider(t *testing.T) {
++	t.Setenv("REASONIX_HOME", t.TempDir())
++	ts, _ := newPersistentModServer(t, t.TempDir())
++	defer ts.Close()
++
++	resp := postJSON(t, ts.URL+"/mod/queue/pause", `{}`)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusNoContent {
++		t.Fatalf("pause=%d", resp.StatusCode)
++	}
++	resp = postJSON(t, ts.URL+"/mod/queue/items", `{"input":"budgeted","taskBudget":{"budgetKzt":100}}`)
++	body, _ := io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "cannot enforce task KZT budget") {
++		t.Fatalf("budget admission=%d %s", resp.StatusCode, body)
++	}
++}
++
++func TestModQueueRecoveryRejectsBlindRetry(t *testing.T) {
++	t.Setenv("REASONIX_HOME", t.TempDir())
++	ts, _ := newPersistentModServer(t, t.TempDir())
++	defer ts.Close()
++
++	resp := postJSON(t, ts.URL+"/mod/queue/pause", `{}`)
++	resp.Body.Close()
++	resp = postJSON(t, ts.URL+"/mod/queue/items", `{"input":"queued"}`)
++	body, _ := io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusAccepted {
++		t.Fatalf("enqueue=%d %s", resp.StatusCode, body)
++	}
++	var admitted struct {
++		Receipt struct {
++			ItemID string `json:"itemId"`
++		} `json:"receipt"`
++	}
++	_ = json.Unmarshal(body, &admitted)
++	resp = postJSON(t, ts.URL+"/mod/queue/recovery/retry", `{"ids":[`+jsonQuote(admitted.Receipt.ItemID)+`],"resume":true}`)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusConflict {
++		t.Fatalf("blind recovery retry=%d, want 409", resp.StatusCode)
++	}
++}
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index 075f503..ec5e6e3 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -141,6 +141,7 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 	// by Reasonix itself. A corrupt state is fail-closed and reported in bootstrap.
+ 	s.loadModAppState()
+ 	bc.SetEventObserver(s.observeCoreEvent)
++	bc.SetInboxObserver(s.observeModInboxSnapshot)
+ 	if cfg, err := config.Load(); err == nil {
+ 		bc.SetDisplayCurrency(cfg.ExplicitDisplayCurrency())
+ 	}
+@@ -622,6 +623,18 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("POST /mod/projects/open", s.modProjectsOpen)
+ 	mux.HandleFunc("GET /mod/tasks", s.modTasksGet)
+ 	mux.HandleFunc("POST /mod/tasks/rename", s.modTasksRename)
++	// v0.10 APK task queue/recovery facade. Every mutation delegates to the
++	// native durable session inbox; there is no Balance-owned queue database.
++	mux.HandleFunc("GET /mod/queue", s.modQueueGet)
++	mux.HandleFunc("POST /mod/queue/items", s.modQueueEnqueue)
++	mux.HandleFunc("PATCH /mod/queue/items/{id}", s.modQueueUpdate)
++	mux.HandleFunc("DELETE /mod/queue/items/{id}", s.modQueueDelete)
++	mux.HandleFunc("POST /mod/queue/move", s.modQueueMove)
++	mux.HandleFunc("POST /mod/queue/pause", s.modQueuePause)
++	mux.HandleFunc("POST /mod/queue/resume", s.modQueueResume)
++	mux.HandleFunc("POST /mod/queue/items/{id}/retry", s.modQueueRetry)
++	mux.HandleFunc("GET /mod/queue/recovery", s.modQueueRecoveryGet)
++	mux.HandleFunc("POST /mod/queue/recovery/retry", s.modQueueRecoveryRetry)
+ 	mux.HandleFunc("GET /sessions", s.sessions)
+ 	mux.HandleFunc("GET /skills", s.skills)
+ 	mux.HandleFunc("GET /todos", s.todos)
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index b04e563..01cc32f 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,76 +5,82 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/30] Unit tests: Balance Mod core + APK bridge"
++echo "[1/32] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/30] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++echo "[2/32] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
+ 
+-echo "[3/30] Failure cache: verified-only persistence + corruption recovery"
++echo "[3/32] Failure cache: verified-only persistence + corruption recovery"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
+ 
+-echo "[4/30] Context/patch economy: log reducer + patch governor"
++echo "[4/32] Context/patch economy: log reducer + patch governor"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
+ 
+-echo "[5/30] Unified repair cycle: verifier -> router -> cache"
++echo "[5/32] Unified repair cycle: verifier -> router -> cache"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestVerificationReceiptRequiresHostEvidence|TestRepairCycleFlashFlashProFlashAndVerifiedCache)$' -count=1
+ 
+-echo "[6/30] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
++echo "[6/32] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleDrivenByOfflineMockProvider$' -count=1
+ 
+-echo "[7/30] Recovery policy: regression/oversize rollback + fail-closed conflict"
++echo "[7/32] Recovery policy: regression/oversize rollback + fail-closed conflict"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleRollback' -count=1
+ 
+-echo "[8/30] APK cycle/recovery API integration"
++echo "[8/32] APK cycle/recovery API integration"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModCycleAPIAndHostRepairWiring|TestModRecoveryAPIIsFailClosedWithoutCheckpoint)$' -count=1
+ 
+-echo "[9/30] Execution router: model slots + immediate KZT admission re-check"
++echo "[9/32] Execution router: model slots + immediate KZT admission re-check"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouter' -count=1
+ 
+-echo "[10/30] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
++echo "[10/32] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModExecutionRouterUsesNativeServeModelSwitch$' -count=1
+ 
+-echo "[11/30] APK execution config/status contract"
++echo "[11/32] APK execution config/status contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModExecutionAPIIsStrictAndAPKVisible|TestModStatusExposesTypedAPKSurface)$' -count=1
+ 
+-echo "[12/30] Universal agent control: native per-tool allow/ask/deny + schema trim"
++echo "[12/32] Universal agent control: native per-tool allow/ask/deny + schema trim"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control ./internal/tool -run '^(TestSessionToolDecisions|TestSessionHiddenTools)' -count=1
+ 
+-echo "[13/30] APK agent/tools API contract"
++echo "[13/32] APK agent/tools API contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAgentToolsAPIUsesNativeRuntimePolicy$' -count=1
+ 
+-echo "[14/30] APK instructions + workspace file bridge"
++echo "[14/32] APK instructions + workspace file bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModInstructionsAndWorkspaceFileAPI|TestModWorkspaceFileRejectsTraversal)$' -count=1
+ 
+-echo "[15/30] Provider-agnostic project profile"
++echo "[15/32] Provider-agnostic project profile"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestProjectProfile' -count=1
+ 
+-echo "[16/30] Capability Registry + Chat/Agent mode + Tool Packs"
++echo "[16/32] Capability Registry + Chat/Agent mode + Tool Packs"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProjectChatModeHidesMutatingToolsAndRestoresAgentMode|TestModProjectToolPackRestrictsSurfaceAndManualDenySurvives|TestModEnvironmentAndProjectContract)$' -count=1
+ 
+-echo "[17/30] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
++echo "[17/32] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModLive' -count=1
+ 
+-echo "[18/30] Restart-safe KZT ledger persistence"
++echo "[18/32] Restart-safe KZT ledger persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestBudgetPersistentState' -count=1
+ 
+-echo "[19/30] APK bootstrap + atomic apply + restart persistence"
++echo "[19/32] APK bootstrap + atomic apply + restart persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModApp' -count=1
+ 
+-echo "[20/30] APK project registry + supervisor handoff"
++echo "[20/32] APK project registry + supervisor handoff"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModProjectRegistryAndSupervisorHandoff$' -count=1
+ 
+-echo "[21/30] Native task catalog + local rename (no provider listing call)"
++echo "[21/32] Native task catalog + local rename (no provider listing call)"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModTaskCatalogUsesNativeSessionsAndRename$' -count=1
+ 
+-echo "[22/30] Debian Android backend supervisor syntax"
++echo "[22/32] APK durable task queue + per-turn budget metadata"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve ./internal/control -run '^(TestModQueue|TestParseInboxTaskBudget)' -count=1
++
++echo "[23/32] Native session-inbox crash recovery regression"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/control -run '^TestInboxSnapshotRecoversUnownedInFlightItem$' -count=1
++
++echo "[24/32] Debian Android backend supervisor syntax"
+ bash -n ./scripts/reasonix_android_backend.sh
+ 
+-echo "[23/30] Native Reasonix completion gate regression test"
++echo "[25/32] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[24/30] Build CLI only (skip example plugin)"
++echo "[26/32] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -100,7 +106,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[25/30] Offline normal tool-loop"
++echo "[27/32] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+@@ -127,7 +133,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[26/30] Offline anti-loop intervention"
++echo "[28/32] Offline anti-loop intervention"
+ LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+@@ -135,27 +141,27 @@ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+   exit 1
+ fi
+ 
+-echo "[27/30] Universal agent-control contract summary"
++echo "[29/32] Universal agent-control contract summary"
+ echo "  - workspace root + confined file browser: PASS"
+ echo "  - per-tool allow/ask/deny via native gate: PASS"
+ echo "  - instruction editor via native memory docs: PASS"
+ echo "  - skill management surface: compiled in core serve tests"
+ 
+-echo "[28/30] Universal APK protocol summary"
++echo "[30/32] Universal APK protocol summary"
+ echo "  - dynamic Capability Registry + Tool Packs: PASS"
+ echo "  - Chat mode denies mutating tools without creating a second agent: PASS"
+ echo "  - APK environment endpoint reuses Reasonix native probes/cache + project markers: PASS"
+ echo "  - project profile is provider-agnostic and APK-replayable: PASS"
+ echo "  - live event history exposes actions/diffs/results but not hidden reasoning: PASS"
+ 
+-echo "[29/30] APK supervisor/control-plane summary"
++echo "[31/32] APK supervisor/control-plane summary"
+ echo "  - bootstrap + atomic settings apply: PASS"
+ echo "  - task start/stop aliases reuse native submit/cancel: PASS"
+ echo "  - workspace-scoped policy survives backend restart: PASS"
+ echo "  - KZT/Pro spend ledger survives restart: PASS"
+ echo "  - Debian Android supervisor wrapper syntax: PASS"
+ 
+-echo "[30/30] PASS — no provider API key/network was used"
++echo "[32/32] PASS — no provider API key/network was used"
+ echo "  - v0.1 KZT budget/resource telemetry: PASS"
+ echo "  - v0.2 native anti-loop/completion telemetry: PASS"
+ echo "  - v0.3 router/cache/log/patch modules: PASS"
+@@ -165,4 +171,5 @@ echo "  - v0.6 universal APK agent control + workspace bridge: PASS"
+ echo "  - v0.7 capability/environment/project/live APK protocol: PASS"
+ echo "  - v0.8 APK control plane + restart-safe persistence + supervisor: PASS"
+ echo "  - v0.9 project registry + native task catalog: PASS"
+-echo "BALANCE_MOD_V09_SMOKE_PASS"
++echo "  - v0.10 native durable task queue + reviewed recovery + per-turn budgets: PASS"
++echo "BALANCE_MOD_V10_SMOKE_PASS"

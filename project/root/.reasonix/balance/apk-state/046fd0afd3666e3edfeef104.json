@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "workspace": "/tmp/tmp.VKaImlbOha",
+  "savedAtUnixMs": 1787249782322,
+  "profile": {
+    "name": "Offline Prototype",
+    "mode": "chat",
+    "toolPacks": [
+      "developer"
+    ],
+    "liveDetail": "metadata"
+  },
+  "approvalMode": "ask",
+  "budget": {
+    "config": {
+      "budgetKzt": 100,
+      "reservePercent": 15,
+      "proMaxPercent": 25,
+      "hardStop": true,
+      "fxKztPerUnit": {
+        "KZT": 1
+      }
+    },
+    "spentKzt": 0,
+    "proSpentKzt": 0,
+    "unpricedCalls": 0
+  },
+  "execution": {
+    "enabled": false
+  },
+  "orchestrator": {
+    "enabled": true,
+    "maxContinuations": 4,
+    "idleWaitSeconds": 15
+  }
+}

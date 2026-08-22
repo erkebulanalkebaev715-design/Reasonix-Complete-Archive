@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+APK="${1:-}"; NAME="${2:-Reasonix-Mobile-v3.0.0.apk}"; DEST="/sdcard/Download/$NAME"
+[ -f "$APK" ] || { echo 'usage: reasonix-apk-copy APK [name.apk]'; exit 2; }
+cp -f "$APK" "$DEST"; sync; echo "COPIED=$DEST"; sha256sum "$DEST"

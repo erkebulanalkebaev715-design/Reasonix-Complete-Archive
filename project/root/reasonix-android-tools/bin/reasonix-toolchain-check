@@ -1,0 +1,11 @@
+#!/bin/bash
+set -u
+. /root/reasonix-android-tools/env.sh
+show(){ [ -n "$2" ] && [ -e "$2" ] && printf '%-12s OK  %s\n' "$1" "$2" || printf '%-12s MISSING\n' "$1"; }
+echo '=== REASONIX ANDROID TOOLCHAIN ==='
+show JAVA "${JAVA_BIN:-}"; show JAVAC "${JAVAC_BIN:-}"; show KEYTOOL "${KEYTOOL_BIN:-}"
+show AAPT2 "${AAPT2_BIN:-}"; show AAPT "${AAPT_BIN:-}"; show APKSIGNER "${APKSIGNER_BIN:-}"
+show ZIPALIGN "${ZIPALIGN_BIN:-}"; show D8 "${D8_BIN:-}"; show R8_JAR "${R8_JAR:-}"; show ADB "${ADB_BIN:-}"
+command -v go >/dev/null 2>&1 && { echo "GO           OK  $(command -v go)"; go version || true; } || echo 'GO           MISSING'
+command -v opencode >/dev/null 2>&1 && echo "OPENCODE     OK  $(command -v opencode)" || echo 'OPENCODE     MISSING'
+echo 'ADB is optional for this APK build pass.'

@@ -1,0 +1,59 @@
+{
+  "version": "dev",
+  "os": "linux",
+  "arch": "arm64",
+  "cwd": "/tmp/tmp.dRf26TbbL9",
+  "config": {
+    "source_path": "reasonix.toml",
+    "user_path": "/tmp/tmp.dRf26TbbL9/rxhome/config.toml",
+    "default_model": "deepseek-v20/deepseek-v4-flash"
+  },
+  "providers": [
+    {
+      "name": "deepseek-v20",
+      "kind": "openai",
+      "base_url_host": "api.deepseek.com",
+      "models": [
+        "deepseek-v4-flash"
+      ],
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "key_present": true,
+      "is_default": false,
+      "context_window": 1000000
+    }
+  ],
+  "lsp": {
+    "enabled": true,
+    "servers": 0
+  },
+  "sessions": {
+    "dir": "/tmp/tmp.dRf26TbbL9/rxhome/sessions",
+    "count": 0,
+    "bytes": 0
+  },
+  "sandbox": {
+    "bash": "off",
+    "network": true,
+    "write_roots": [
+      "/tmp/tmp.dRf26TbbL9"
+    ],
+    "available": false,
+    "shell": "bash (/usr/bin/bash)"
+  },
+  "network": {
+    "proxy_mode": "auto",
+    "proxy": "auto (env)",
+    "no_proxy": false
+  },
+  "permission": {
+    "mode": "ask",
+    "allow_rules": 0,
+    "ask_rules": 0,
+    "deny_rules": 0
+  },
+  "warnings": [
+    "project reasonix.toml sets [sandbox]; it overrides user-level Settings -\u003e Sandbox for this workspace — edit the project file to change sandbox behavior here",
+    "skill \"review\" allowed-tools references \"use_capability\" which is not in the current registry",
+    "skill \"security-review\" allowed-tools references \"use_capability\" which is not in the current registry"
+  ]
+}

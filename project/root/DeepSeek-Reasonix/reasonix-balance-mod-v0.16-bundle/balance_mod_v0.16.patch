@@ -1,0 +1,1602 @@
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+index 4baf6fc..d93824d 100644
+--- a/docs/BALANCE_MOD.md
++++ b/docs/BALANCE_MOD.md
+@@ -644,3 +644,81 @@ and the v0.13 idempotent auto-continuation path.
+ 
+ The v0.15 quick gate ends with `BALANCE_MOD_V15_QUICK_PASS`; the full gate ends
+ with `BALANCE_MOD_V15_SMOKE_PASS`. No real provider key is required or used.
++
++## v0.16 — hard pre-call provider budget admission
++
++v0.15 proved that the offline control plane survives permission bypass attempts,
++queue recovery, state corruption and process restart. One important money-safety
++gap remained before a real provider could be enabled: Reasonix's native task
++cost budget and the Balance KZT ledger historically observe actual spend after a
++model round. That stops a runaway after the round, but a single very large
++completion (or bounded retry sequence) could still overshoot a small hard budget.
++
++v0.16 closes that gap at the provider-I/O boundary. When the APK configures a
++hard KZT budget and the active model has known pricing plus a KZT FX rate,
++`applyModTaskCostBudget` now enables a native Agent pre-call guard in addition to
++the existing post-round ledger. Before `Provider.Stream` is entered, the Agent:
++
++- computes a conservative prompt-token upper bound from the complete prepared
++  provider request bytes plus framing headroom;
++- reserves the remaining cost/token envelope across the full bounded sampling
++  retry × provider-header retry window;
++- charges input at the worst known input/cache rate for admission purposes;
++- derives a maximum affordable output-token ceiling and clamps `MaxTokens`
++  before network I/O;
++- fails closed before the provider call when pricing is unavailable, the prompt
++  cannot fit the retry-reserved share, or no completion tokens remain.
++
++The guard is host-controlled and disabled by default for ordinary Reasonix
++sessions. Balance enables it only when the KZT hard task-cost gate is actually
++resolved. The APK-visible `taskCostGate.preCall` bit reports whether that
++pre-network boundary is active; merely having a KZT ledger is not presented as
++hard pre-call enforcement.
++
++Compaction summaries are routed through the same guarded provider-call seam, so
++an automatic compaction cannot bypass the hard budget. No tokenizer service,
++extra model call or API key is required for admission; the byte-bound estimate is
++local and intentionally conservative for Android.
++
++`scripts/balance_mod_precall_budget.sh` starts the real localhost serve binary
++with a non-zero-priced offline MockProvider, applies a KZT hard budget, confirms
++`taskCostGate.preCall=true`, starts a task through the frozen APK API, and
++requires the mock to observe a provider request whose large baseline output
++budget was physically reduced before `Stream` executed. Provider credential
++environment variables are unset for the child process.
++
++The v0.16 full gate must end with `BALANCE_MOD_V16_SMOKE_PASS`. No real provider
++or API key is used by this version.
++
++### v0.16 hard-budget side-path policy
++
++A pre-call cap on the executor alone is not enough to call the workspace budget
++"hard": Reasonix can also spend through planner, semantic capability routing,
++session-title generation, and delegated sub-agents. v0.16 therefore makes hard
++budget mode deliberately single-agent until those secondary providers share one
++atomic reservation ledger:
++
++- two-model Coordinator planning is forced to executor-only while strict
++  pre-call admission is active;
++- semantic capability routing falls back to deterministic routing (no extra
++  classifier model call);
++- cosmetic session-title generation is skipped and uses the normal preview;
++- provider-spawning delegation tools (`task`, `read_only_task`,
++  `parallel_tasks`, `fleet`, subagent skill/research/review entry points) are
++  blocked at execution, including proxy-resolved targets. Local tools and
++  `read_skill` remain available;
++- a native model rebuild re-applies the strict gate and uses the **remaining**
++  KZT-derived provider allowance, not the original total, so switching
++  Flash→Pro→Flash cannot re-grant already spent money;
++- a hard budget with missing billing currency/FX fails closed. Ordinary task
++  admission is rejected rather than silently dropping to post-round-only
++  accounting;
++- queued token/wall overrides may tighten the hard cost limit but cannot erase
++  it;
++- the current supported worst-case cache-write input-equivalent multiplier is
++  reserved conservatively for prompt admission.
++
++This is intentionally stricter than ordinary Reasonix. It sacrifices optional
++secondary-model power under `hardStop=true` rather than making a budget promise
++that the code cannot enforce. A future shared reservation ledger can re-enable
++secondary agents without weakening that guarantee.
+diff --git a/internal/agent/agent.go b/internal/agent/agent.go
+index 4ea600b..61420b3 100644
+--- a/internal/agent/agent.go
++++ b/internal/agent/agent.go
+@@ -341,6 +341,12 @@ type Agent struct {
+ 	// instead of leaving them in a queue no loop will ever consume.
+ 	steerRunActive bool
+ 
++	// strictPreCallBudget enables the Balance Mod hard admission gate. It is
++	// host-controlled and never enters prompts/session state. When enabled, every
++	// provider request is conservatively capped before network I/O so a hard cost
++	// budget cannot rely only on post-round accounting.
++	strictPreCallBudget atomic.Bool
++
+ 	// task is the state shared by every Run continuing one delivery scope: the
+ 	// receipt ledger complete_step validates citations against, the spend that
+ 	// outlives a single Run, and the guards keyed to the task rather than the
+diff --git a/internal/agent/compact.go b/internal/agent/compact.go
+index 6a19406..ba1e2df 100644
+--- a/internal/agent/compact.go
++++ b/internal/agent/compact.go
+@@ -406,6 +406,12 @@ func (a *Agent) summarize(ctx context.Context, region []provider.Message, instru
+ 	if req.MaxTokens > summaryOutputMaxTokens {
+ 		req.MaxTokens = summaryOutputMaxTokens
+ 	}
++	// Compaction is provider I/O too. Apply the same strict hard-budget cap
++	// before the minimum useful-summary check so a tiny remaining budget fails
++	// closed instead of paying for a knowingly truncated digest.
++	if err := a.applyStrictPreCallBudget(ctx, &req); err != nil {
++		return "", usage, err
++	}
+ 	if req.MaxTokens < 256 {
+ 		return "", usage, fmt.Errorf("summary output budget too small (%d tokens)", req.MaxTokens)
+ 	}
+diff --git a/internal/agent/coordinator.go b/internal/agent/coordinator.go
+index 668447e..5975cf9 100644
+--- a/internal/agent/coordinator.go
++++ b/internal/agent/coordinator.go
+@@ -5,6 +5,7 @@ import (
+ 	"fmt"
+ 	"slices"
+ 	"strings"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"reasonix/internal/event"
+@@ -123,6 +124,11 @@ type Coordinator struct {
+ 	// behavior used by direct Coordinator callers.
+ 	plannerPolicy       PlannerPolicy
+ 	plannerPlanApprover PlannerPlanApprover
++	// strictBudgetExecutorOnly disables the second planner provider while a
++	// host promises a hard pre-call spend ceiling. Until all secondary agents
++	// share one reservation ledger, paying for an independent planner would
++	// make that promise mathematically false.
++	strictBudgetExecutorOnly atomic.Bool
+ }
+ 
+ // NewCoordinator wires a planner provider (with its own session) to an executor.
+@@ -222,6 +228,17 @@ func (c *Coordinator) PlannerAgent() *Agent {
+ 	return c.plannerAgent
+ }
+ 
++// SetStrictPreCallBudget makes hard-budget turns single-provider-agent turns.
++// The ordinary planner policy remains intact and resumes when the hard budget
++// is disabled. This is intentionally conservative until planner/subagent calls
++// participate in the same host reservation ledger as the executor.
++func (c *Coordinator) SetStrictPreCallBudget(enabled bool) {
++	if c == nil {
++		return
++	}
++	c.strictBudgetExecutorOnly.Store(enabled)
++}
++
+ // SetReasoningLanguage updates both agents in two-model mode. The raw planner
+ // path receives controller-composed input directly, but a tool-enabled planner
+ // owns its own Agent and must clear stale zh/en preferences on live changes.
+@@ -331,6 +348,9 @@ func (c *Coordinator) Run(ctx context.Context, input string) error {
+ 	if c.plannerPolicy != nil {
+ 		decision = normalizePlannerDecision(c.plannerPolicy(ctx, input))
+ 	}
++	if c.strictBudgetExecutorOnly.Load() {
++		decision = PlannerDecision{Route: PlannerRouteExecutorOnly, Reason: "hard_budget_single_agent"}
++	}
+ 	routeDetail := fmt.Sprintf("planner route=%s reason=%s", decision.Route, decision.Reason)
+ 	if decision.Route == PlannerRouteExecutorOnly {
+ 		c.sink.Emit(event.Event{Kind: event.Phase, Text: c.executor.svc.prov.Name() + " · executing", Detail: routeDetail, Source: event.UsageSourceExecutor})
+diff --git a/internal/agent/execute_one.go b/internal/agent/execute_one.go
+index 63dd884..b55492b 100644
+--- a/internal/agent/execute_one.go
++++ b/internal/agent/execute_one.go
+@@ -285,6 +285,9 @@ func (a *Agent) applyPlanModeAndProxy(ctx context.Context, plan *toolCallPlan) (
+ 		if outcome, blocked := a.readOnlyExecutionBlock(t, &rc); blocked {
+ 			return blockedShellOutcome(outcome, plan), true
+ 		}
++		if outcome, blocked := a.strictBudgetDelegationBlock(t, &rc); blocked {
++			return outcome, true
++		}
+ 		if rc.Commit != nil {
+ 			if err := rc.Commit(); err != nil {
+ 				return toolOutcome{
+@@ -319,6 +322,8 @@ func (a *Agent) applyPlanModeAndProxy(ctx context.Context, plan *toolCallPlan) (
+ 		}
+ 	} else if outcome, blocked := a.readOnlyExecutionBlock(t, nil); blocked {
+ 		return blockedShellOutcome(outcome, plan), true
++	} else if outcome, blocked := a.strictBudgetDelegationBlock(t, nil); blocked {
++		return outcome, true
+ 	}
+ 
+ 	// A proxy resolution can point at a target with an explicit planning-phase
+diff --git a/internal/agent/precall_budget_test.go b/internal/agent/precall_budget_test.go
+new file mode 100644
+index 0000000..e8ef23e
+--- /dev/null
++++ b/internal/agent/precall_budget_test.go
+@@ -0,0 +1,110 @@
++package agent
++
++import (
++	"context"
++	"strings"
++	"testing"
++
++	"reasonix/internal/event"
++	"reasonix/internal/provider"
++	"reasonix/internal/tool"
++)
++
++func newPreCallBudgetAgent(cost float64) *Agent {
++	return New(&spendingProvider{max: 0}, tool.NewRegistry(), NewSession("sys"), Options{
++		Pricing:    &provider.Pricing{Input: 1, Output: 2, Currency: "CNY"},
++		TaskBudget: TaskBudget{Cost: cost},
++	}, event.Discard)
++}
++
++func TestStrictPreCallBudgetCapsUnboundedOutputBeforeProviderIO(t *testing.T) {
++	a := newPreCallBudgetAgent(1)
++	a.SetStrictPreCallBudget(true)
++	req := provider.Request{Messages: []provider.Message{{Role: provider.RoleUser, Content: "small request"}}}
++	if err := a.applyStrictPreCallBudget(context.Background(), &req); err != nil {
++		t.Fatalf("pre-call guard: %v", err)
++	}
++	if req.MaxTokens <= 0 {
++		t.Fatalf("MaxTokens = %d, want a positive hard cap", req.MaxTokens)
++	}
++	if req.MaxTokens >= provider.DeepSeekMaxOutputTokens {
++		t.Fatalf("MaxTokens = %d, want budget-derived cap below DeepSeek ceiling", req.MaxTokens)
++	}
++}
++
++func TestStrictPreCallBudgetFailsClosedWhenPromptCannotFitRetryReserve(t *testing.T) {
++	a := newPreCallBudgetAgent(0.000001)
++	a.SetStrictPreCallBudget(true)
++	req := provider.Request{Messages: []provider.Message{{Role: provider.RoleUser, Content: strings.Repeat("x", 4096)}}}
++	if err := a.applyStrictPreCallBudget(context.Background(), &req); err == nil {
++		t.Fatal("expected hard pre-call rejection")
++	}
++}
++
++func TestStrictPreCallBudgetDisabledPreservesRequest(t *testing.T) {
++	a := newPreCallBudgetAgent(0.000001)
++	req := provider.Request{Messages: []provider.Message{{Role: provider.RoleUser, Content: "x"}}, MaxTokens: 777}
++	if err := a.applyStrictPreCallBudget(context.Background(), &req); err != nil {
++		t.Fatalf("disabled guard: %v", err)
++	}
++	if req.MaxTokens != 777 {
++		t.Fatalf("MaxTokens = %d, want unchanged 777", req.MaxTokens)
++	}
++}
++
++func TestProviderRequestTokenUpperBoundIncludesToolAndMessageBytes(t *testing.T) {
++	small := providerRequestTokenUpperBound(provider.Request{Messages: []provider.Message{{Role: provider.RoleUser, Content: "x"}}})
++	big := providerRequestTokenUpperBound(provider.Request{Messages: []provider.Message{{Role: provider.RoleUser, Content: strings.Repeat("x", 8192)}}})
++	if big <= small {
++		t.Fatalf("upper bound did not grow: small=%d big=%d", small, big)
++	}
++}
++
++func TestStrictPreCallBudgetZeroRemainingFailsClosed(t *testing.T) {
++	a := newPreCallBudgetAgent(0)
++	a.SetStrictPreCallBudget(true)
++	req := provider.Request{Messages: []provider.Message{{Role: provider.RoleUser, Content: "x"}}, MaxTokens: 1}
++	if err := a.applyStrictPreCallBudget(context.Background(), &req); err == nil {
++		t.Fatal("strict zero-remaining budget must fail closed")
++	}
++}
++
++func TestStrictBudgetBlocksProviderSpawningDelegations(t *testing.T) {
++	for _, name := range []string{"task", "read_only_task", "parallel_tasks", "fleet", "run_skill", "explore", "research", "review", "security_review"} {
++		if !strictBudgetDelegationName(name) {
++			t.Fatalf("%s must be blocked in hard pre-call budget mode", name)
++		}
++	}
++	for _, name := range []string{"read_file", "grep", "read_skill", "bash"} {
++		if strictBudgetDelegationName(name) {
++			t.Fatalf("%s should remain available to the current agent", name)
++		}
++	}
++}
++
++func TestStrictPreCallBudgetForcesCoordinatorExecutorOnly(t *testing.T) {
++	planner := &spendingProvider{max: 0}
++	execProvider := &spendingProvider{max: 0}
++	execAgent := New(execProvider, tool.NewRegistry(), NewSession("sys"), Options{}, event.Discard)
++	coord := NewCoordinator(planner, NewSession("planner"), nil, nil, execAgent, 0, event.Discard, nil)
++	coord.SetStrictPreCallBudget(true)
++	if err := coord.Run(context.Background(), "do the task"); err != nil {
++		t.Fatalf("coordinator run: %v", err)
++	}
++	if got := planner.rounds.Load(); got != 0 {
++		t.Fatalf("planner provider calls = %d, want 0 under strict hard budget", got)
++	}
++	if got := execProvider.rounds.Load(); got != 1 {
++		t.Fatalf("executor provider calls = %d, want 1", got)
++	}
++}
++
++func TestStrictPreCallBudgetContextCannotEraseGlobalCostLimit(t *testing.T) {
++	a := newPreCallBudgetAgent(1)
++	a.SetStrictPreCallBudget(true)
++	ctx := WithTaskBudget(context.Background(), TaskBudget{Tokens: 1_000_000})
++	limit := a.strictTaskBudgetLimit(ctx)
++	if limit.Cost != 1 || limit.Tokens != 1_000_000 {
++		t.Fatalf("merged strict limit = %+v", limit)
++	}
++}
+diff --git a/internal/agent/run_budget.go b/internal/agent/run_budget.go
+index fc82457..05c230a 100644
+--- a/internal/agent/run_budget.go
++++ b/internal/agent/run_budget.go
+@@ -2,7 +2,9 @@ package agent
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"fmt"
++	"math"
+ 	"time"
+ 
+ 	"reasonix/internal/event"
+@@ -168,6 +170,40 @@ func taskBudgetFromContext(ctx context.Context) (TaskBudget, bool) {
+ 	return b, ok
+ }
+ 
++// strictTaskBudgetLimit preserves the controller's global hard cost ceiling even
++// when a queued/automatic turn supplies only token or wall limits. A context
++// budget may tighten an axis but must never erase the configured hard bound.
++func (a *Agent) strictTaskBudgetLimit(ctx context.Context) TaskBudget {
++	base := normalizeTaskBudget(a.task.budget.limit)
++	override, ok := taskBudgetFromContext(ctx)
++	if !ok {
++		return base
++	}
++	override = normalizeTaskBudget(override)
++	tighter := func(global, local float64) float64 {
++		switch {
++		case global > 0 && local > 0:
++			return math.Min(global, local)
++		case global > 0:
++			return global
++		default:
++			return local
++		}
++	}
++	base.Cost = tighter(base.Cost, override.Cost)
++	if base.Tokens > 0 && override.Tokens > 0 {
++		base.Tokens = min(base.Tokens, override.Tokens)
++	} else if base.Tokens <= 0 {
++		base.Tokens = override.Tokens
++	}
++	if base.Wall > 0 && override.Wall > 0 {
++		base.Wall = min(base.Wall, override.Wall)
++	} else if base.Wall <= 0 {
++		base.Wall = override.Wall
++	}
++	return base
++}
++
+ // SetTaskCostBudget updates the configured cost ceiling for subsequent Runs.
+ // The host must call it only while this Agent is idle; Controller enforces that
+ // boundary for HTTP/APK callers. Existing task usage is preserved so lowering a
+@@ -181,3 +217,118 @@ func (a *Agent) SetTaskCostBudget(cost float64) {
+ 	}
+ 	a.task.budget.limit.Cost = cost
+ }
++
++// SetStrictPreCallBudget toggles the host-owned pre-network budget guard. The
++// controller exposes this only as an optional idle-only capability; ordinary
++// Reasonix users that never enable Balance hard budgets keep historical behavior.
++func (a *Agent) SetStrictPreCallBudget(enabled bool) {
++	if a == nil {
++		return
++	}
++	a.strictPreCallBudget.Store(enabled)
++}
++
++// StrictPreCallBudget reports whether provider requests are currently guarded.
++func (a *Agent) StrictPreCallBudget() bool {
++	return a != nil && a.strictPreCallBudget.Load()
++}
++
++// strictPreCallRetryFactor reserves enough room for the complete bounded retry
++// envelope: body-stream retries multiplied by provider header/status retries.
++// It is deliberately conservative: unused reserve costs nothing, but it prevents
++// one interrupted request from consuming the entire remaining hard budget and
++// then being retried with no room left.
++const (
++	strictPreCallRetryFactor = maxSamplingAttempts * (provider.MaxRetries + 1)
++	// Current Reasonix pricing can represent cache writes as ordinary input-token
++	// equivalents up to 2x (for example a long-lived cache write). Pre-call has
++	// no usage record yet, so reserve that supported worst case instead of
++	// assuming every prompt token is a plain cache miss.
++	strictPreCallInputChargeMultiplier = 2.0
++)
++
++// applyStrictPreCallBudget caps req.MaxTokens before provider network I/O. The
++// prompt estimate is intentionally an upper bound based on the complete JSON
++// request byte size plus framing headroom. Byte count is conservative for the
++// byte-backed tokenizers used by supported providers and avoids needing another
++// tokenizer/model/API call on Android.
++func (a *Agent) applyStrictPreCallBudget(ctx context.Context, req *provider.Request) error {
++	if a == nil || req == nil || !a.StrictPreCallBudget() {
++		return nil
++	}
++	limit := a.strictTaskBudgetLimit(ctx)
++	if limit.Cost <= 0 && limit.Tokens <= 0 {
++		// Strict mode is only enabled by a host that promised a hard ceiling.
++		// Zero therefore means no allowance remains, not "unconfigured".
++		return fmt.Errorf("pre-call hard budget has no remaining allowance")
++	}
++
++	promptUpper := providerRequestTokenUpperBound(*req)
++	cap := req.MaxTokens
++	setCap := func(v int) {
++		if v <= 0 {
++			return
++		}
++		if cap <= 0 || v < cap {
++			cap = v
++		}
++	}
++
++	if limit.Tokens > 0 {
++		used := a.task.budget.promptTokens + a.task.budget.outputTokens
++		remaining := limit.Tokens - used
++		if remaining <= 0 {
++			return fmt.Errorf("pre-call token budget exhausted: used %d of %d", used, limit.Tokens)
++		}
++		share := remaining / strictPreCallRetryFactor
++		if share <= promptUpper {
++			return fmt.Errorf("pre-call token budget cannot safely admit request: retry-reserved share %d <= prompt upper bound %d", share, promptUpper)
++		}
++		setCap(share - promptUpper)
++	}
++
++	if limit.Cost > 0 {
++		pricing := a.svc.pricing
++		if pricing == nil {
++			return fmt.Errorf("pre-call cost budget cannot be enforced without model pricing")
++		}
++		remaining := limit.Cost - a.task.budget.cost
++		if remaining <= 0 {
++			return fmt.Errorf("pre-call cost budget exhausted: %.6f of %.6f spent", a.task.budget.cost, limit.Cost)
++		}
++		share := remaining / float64(strictPreCallRetryFactor)
++		inputRate := math.Max(pricing.Input, pricing.CacheHit)
++		inputUpper := float64(promptUpper) * inputRate * strictPreCallInputChargeMultiplier / 1e6
++		if inputUpper >= share {
++			return fmt.Errorf("pre-call cost budget cannot safely admit prompt: estimated input %.6f >= retry-reserved share %.6f %s", inputUpper, share, pricing.Symbol())
++		}
++		if pricing.Output > 0 {
++			out := int(math.Floor((share - inputUpper) * 1e6 / pricing.Output))
++			if out <= 0 {
++				return fmt.Errorf("pre-call cost budget leaves no completion tokens")
++			}
++			setCap(out)
++		}
++	}
++
++	if cap > 0 {
++		req.MaxTokens = cap
++	}
++	return nil
++}
++
++func providerRequestTokenUpperBound(req provider.Request) int {
++	clone := req
++	clone.MaxTokens = 0
++	b, err := json.Marshal(clone)
++	if err != nil {
++		// Fail closed with a deliberately large bound rather than pretending an
++		// unserializable request is cheap.
++		return 1 << 30
++	}
++	overhead := 4096 + 128*(len(req.Messages)+len(req.Tools))
++	if n := len(b) + overhead; n > 0 {
++		return n
++	}
++	return 1
++}
+diff --git a/internal/agent/sampling_request.go b/internal/agent/sampling_request.go
+index 0d01c23..07057d7 100644
+--- a/internal/agent/sampling_request.go
++++ b/internal/agent/sampling_request.go
+@@ -48,6 +48,9 @@ func (a *Agent) normalizeModelRequestMessages(msgs []provider.Message) []provide
+ }
+ 
+ func (a *Agent) streamProviderRequest(ctx context.Context, req provider.Request) (<-chan provider.Chunk, error) {
++	if err := a.applyStrictPreCallBudget(ctx, &req); err != nil {
++		return nil, err
++	}
+ 	return a.svc.prov.Stream(ctx, req)
+ }
+ 
+diff --git a/internal/agent/strict_budget_tools.go b/internal/agent/strict_budget_tools.go
+new file mode 100644
+index 0000000..33d964d
+--- /dev/null
++++ b/internal/agent/strict_budget_tools.go
+@@ -0,0 +1,52 @@
++package agent
++
++import (
++	"fmt"
++	"strings"
++
++	"reasonix/internal/tool"
++)
++
++// strictBudgetDelegationTools are provider-spawning tools whose child/model
++// requests do not yet share the executor's pre-call reservation ledger. Hard
++// budget mode blocks them at execution (including proxy-resolved targets) so a
++// child agent cannot bypass the promised spend ceiling. Inline/read-only local
++// skill inspection remains available through read_skill.
++var strictBudgetDelegationTools = map[string]bool{
++	"task":            true,
++	"read_only_task":  true,
++	"parallel_tasks":  true,
++	"fleet":           true,
++	"run_skill":       true,
++	"read_only_skill": true,
++	"explore":         true,
++	"research":        true,
++	"review":          true,
++	"security_review": true,
++	"security-review": true,
++}
++
++func strictBudgetDelegationName(name string) bool {
++	return strictBudgetDelegationTools[strings.ToLower(strings.TrimSpace(name))]
++}
++
++func (a *Agent) strictBudgetDelegationBlock(visible tool.Tool, resolved *tool.ResolvedCall) (toolOutcome, bool) {
++	if a == nil || !a.StrictPreCallBudget() {
++		return toolOutcome{}, false
++	}
++	name := ""
++	if resolved != nil {
++		name = strings.TrimSpace(resolved.TargetName)
++		if name == "" && resolved.Target != nil {
++			name = resolved.Target.Name()
++		}
++	}
++	if name == "" && visible != nil {
++		name = visible.Name()
++	}
++	if !strictBudgetDelegationName(name) {
++		return toolOutcome{}, false
++	}
++	msg := fmt.Sprintf("blocked: %s is disabled while hard pre-call budget mode is active; use the current agent or disable hardStop", name)
++	return toolOutcome{output: msg, blocked: true, errMsg: "blocked by hard budget provider policy"}, true
++}
+diff --git a/internal/control/capability.go b/internal/control/capability.go
+index 306a0e3..cf38196 100644
+--- a/internal/control/capability.go
++++ b/internal/control/capability.go
+@@ -103,7 +103,11 @@ func (c *Controller) routeCapabilities(ctx context.Context, routeInput string) c
+ 		}
+ 	}
+ 	ambiguous := !strong && len(decision.Candidates) > 1
+-	if ambiguous && c.semanticRouter != nil {
++	// Semantic routing is an extra provider call. While Balance hard-budget
++	// admission is active, deterministic routing wins so every billable request
++	// stays on the guarded executor provider seam.
++	strictBudget := c.executor != nil && c.executor.StrictPreCallBudget()
++	if ambiguous && c.semanticRouter != nil && !strictBudget {
+ 		before := len(decision.Candidates)
+ 		decision = c.semanticRouter.RouteSemantic(ctx, routeInput, catalog, decision)
+ 		if c.capabilityProxy {
+diff --git a/internal/control/precall_budget_setter.go b/internal/control/precall_budget_setter.go
+new file mode 100644
+index 0000000..dbab410
+--- /dev/null
++++ b/internal/control/precall_budget_setter.go
+@@ -0,0 +1,36 @@
++package control
++
++import "fmt"
++
++// SetStrictPreCallBudget toggles the executor's pre-network hard-budget guard.
++// It is idle-only for the same reason as SetTaskCostBudget: an APK policy change
++// must not alter admission rules underneath an in-flight provider request.
++func (c *Controller) SetStrictPreCallBudget(enabled bool) error {
++	if c == nil {
++		return fmt.Errorf("controller is nil")
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.running || c.finishing {
++		return ErrTurnRunning
++	}
++	if c.executor != nil {
++		c.executor.SetStrictPreCallBudget(enabled)
++	}
++	if r, ok := c.runner.(interface{ SetStrictPreCallBudget(bool) }); ok {
++		r.SetStrictPreCallBudget(enabled)
++	}
++	return nil
++}
++
++// StrictPreCallBudget reports the executor's current host-owned hard-budget
++// guard state. It is content-free and exists so frontends/tests can verify that
++// a controller rebuild did not silently drop the admission policy.
++func (c *Controller) StrictPreCallBudget() bool {
++	if c == nil {
++		return false
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	return c.executor != nil && c.executor.StrictPreCallBudget()
++}
+diff --git a/internal/efficiency/budget.go b/internal/efficiency/budget.go
+index 0c78589..8929a47 100644
+--- a/internal/efficiency/budget.go
++++ b/internal/efficiency/budget.go
+@@ -254,7 +254,7 @@ func (g *Governor) snapshotLocked() BudgetSnapshot {
+ 		ProLimitReached: enabled && g.cfg.ProMaxPercent > 0 && g.proSpent >= proLimit,
+ 		UnpricedCalls:   g.unpriced,
+ 		FXKZTPerUnit:    fx,
+-		Enforcement:     "post-round-v0.1",
++		Enforcement:     "post-round-ledger+conditional-precall-v0.16",
+ 	}
+ }
+ 
+@@ -281,6 +281,34 @@ func (g *Governor) ProviderBudget(currency string) (value float64, ok bool) {
+ 	return g.cfg.BudgetKZT / rate, true
+ }
+ 
++// RemainingProviderBudget converts the unspent global KZT envelope into the
++// active provider currency. A rebuilt controller starts with a fresh local
++// task accumulator, so feeding it the original total would silently re-grant
++// money already consumed by the previous model instance.
++func (g *Governor) RemainingProviderBudget(currency string) (value float64, ok bool) {
++	if g == nil {
++		return 0, false
++	}
++	g.mu.Lock()
++	defer g.mu.Unlock()
++	if g.cfg.BudgetKZT <= 0 {
++		return 0, true
++	}
++	cur := billing.NormalizeCurrency(currency)
++	rate := g.cfg.FXKZTPerUnit[cur]
++	if cur == "KZT" && rate == 0 {
++		rate = 1
++	}
++	if rate <= 0 {
++		return 0, false
++	}
++	remaining := g.cfg.BudgetKZT - g.spent.Float64()
++	if remaining < 0 {
++		remaining = 0
++	}
++	return remaining / rate, true
++}
++
+ func ValidateConfig(c BudgetConfig) error {
+ 	if c.BudgetKZT < 0 || math.IsNaN(c.BudgetKZT) || math.IsInf(c.BudgetKZT, 0) {
+ 		return fmt.Errorf("budgetKzt must be a finite non-negative number")
+diff --git a/internal/efficiency/budget_test.go b/internal/efficiency/budget_test.go
+index fca3095..ddfee30 100644
+--- a/internal/efficiency/budget_test.go
++++ b/internal/efficiency/budget_test.go
+@@ -59,3 +59,16 @@ func TestProviderBudgetConversion(t *testing.T) {
+ 		t.Fatalf("provider budget = %v ok=%v, want 2 USD", got, ok)
+ 	}
+ }
++
++func TestRemainingProviderBudgetDoesNotRegrantSpentMoney(t *testing.T) {
++	g := NewGovernor()
++	g.Configure(BudgetConfig{BudgetKZT: 1000, HardStop: true, FXKZTPerUnit: map[string]float64{"USD": 500}})
++	g.ObserveQuote(quote("0.50", "USD", "mock/flash"), "") // 250 KZT spent.
++	got, ok := g.RemainingProviderBudget("USD")
++	if !ok || got != 1.5 {
++		t.Fatalf("remaining provider budget = %v ok=%v, want 1.5 USD", got, ok)
++	}
++	if snap := g.Snapshot(); snap.Enforcement != "post-round-ledger+conditional-precall-v0.16" {
++		t.Fatalf("enforcement = %q", snap.Enforcement)
++	}
++}
+diff --git a/internal/provider/mock/mock.go b/internal/provider/mock/mock.go
+index b6d31fb..72371a2 100644
+--- a/internal/provider/mock/mock.go
++++ b/internal/provider/mock/mock.go
+@@ -27,21 +27,21 @@ func init() {
+ 
+ // New builds an offline mock provider. Supported Extra fields:
+ //
+-//	scenario: smoke (default) | repeat-failure | repair-cycle | deny-bypass | text
++//	scenario: smoke (default) | repeat-failure | repair-cycle | deny-bypass | budget-cap | text
+ //	path: file used by smoke/repeat-failure (default hello.py)
+ func New(cfg provider.Config) (provider.Provider, error) {
+ 	scenario := extraString(cfg.Extra, "scenario")
+ 	if scenario == "" {
+ 		candidate := strings.ToLower(strings.TrimSpace(cfg.Model))
+ 		switch candidate {
+-		case "smoke", "repeat-failure", "repair-cycle", "deny-bypass", "text":
++		case "smoke", "repeat-failure", "repair-cycle", "deny-bypass", "budget-cap", "text":
+ 			scenario = candidate
+ 		default:
+ 			scenario = "smoke"
+ 		}
+ 	}
+ 	switch scenario {
+-	case "smoke", "repeat-failure", "repair-cycle", "deny-bypass", "text":
++	case "smoke", "repeat-failure", "repair-cycle", "deny-bypass", "budget-cap", "text":
+ 	default:
+ 		return nil, fmt.Errorf("mock provider: unknown scenario %q", scenario)
+ 	}
+@@ -65,6 +65,16 @@ func New(cfg provider.Config) (provider.Provider, error) {
+ 
+ func (p *mockProvider) Name() string { return p.name }
+ 
++// OutputBudget gives the budget-cap scenario a deliberately large baseline so
++// the v0.16 process test can prove the host actually reduced the provider
++// request before I/O rather than merely observing an already-small default.
++func (p *mockProvider) OutputBudget() int {
++	if p != nil && p.scenario == "budget-cap" {
++		return provider.DefaultHighOutputTokens
++	}
++	return 0
++}
++
+ func (p *mockProvider) Stream(ctx context.Context, req provider.Request) (<-chan provider.Chunk, error) {
+ 	ch := make(chan provider.Chunk, 4)
+ 	go func() {
+@@ -81,6 +91,17 @@ func (p *mockProvider) Stream(ctx context.Context, req provider.Request) (<-chan
+ 		toolResults := countToolResults(req.Messages)
+ 		calledTool := false
+ 		switch p.scenario {
++		case "budget-cap":
++			// v0.16 process gate: a hard Balance budget must impose an explicit
++			// provider output ceiling before this offline provider is called.
++			// Zero means the request escaped the pre-call guard.
++			if req.MaxTokens > 0 && req.MaxTokens < provider.DefaultHighOutputTokens {
++				if !emit(provider.Chunk{Type: provider.ChunkText, Text: "OFFLINE_PRECALL_BUDGET_PASS"}) {
++					return
++				}
++			} else if !emit(provider.Chunk{Type: provider.ChunkText, Text: fmt.Sprintf("MOCK_PRECALL_BUDGET_FAIL max_tokens=%d", req.MaxTokens)}) {
++				return
++			}
+ 		case "deny-bypass":
+ 			// Stress the real policy boundary, not only provider-schema trimming.
+ 			// A denied write_file should be absent from the provider schema; the
+diff --git a/internal/provider/mock/mock_test.go b/internal/provider/mock/mock_test.go
+index 38a0c10..ac0b3fe 100644
+--- a/internal/provider/mock/mock_test.go
++++ b/internal/provider/mock/mock_test.go
+@@ -113,3 +113,18 @@ func TestDenyBypassScenarioRequiresSchemaTrimAndNativeDenial(t *testing.T) {
+ 		t.Fatalf("denied result = %#v", second)
+ 	}
+ }
++
++func TestBudgetCapScenarioRequiresExplicitProviderOutputCap(t *testing.T) {
++	p, err := New(provider.Config{Name: "mock", Extra: map[string]any{"scenario": "budget-cap"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	bad := collect(t, p, provider.Request{})
++	if len(bad) == 0 || bad[0].Type != provider.ChunkText || !strings.Contains(bad[0].Text, "MOCK_PRECALL_BUDGET_FAIL") {
++		t.Fatalf("uncapped request = %#v", bad)
++	}
++	good := collect(t, p, provider.Request{MaxTokens: 4096})
++	if len(good) == 0 || good[0].Type != provider.ChunkText || good[0].Text != "OFFLINE_PRECALL_BUDGET_PASS" {
++		t.Fatalf("capped request = %#v", good)
++	}
++}
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index 4be18f3..6428d66 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -16,7 +16,7 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.15"
++const balanceModVersion = "balance-mod-v0.16"
+ 
+ // modEvent is a typed machine event for the Android client. Most Balance Mod
+ // telemetry is content-free; v0.7 live.* events may additionally carry bounded,
+@@ -126,6 +126,8 @@ func (b *modBroadcaster) Subscribe() (<-chan []byte, func()) {
+ 
+ type modTaskCostGateStatus struct {
+ 	Applied       bool    `json:"applied"`
++	PreCall       bool    `json:"preCall"`
++	SingleAgent   bool    `json:"singleAgent"`
+ 	Currency      string  `json:"currency,omitempty"`
+ 	ProviderLimit float64 `json:"providerLimit,omitempty"`
+ 	Reason        string  `json:"reason,omitempty"`
+@@ -154,6 +156,10 @@ type taskCostBudgetSetter interface {
+ 	SetTaskCostBudget(cost float64) error
+ }
+ 
++type strictPreCallBudgetSetter interface {
++	SetStrictPreCallBudget(enabled bool) error
++}
++
+ func (s *Server) modWorkspacePath() string {
+ 	ctl := s.ctl()
+ 	if root := strings.TrimSpace(ctl.WorkspaceRoot()); root != "" {
+@@ -196,7 +202,7 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 		Environment:  s.modEnvironmentSnapshot(context.Background(), false),
+ 		Persistence:  s.modPersistenceStatus(),
+ 		Features: map[string]string{
+-			"budget":               "post-round-gate-v0.1",
++			"budget":               "pre-call-cap+post-round-ledger-v0.16",
+ 			"apkBridge":            "http+sse-v0.2",
+ 			"resources":            "local-linux-v0.1",
+ 			"qualityMonitor":       "host-evidence-v0.2",
+@@ -229,6 +235,8 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 			"proDiagnosisGuard":    "native-read-only-policy-overlay-v0.13",
+ 			"androidSupervisor":    "debian-process-wrapper-v0.8",
+ 			"offlineStressGate":    "native-deny+crash-restart+queue+corrupt-state-v0.15",
++			"hardPreCallBudget":    "provider-max-output-cap+retry-reserve-v0.16",
++			"hardBudgetSideCalls":  "single-agent+no-title+no-semantic+delegation-block-v0.16",
+ 		},
+ 	})
+ }
+@@ -585,11 +593,11 @@ func (s *Server) observeCoreEvent(e event.Event) {
+ 	s.persistModAppStateBestEffort()
+ }
+ 
+-// applyModTaskCostBudget reuses Reasonix's existing task cost budget as a
+-// second, provider-currency stop layer. It is deliberately best-effort in v0.1:
+-// if a model has no pricing currency or the APK did not supply an FX rate, the
+-// KZT ledger still works but the status exposes that the provider gate is not
+-// active. A true pre-call admission gate is a later router integration.
++// applyModTaskCostBudget binds the global KZT hard-stop policy to the current
++// controller's provider-currency task budget and strict pre-call guard. It uses
++// only the remaining workspace allowance, so controller/model rebuilds cannot
++// re-grant already-spent money. Missing currency/FX is fail-closed while
++// hardStop is requested; ordinary Reasonix behavior is unchanged when it is off.
+ func (s *Server) applyModTaskCostBudget() modTaskCostGateStatus {
+ 	snap := s.modGov.Snapshot()
+ 	setter, ok := s.ctl().(taskCostBudgetSetter)
+@@ -598,39 +606,97 @@ func (s *Server) applyModTaskCostBudget() modTaskCostGateStatus {
+ 		s.setModTaskGate(status)
+ 		return status
+ 	}
++	strictSetter, strictOK := s.ctl().(strictPreCallBudgetSetter)
++	setStrict := func(enabled bool) error {
++		if !strictOK {
++			if enabled {
++				return fmt.Errorf("controller does not expose strict pre-call budget setter")
++			}
++			return nil
++		}
++		return strictSetter.SetStrictPreCallBudget(enabled)
++	}
+ 	if !snap.Enabled || !snap.HardStop {
++		_ = setStrict(false)
+ 		if err := setter.SetTaskCostBudget(0); err != nil {
+ 			status := modTaskCostGateStatus{Reason: err.Error()}
+ 			s.setModTaskGate(status)
+ 			return status
+ 		}
+-		status := modTaskCostGateStatus{Applied: false, Reason: "hard budget disabled"}
++		status := modTaskCostGateStatus{Applied: false, PreCall: false, SingleAgent: false, Reason: "hard budget disabled"}
+ 		s.setModTaskGate(status)
+ 		return status
+ 	}
+ 
+-	currency, reason := s.activeProviderBillingCurrency()
+-	if currency == "" {
+-		status := modTaskCostGateStatus{Reason: reason}
++	// A requested hard stop must fail closed when provider pricing/FX cannot be
++	// resolved. Keep strict mode on with a zero local cost allowance so even a
++	// non-HTTP/native continuation cannot slip through while the APK sees the
++	// explicit reason in taskCostGate.
++	failClosed := func(currency, reason string) modTaskCostGateStatus {
++		_ = setter.SetTaskCostBudget(0)
++		preCall := true
++		if err := setStrict(true); err != nil {
++			preCall = false
++			if reason != "" {
++				reason += "; "
++			}
++			reason += err.Error()
++		}
++		status := modTaskCostGateStatus{Applied: false, PreCall: preCall, SingleAgent: preCall, Currency: currency, Reason: reason}
+ 		s.setModTaskGate(status)
+ 		return status
+ 	}
+-	providerLimit, ok := s.modGov.ProviderBudget(currency)
++
++	currency, reason := s.activeProviderBillingCurrency()
++	if currency == "" {
++		return failClosed("", reason)
++	}
++	providerLimit, ok := s.modGov.RemainingProviderBudget(currency)
+ 	if !ok {
+-		status := modTaskCostGateStatus{Currency: currency, Reason: "missing KZT FX rate for " + currency}
++		return failClosed(currency, "missing KZT FX rate for "+currency)
++	}
++	if err := setter.SetTaskCostBudget(providerLimit); err != nil {
++		_ = setStrict(false)
++		status := modTaskCostGateStatus{Currency: currency, ProviderLimit: providerLimit, Reason: err.Error()}
+ 		s.setModTaskGate(status)
+ 		return status
+ 	}
+-	if err := setter.SetTaskCostBudget(providerLimit); err != nil {
++	if err := setStrict(true); err != nil {
++		_ = setter.SetTaskCostBudget(0)
+ 		status := modTaskCostGateStatus{Currency: currency, ProviderLimit: providerLimit, Reason: err.Error()}
+ 		s.setModTaskGate(status)
+ 		return status
+ 	}
+-	status := modTaskCostGateStatus{Applied: true, Currency: currency, ProviderLimit: providerLimit}
++	status := modTaskCostGateStatus{Applied: true, PreCall: true, SingleAgent: true, Currency: currency, ProviderLimit: providerLimit}
+ 	s.setModTaskGate(status)
+ 	return status
+ }
+ 
++func (s *Server) modHardBudgetAdmissionReady() (bool, string) {
++	if s == nil || s.modGov == nil {
++		return true, ""
++	}
++	snap := s.modGov.Snapshot()
++	if !snap.Enabled || !snap.HardStop {
++		return true, ""
++	}
++	if snap.Exhausted || snap.RemainingKZT <= 0 {
++		return false, "workspace KZT budget is exhausted"
++	}
++	gate := s.modTaskGateSnapshot()
++	if !gate.PreCall || !gate.Applied {
++		reason := strings.TrimSpace(gate.Reason)
++		if reason == "" {
++			reason = "hard pre-call provider budget is unavailable"
++		}
++		return false, reason
++	}
++	if gate.ProviderLimit <= 0 {
++		return false, "workspace provider budget has no remaining allowance"
++	}
++	return true, ""
++}
++
+ func (s *Server) activeProviderBillingCurrency() (string, string) {
+ 	cfg, err := config.Load()
+ 	if err != nil {
+diff --git a/internal/serve/precall_switch_test.go b/internal/serve/precall_switch_test.go
+new file mode 100644
+index 0000000..935e022
+--- /dev/null
++++ b/internal/serve/precall_switch_test.go
+@@ -0,0 +1,108 @@
++package serve
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"sync/atomic"
++	"testing"
++
++	"reasonix/internal/billing"
++	"reasonix/internal/config"
++	"reasonix/internal/control"
++	"reasonix/internal/efficiency"
++	"reasonix/internal/provider"
++)
++
++type titleBudgetProbeProvider struct{ calls atomic.Int32 }
++
++func (p *titleBudgetProbeProvider) Name() string { return "title-budget-probe" }
++func (p *titleBudgetProbeProvider) Stream(context.Context, provider.Request) (<-chan provider.Chunk, error) {
++	p.calls.Add(1)
++	ch := make(chan provider.Chunk)
++	close(ch)
++	return ch, nil
++}
++
++func TestHardBudgetSkipsCosmeticTitleProvider(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, ModelRef: "mock/flash"})
++	s := New(ctrl, bc, config.ServeConfig{})
++	defer s.ctl().Close()
++	probe := &titleBudgetProbeProvider{}
++	s.titleProv = probe
++	s.modGov.Configure(efficiency.BudgetConfig{BudgetKZT: 100, HardStop: true, FXKZTPerUnit: map[string]float64{"KZT": 1}})
++	if got := s.generateTitle(context.Background(), "real task"); got != "" {
++		t.Fatalf("title = %q, want fallback under hard budget", got)
++	}
++	if calls := probe.calls.Load(); calls != 0 {
++		t.Fatalf("title provider calls = %d, want 0", calls)
++	}
++}
++
++func TestHardPreCallBudgetSurvivesNativeModelSwitch(t *testing.T) {
++	root := t.TempDir()
++	t.Chdir(root)
++	if err := os.WriteFile(filepath.Join(root, "reasonix.toml"), []byte(`
++default_model = "mock/flash-a"
++
++[[providers]]
++name = "mock"
++kind = "mock"
++models = ["flash-a", "flash-b"]
++default = "flash-a"
++base_url = "http://127.0.0.1"
++billing_currency = "CNY"
++price = { cache_hit = 0.02, input = 1, output = 2, currency = "CNY" }
++`), 0o600); err != nil {
++		t.Fatal(err)
++	}
++
++	bc := NewBroadcaster()
++	dir := t.TempDir()
++	ctrl := control.New(control.Options{Sink: bc, ModelRef: "mock/flash-a", SessionDir: dir})
++	s := New(ctrl, bc, config.ServeConfig{})
++	defer func() { s.ctl().Close() }()
++
++	s.modGov.Configure(efficiency.BudgetConfig{
++		BudgetKZT:      1000,
++		ReservePercent: 15,
++		ProMaxPercent:  25,
++		HardStop:       true,
++		FXKZTPerUnit:   map[string]float64{"CNY": 70},
++	})
++	gate := s.applyModTaskCostBudget()
++	if !gate.Applied || !gate.PreCall {
++		t.Fatalf("initial task gate = %+v", gate)
++	}
++	if !ctrl.StrictPreCallBudget() {
++		t.Fatal("initial controller lost strict pre-call budget")
++	}
++	initialLimit := gate.ProviderLimit
++	s.modGov.ObserveQuote(&billing.CostQuote{
++		Original:     billing.Money{Amount: "1", Currency: "CNY"},
++		CostComplete: true,
++		ModelRef:     "mock/flash-a",
++	}, "mock/flash-a")
++
++	s.buildController = func(_ context.Context, ref string) (*control.Controller, error) {
++		return control.New(control.Options{Sink: bc, ModelRef: ref, SessionDir: dir}), nil
++	}
++	if err := s.switchModel(context.Background(), "mock/flash-b"); err != nil {
++		t.Fatalf("switch model: %v", err)
++	}
++	got, ok := s.ctl().(*control.Controller)
++	if !ok {
++		t.Fatalf("replacement controller type = %T", s.ctl())
++	}
++	if !got.StrictPreCallBudget() {
++		t.Fatal("strict pre-call budget was not restored after model switch")
++	}
++	gate = s.modTaskGateSnapshot()
++	if !gate.Applied || !gate.PreCall || gate.Currency != "CNY" {
++		t.Fatalf("post-switch task gate = %+v", gate)
++	}
++	if gate.ProviderLimit >= initialLimit {
++		t.Fatalf("model switch re-granted spent money: initial=%v post=%v", initialLimit, gate.ProviderLimit)
++	}
++}
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index 7356a1a..36561c9 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -350,10 +350,16 @@ func (s *Server) switchModelLocked(ctx context.Context, ref string) error {
+ 	}
+ 	s.ctrl = newCtrl
+ 	s.mu.Unlock()
+-	// Re-apply runtime-only APK tool policy to the replacement controller.
++	// Re-apply runtime-only APK policy to the replacement controller. Tool
++	// decisions and hard-budget admission live on the controller/agent instance,
++	// so a model rebuild must restore both before another turn can start.
+ 	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
+ 		slog.Warn("serve: reapply Balance Mod tool policy", "err", err)
+ 	}
++	gate := s.applyModTaskCostBudget()
++	if snap := s.modGov.Snapshot(); snap.Enabled && snap.HardStop && !gate.PreCall {
++		slog.Warn("serve: Balance Mod hard pre-call budget is not active after model switch", "reason", gate.Reason)
++	}
+ 	if s.modExec != nil {
+ 		s.modExec.ObserveCurrentModel(currentModelRef(newCtrl))
+ 	}
+@@ -445,6 +451,16 @@ func (s *Server) reloadExtensions(ctx context.Context) error {
+ 	}
+ 	s.ctrl = newCtrl
+ 	s.mu.Unlock()
++	// Extension reload replaces the controller generation just like a model
++	// switch. Restore runtime-only APK permissions and the hard pre-call budget
++	// before another turn can be admitted.
++	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
++		slog.Warn("serve: reapply Balance Mod tool policy after extension reload", "err", err)
++	}
++	gate := s.applyModTaskCostBudget()
++	if snap := s.modGov.Snapshot(); snap.Enabled && snap.HardStop && !gate.PreCall {
++		slog.Warn("serve: Balance Mod hard pre-call budget is not active after extension reload", "reason", gate.Reason)
++	}
+ 	s.refreshProviderSetup(currentModelRef(newCtrl))
+ 
+ 	cur.Close()
+@@ -900,6 +916,15 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
+ 	// published replacement. This closes the check/build/swap race where a
+ 	// request could otherwise start on cur after reload's initial busy check.
+ 	s.bindMu.Lock()
++	if ok, reason := s.modHardBudgetAdmissionReady(); !ok {
++		status := http.StatusConflict
++		if s.modGov.Snapshot().Exhausted {
++			status = http.StatusPaymentRequired
++		}
++		s.bindMu.Unlock()
++		http.Error(w, "hard budget blocked task admission: "+reason, status)
++		return
++	}
+ 	ctrl := s.ctl()
+ 	// Fix false 202 while a turn is active: SubmitHTTPFormat silently drops
+ 	// concurrent input. Clients must use POST /inbox/items for durable follow-up.
+@@ -1562,6 +1587,15 @@ func titleSource(first string) string {
+ // generateTitle calls a lightweight LLM to produce a short session title.
+ // Returns empty string on any error — callers should fall back to a preview.
+ func (s *Server) generateTitle(ctx context.Context, firstMsg string) string {
++	// Title generation is cosmetic and uses a separate provider path. Under a
++	// hard KZT budget, skip it entirely rather than allow unreserved spend that
++	// sits outside the guarded executor turn. Session previews remain the fallback.
++	if s.modGov != nil {
++		snap := s.modGov.Snapshot()
++		if snap.Enabled && snap.HardStop {
++			return ""
++		}
++	}
+ 	firstMsg = titleSource(firstMsg)
+ 	if nilutil.IsNil(s.titleProv) || firstMsg == "" {
+ 		return ""
+diff --git a/scripts/balance_mod_precall_budget.sh b/scripts/balance_mod_precall_budget.sh
+new file mode 100755
+index 0000000..320f5ee
+--- /dev/null
++++ b/scripts/balance_mod_precall_budget.sh
+@@ -0,0 +1,162 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++GO_BIN="${GO_BIN:-go}"
++CURL_BIN="${CURL_BIN:-curl}"
++PY_BIN="${PY_BIN:-python3}"
++
++command -v "$CURL_BIN" >/dev/null || { echo "BALANCE_PRECALL_FAIL: curl missing" >&2; exit 1; }
++command -v "$PY_BIN" >/dev/null || { echo "BALANCE_PRECALL_FAIL: python3 missing" >&2; exit 1; }
++
++cd "$ROOT"
++if [[ ! -x bin/reasonix ]]; then
++  mkdir -p bin
++  GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
++fi
++
++TMP="$(mktemp -d)"
++PID=""
++cleanup() {
++  if [[ -s "${PID_FILE:-}" ]]; then
++    SERVER_PID="$(tr -d '\r\n' < "$PID_FILE" 2>/dev/null || true)"
++    if [[ "$SERVER_PID" =~ ^[0-9]+$ ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
++      kill "$SERVER_PID" 2>/dev/null || true
++    fi
++  fi
++  if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
++    kill "$PID" 2>/dev/null || true
++    wait "$PID" 2>/dev/null || true
++  fi
++  rm -rf "$TMP"
++}
++trap cleanup EXIT
++
++cat > "$TMP/reasonix.toml" <<'TOML'
++default_model = "balance-budget-mock"
++
++[[providers]]
++name = "balance-budget-mock"
++kind = "mock"
++model = "budget-cap"
++base_url = "http://127.0.0.1"
++context_window = 1000000
++billing_currency = "CNY"
++price = { cache_hit = 0.02, input = 1, output = 2, currency = "CNY" }
++
++[environment]
++offline = true
++
++[sandbox]
++bash = "off"
++TOML
++
++PORT_FILE="$TMP/serve.port"
++PID_FILE="$TMP/serve.pid"
++LOG_FILE="$TMP/serve.log"
++(
++  cd "$TMP"
++  env -u DEEPSEEK_API_KEY -u ANTHROPIC_API_KEY -u OPENAI_API_KEY \
++    "$ROOT/bin/reasonix" serve --model balance-budget-mock --addr 127.0.0.1:0 --auth none \
++      --port-file "$PORT_FILE" --pid-file "$PID_FILE" >"$LOG_FILE" 2>&1
++) &
++PID=$!
++
++for _ in $(seq 1 100); do
++  [[ -s "$PORT_FILE" ]] && break
++  if ! kill -0 "$PID" 2>/dev/null; then
++    cat "$LOG_FILE" >&2 || true
++    echo "BALANCE_PRECALL_FAIL: serve exited before publishing port" >&2
++    exit 1
++  fi
++  sleep 0.1
++done
++[[ -s "$PORT_FILE" ]] || { cat "$LOG_FILE" >&2 || true; echo "BALANCE_PRECALL_FAIL: no port file" >&2; exit 1; }
++BASE="http://$(tr -d '\r\n' < "$PORT_FILE")"
++
++# A hard budget without the active provider's FX rate must fail closed before
++# any task reaches Provider.Stream. This attacks the configuration-error path,
++# not only the happy path.
++"$CURL_BIN" -fsS -H 'Content-Type: application/json' -d '{
++  "budgetKzt":1000,
++  "reservePercent":15,
++  "proMaxPercent":25,
++  "hardStop":true,
++  "fxKztPerUnit":{"USD":500}
++}' "$BASE/mod/budget" > "$TMP/budget-no-fx.json"
++"$PY_BIN" - "$TMP/budget-no-fx.json" <<'PY'
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))
++g=p['taskCostGate']
++assert g['applied'] is False, g
++assert g['preCall'] is True, g
++assert 'FX' in g.get('reason','') or 'fx' in g.get('reason',''), g
++PY
++HTTP="$($CURL_BIN -sS -o "$TMP/no-fx-start.out" -w '%{http_code}' -H 'Content-Type: application/json' \
++  -d '{"input":"This must be blocked before provider I/O."}' "$BASE/mod/app/task/start")"
++if [[ "$HTTP" != "409" ]]; then
++  cat "$TMP/no-fx-start.out" >&2 || true
++  echo "BALANCE_PRECALL_FAIL: missing-FX hard budget admitted task with HTTP $HTTP" >&2
++  exit 1
++fi
++
++# 1000 KZT is deliberately large enough for the real Reasonix prompt but small
++# enough that the 66-attempt retry reserve must reduce the mock provider's
++# 128K baseline output budget before any provider call is made.
++"$CURL_BIN" -fsS -H 'Content-Type: application/json' -d '{
++  "budgetKzt":1000,
++  "reservePercent":15,
++  "proMaxPercent":25,
++  "hardStop":true,
++  "fxKztPerUnit":{"CNY":70}
++}' "$BASE/mod/budget" > "$TMP/budget-set.json"
++
++"$PY_BIN" - "$TMP/budget-set.json" <<'PY'
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))
++g=p['taskCostGate']
++assert g['applied'] is True, g
++assert g['preCall'] is True, g
++assert g['singleAgent'] is True, g
++assert g['currency']=='CNY', g
++assert g['providerLimit'] > 0, g
++PY
++
++HTTP="$($CURL_BIN -sS -o "$TMP/start.out" -w '%{http_code}' -H 'Content-Type: application/json' \
++  -d '{"input":"Run the offline hard pre-call budget probe."}' "$BASE/mod/app/task/start")"
++if [[ "$HTTP" != "202" ]]; then
++  cat "$TMP/start.out" >&2 || true
++  cat "$LOG_FILE" >&2 || true
++  echo "BALANCE_PRECALL_FAIL: task start HTTP $HTTP" >&2
++  exit 1
++fi
++
++PASS=0
++for _ in $(seq 1 160); do
++  if "$CURL_BIN" -fsS "$BASE/mod/live/history?limit=100" > "$TMP/live.json"; then
++    if grep -q 'OFFLINE_PRECALL_BUDGET_PASS' "$TMP/live.json"; then PASS=1; break; fi
++    if grep -q 'MOCK_PRECALL_BUDGET_FAIL' "$TMP/live.json"; then
++      cat "$TMP/live.json" >&2 || true
++      echo "BALANCE_PRECALL_FAIL: provider request was not capped" >&2
++      exit 1
++    fi
++  fi
++  sleep 0.1
++done
++if [[ "$PASS" != "1" ]]; then
++  cat "$TMP/live.json" >&2 || true
++  cat "$LOG_FILE" >&2 || true
++  echo "BALANCE_PRECALL_FAIL: capped mock completion not observed" >&2
++  exit 1
++fi
++
++"$CURL_BIN" -fsS "$BASE/mod/budget" > "$TMP/budget-after.json"
++"$PY_BIN" - "$TMP/budget-after.json" <<'PY'
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))
++b=p['budget']; g=p['taskCostGate']
++assert g['preCall'] is True, g
++assert 0 <= b['spentKzt'] < b['budgetKzt'], b
++PY
++
++echo "BALANCE_MOD_PRECALL_BUDGET_PASS"
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index 1f798c5..e0ffb14 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,109 +5,109 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/47] Unit tests: Balance Mod core + APK bridge"
++echo "[1/52] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/47] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++echo "[2/52] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
+ 
+-echo "[3/47] Failure cache: verified-only persistence + corruption recovery"
++echo "[3/52] Failure cache: verified-only persistence + corruption recovery"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
+ 
+-echo "[4/47] Context/patch economy: log reducer + patch governor"
++echo "[4/52] Context/patch economy: log reducer + patch governor"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
+ 
+-echo "[5/47] Unified repair cycle: verifier -> router -> cache"
++echo "[5/52] Unified repair cycle: verifier -> router -> cache"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestVerificationReceiptRequiresHostEvidence|TestRepairCycleFlashFlashProFlashAndVerifiedCache)$' -count=1
+ 
+-echo "[6/47] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
++echo "[6/52] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleDrivenByOfflineMockProvider$' -count=1
+ 
+-echo "[7/47] Recovery policy: regression/oversize rollback + fail-closed conflict"
++echo "[7/52] Recovery policy: regression/oversize rollback + fail-closed conflict"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleRollback' -count=1
+ 
+-echo "[8/47] APK cycle/recovery API integration"
++echo "[8/52] APK cycle/recovery API integration"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModCycleAPIAndHostRepairWiring|TestModRecoveryAPIIsFailClosedWithoutCheckpoint)$' -count=1
+ 
+-echo "[9/47] Execution router: model slots + immediate KZT admission re-check"
++echo "[9/52] Execution router: model slots + immediate KZT admission re-check"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouter' -count=1
+ 
+-echo "[10/47] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
++echo "[10/52] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModExecutionRouterUsesNativeServeModelSwitch$' -count=1
+ 
+-echo "[11/47] APK execution config/status contract"
++echo "[11/52] APK execution config/status contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModExecutionAPIIsStrictAndAPKVisible|TestModStatusExposesTypedAPKSurface)$' -count=1
+ 
+-echo "[12/47] Universal agent control: native per-tool allow/ask/deny + schema trim"
++echo "[12/52] Universal agent control: native per-tool allow/ask/deny + schema trim"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control ./internal/tool -run '^(TestSessionToolDecisions|TestSessionHiddenTools)' -count=1
+ 
+-echo "[13/47] APK agent/tools API contract"
++echo "[13/52] APK agent/tools API contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAgentToolsAPIUsesNativeRuntimePolicy$' -count=1
+ 
+-echo "[14/47] APK instructions + workspace file bridge"
++echo "[14/52] APK instructions + workspace file bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModInstructionsAndWorkspaceFileAPI|TestModWorkspaceFileRejectsTraversal)$' -count=1
+ 
+-echo "[15/47] Provider-agnostic project profile"
++echo "[15/52] Provider-agnostic project profile"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestProjectProfile' -count=1
+ 
+-echo "[16/47] Capability Registry + Chat/Agent mode + Tool Packs"
++echo "[16/52] Capability Registry + Chat/Agent mode + Tool Packs"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProjectChatModeHidesMutatingToolsAndRestoresAgentMode|TestModProjectToolPackRestrictsSurfaceAndManualDenySurvives|TestModEnvironmentAndProjectContract)$' -count=1
+ 
+-echo "[17/47] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
++echo "[17/52] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModLive' -count=1
+ 
+-echo "[18/47] Restart-safe KZT ledger persistence"
++echo "[18/52] Restart-safe KZT ledger persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestBudgetPersistentState' -count=1
+ 
+-echo "[19/47] APK bootstrap + atomic apply + restart persistence"
++echo "[19/52] APK bootstrap + atomic apply + restart persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModApp' -count=1
+ 
+-echo "[20/47] APK project registry + supervisor handoff"
++echo "[20/52] APK project registry + supervisor handoff"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModProjectRegistryAndSupervisorHandoff$' -count=1
+ 
+-echo "[21/47] Native task catalog + local rename (no provider listing call)"
++echo "[21/52] Native task catalog + local rename (no provider listing call)"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModTaskCatalogUsesNativeSessionsAndRename$' -count=1
+ 
+-echo "[22/47] APK durable task queue + per-turn budget metadata"
++echo "[22/52] APK durable task queue + per-turn budget metadata"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve ./internal/control -run '^(TestModQueue|TestParseInboxTaskBudget)' -count=1
+ 
+-echo "[23/47] Unified power engine: repair + router + budget + native execution"
++echo "[23/52] Unified power engine: repair + router + budget + native execution"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestPowerEngine' -count=1
+ 
+-echo "[24/47] Native turn evidence -> pending power route (no mid-turn model race)"
++echo "[24/52] Native turn evidence -> pending power route (no mid-turn model race)"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModPowerTurnTracker' -count=1
+ 
+-echo "[25/47] APK unified power endpoint + explicit idle-boundary apply"
++echo "[25/52] APK unified power endpoint + explicit idle-boundary apply"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModPowerAPIExposesUnifiedState|TestModPowerPendingRouteAppliesOnlyAtExplicitIdleBoundary)$' -count=1
+ 
+-echo "[26/47] Auto continuation policy: bounded lease + terminal route mapping"
++echo "[26/52] Auto continuation policy: bounded lease + terminal route mapping"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModAutoOrchestratorLeaseAndLimit|TestModAutoContinuationPromptsCoverOnlyNonTerminalRoutes)$' -count=1
+ 
+-echo "[27/47] Auto continuation safety: direct-submit gate + fail-closed without execution routing"
++echo "[27/52] Auto continuation safety: direct-submit gate + fail-closed without execution routing"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModAutoSubmitGateRejectsDirectHTTPDuringTransition|TestModAutoScheduleFailsClosedWithoutExecutionRouting)$' -count=1
+ 
+-echo "[28/47] APK orchestrator config/stop contract"
++echo "[28/52] APK orchestrator config/stop contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAutoAPIConfigAndStop$' -count=1
+ 
+-echo "[29/47] v0.13 execution-mode guard rollback semantics"
++echo "[29/52] v0.13 execution-mode guard rollback semantics"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouterModeGuardRunsBeforeSwitchAndRollsBackOnFailure$' -count=1
+ 
+-echo "[30/47] v0.13 Pro diagnosis is physically read-only"
++echo "[30/52] v0.13 Pro diagnosis is physically read-only"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModProDiagnosisHardDeniesMutatingTools$' -count=1
+ 
+-echo "[31/47] v0.13 pending route survives restart without raw log/prompt leakage"
++echo "[31/52] v0.13 pending route survives restart without raw log/prompt leakage"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModPendingPowerRoutePersistsSanitizedAcrossRestart$' -count=1
+ 
+-echo "[32/47] Native session-inbox crash recovery regression"
++echo "[32/52] Native session-inbox crash recovery regression"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control -run '^TestInboxSnapshotRecoversUnownedInFlightItem$' -count=1
+ 
+-echo "[33/47] Debian Android backend supervisor syntax"
++echo "[33/52] Debian Android backend supervisor syntax"
+ bash -n ./scripts/reasonix_android_backend.sh
+ 
+-echo "[34/47] Native Reasonix completion gate regression test"
++echo "[34/52] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[35/47] Build CLI only (skip example plugin)"
++echo "[35/52] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -133,7 +133,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[36/47] Offline normal tool-loop"
++echo "[36/52] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+@@ -160,7 +160,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[37/47] Offline anti-loop intervention"
++echo "[37/52] Offline anti-loop intervention"
+ LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+@@ -170,48 +170,65 @@ fi
+ 
+ # Balance Mod v0.14.2: return from temp workspace before repo-relative tests.
+ cd "$ROOT"
+-echo "[38/47] v0.14 frozen APK v1 contract + bootstrap negotiation"
++echo "[38/52] v0.14 frozen APK v1 contract + bootstrap negotiation"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAPKContract' -count=1
+ 
+-echo "[39/47] v0.14 full localhost HTTP offline prototype"
++echo "[39/52] v0.14 full localhost HTTP offline prototype"
+ PATH="$(dirname "$(command -v "$GO_BIN")"):$PATH" GOTOOLCHAIN=local ./scripts/balance_mod_offline_prototype.sh
+ 
+-echo "[40/47] Universal agent-control contract summary"
++echo "[40/52] Universal agent-control contract summary"
+ echo "  - workspace root + confined file browser: PASS"
+ echo "  - per-tool allow/ask/deny via native gate: PASS"
+ echo "  - instruction editor via native memory docs: PASS"
+ echo "  - skill management surface: compiled in core serve tests"
+ 
+-echo "[41/47] Universal APK protocol summary"
++echo "[41/52] Universal APK protocol summary"
+ echo "  - dynamic Capability Registry + Tool Packs: PASS"
+ echo "  - Chat mode denies mutating tools without creating a second agent: PASS"
+ echo "  - APK environment endpoint reuses Reasonix native probes/cache + project markers: PASS"
+ echo "  - project profile is provider-agnostic and APK-replayable: PASS"
+ echo "  - live event history exposes actions/diffs/results but not hidden reasoning: PASS"
+ 
+-echo "[42/47] APK supervisor/control-plane summary"
++echo "[42/52] APK supervisor/control-plane summary"
+ echo "  - bootstrap + atomic settings apply: PASS"
+ echo "  - task start/stop aliases reuse native submit/cancel: PASS"
+ echo "  - workspace-scoped policy survives backend restart: PASS"
+ echo "  - KZT/Pro spend ledger survives restart: PASS"
+ echo "  - Debian Android supervisor wrapper syntax: PASS"
+ 
+-echo "[43/47] APK v1 protocol freeze summary"
++echo "[43/52] APK v1 protocol freeze summary"
+ echo "  - machine-readable endpoint/event manifest: PASS"
+ echo "  - contract digest exposed in bootstrap: PASS"
+ echo "  - breaking endpoint semantics require protocol-major bump: PASS"
+ echo "  - localhost HTTP -> mock tool-loop -> live history: PASS"
+ 
+-echo "[44/47] v0.15 native deny-bypass mock policy regression"
++echo "[44/52] v0.15 native deny-bypass mock policy regression"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/provider/mock -run '^TestDenyBypassScenarioRequiresSchemaTrimAndNativeDenial$' -count=1
+ 
+-echo "[45/47] v0.15 offline stress harness syntax"
++echo "[45/52] v0.15 offline stress harness syntax"
+ bash -n ./scripts/balance_mod_offline_stress.sh
+ 
+-echo "[46/47] v0.15 full localhost crash/restart/policy stress gate"
++echo "[46/52] v0.15 full localhost crash/restart/policy stress gate"
+ PATH="$(dirname "$(command -v "$GO_BIN")"):$PATH" GOTOOLCHAIN=local ./scripts/balance_mod_offline_stress.sh
+ 
+-echo "[47/47] PASS — no provider API key/network was used"
++echo "[47/52] v0.15 cumulative offline baseline complete"
++echo "  - all v0.1-v0.15 gates above: PASS"
++
++cd "$ROOT"
++echo "[48/52] v0.16 remaining-global-budget + strict pre-call unit gates"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRemainingProviderBudgetDoesNotRegrantSpentMoney$' -count=1
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^(TestStrictPreCallBudget|TestProviderRequestTokenUpperBound|TestStrictBudgetBlocks)' -count=1
++
++echo "[49/52] v0.16 hard budget survives model rebuild + skips cosmetic title provider"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestHardPreCallBudgetSurvivesNativeModelSwitch|TestHardBudgetSkipsCosmeticTitleProvider)$' -count=1
++
++echo "[50/52] v0.16 process hard-budget harness syntax"
++bash -n ./scripts/balance_mod_precall_budget.sh
++
++echo "[51/52] v0.16 real localhost pre-call budget cap (offline mock, no keys)"
++PATH="$(dirname "$(command -v "$GO_BIN")"):$PATH" GOTOOLCHAIN=local ./scripts/balance_mod_precall_budget.sh
++
++echo "[52/52] PASS — no provider API key/network was used"
+ echo "  - v0.1 KZT budget/resource telemetry: PASS"
+ echo "  - v0.2 native anti-loop/completion telemetry: PASS"
+ echo "  - v0.3 router/cache/log/patch modules: PASS"
+@@ -227,4 +244,5 @@ echo "  - v0.12 idle-boundary auto continuation + durable inbox handoff: PASS"
+ echo "  - v0.13 durable pending route recovery + hard Pro diagnosis read-only gate: PASS"
+ echo "  - v0.14 APK v1 contract freeze + localhost offline prototype: PASS"
+ echo "  - v0.15 native deny bypass + crash/restart + queue/state stress gate: PASS"
+-echo "BALANCE_MOD_V15_SMOKE_PASS"
++echo "  - v0.16 hard pre-call provider cap + retry reserve: PASS"
++echo "BALANCE_MOD_V16_SMOKE_PASS"
+diff --git a/scripts/balance_mod_smoke_quick.sh b/scripts/balance_mod_smoke_quick.sh
+index b97cf5f..6e23574 100755
+--- a/scripts/balance_mod_smoke_quick.sh
++++ b/scripts/balance_mod_smoke_quick.sh
+@@ -5,29 +5,39 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ cd "$ROOT"
+ 
+-echo "[1/8] v0.12 orchestrator policy + APK contract"
++echo "[1/11] v0.12 orchestrator policy + APK contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAuto' -count=1
+ 
+-echo "[2/8] v0.13 execution-mode guard rollback"
++echo "[2/11] v0.13 execution-mode guard rollback"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouterModeGuardRunsBeforeSwitchAndRollsBackOnFailure$' -count=1
+ 
+-echo "[3/8] v0.13 hard Pro diagnosis + durable pending route"
++echo "[3/11] v0.13 hard Pro diagnosis + durable pending route"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProDiagnosisHardDeniesMutatingTools|TestModPendingPowerRoutePersistsSanitizedAcrossRestart)$' -count=1
+ 
+-echo "[4/8] v0.14 frozen APK contract"
++echo "[4/11] v0.14 frozen APK contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAPKContract' -count=1
+ 
+-echo "[5/8] v0.15 native deny-bypass mock scenario"
++echo "[5/11] v0.15 native deny-bypass mock scenario"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/provider/mock -run '^TestDenyBypassScenarioRequiresSchemaTrimAndNativeDenial$' -count=1
+ 
+-echo "[6/8] v0.15 offline stress harness syntax"
++echo "[6/11] v0.15 offline stress harness syntax"
+ bash -n ./scripts/balance_mod_offline_stress.sh
+ 
+-echo "[7/8] Serve package compile gate"
++echo "[7/11] v0.16 remaining-budget conversion"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRemainingProviderBudgetDoesNotRegrantSpentMoney$' -count=1
++
++echo "[8/11] v0.16 strict pre-call + single-agent budget policy"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^(TestStrictPreCallBudget|TestProviderRequestTokenUpperBound|TestStrictBudgetBlocks)' -count=1
++
++echo "[9/11] v0.16 model-switch/title hard-budget regression"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestHardPreCallBudgetSurvivesNativeModelSwitch|TestHardBudgetSkipsCosmeticTitleProvider)$' -count=1
++
++echo "[10/11] v0.16 process hard-budget harness syntax + serve compile"
++bash -n ./scripts/balance_mod_precall_budget.sh
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^$' -count=1
+ 
+-echo "[8/8] CLI compile gate"
++echo "[11/11] CLI compile gate"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+-echo "BALANCE_MOD_V15_QUICK_PASS"
++echo "BALANCE_MOD_V16_QUICK_PASS"

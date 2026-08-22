@@ -1,0 +1,1133 @@
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+index 8081fee..d118da2 100644
+--- a/docs/BALANCE_MOD.md
++++ b/docs/BALANCE_MOD.md
+@@ -499,3 +499,46 @@ Added:
+ 
+ The v0.10 offline gate must end with `BALANCE_MOD_V10_SMOKE_PASS`. No real
+ provider key is required or used.
++
++## v0.11 — Unified power/economy engine + native turn evidence bridge
++
++v0.11 removes the last duplicated host orchestration path between the Balance
++repair policy and concrete model execution. `efficiency.PowerEngine` now owns
++one deterministic sequence:
++
++`host verification -> repair cycle -> objective route -> KZT admission -> native model switch`
++
++It still never calls a model provider directly. Concrete model changes continue
++to use Reasonix's existing `serve.switchModel` rebuild path, and a Pro route is
++still diagnosis-only before returning execution to Flash.
++
++### Native turn evidence
++
++The serve frontend now derives a bounded, content-free turn observation from the
++existing typed Reasonix event stream. It consumes mutation counts, shell
++verification PASS/FAIL receipts, CompletionSummary and TurnDone readiness state.
++A model's prose is not accepted as verification.
++
++A mutating turn with no host verification is deliberately converted to a failed
++verification receipt instead of being treated as complete. Failure identity is
++stored as a truncated SHA-256 fingerprint; raw tool errors remain private host
++state and are never exposed through `/mod/power`.
++
++### No mid-turn model-switch race
++
++TurnDone is emitted at a controller boundary where runtime teardown may still be
++finishing. v0.11 therefore does **not** rebuild the model from inside that event
++callback. The observed repair attempt becomes a pending route and is applied
++only at an explicit idle boundary with:
++
++- `GET /mod/power`
++- `POST /mod/power/reset`
++- `POST /mod/power/apply-pending`
++
++This keeps Reasonix's invariant that `switchModel` cannot run while active work
++or background jobs own the controller. A pending route remains pending if
++budget/model admission fails, so the APK can adjust policy and retry rather than
++silently consuming another strategy step.
++
++The v0.11 offline gate must end with `BALANCE_MOD_V11_SMOKE_PASS`. No real
++provider key is required or used.
+diff --git a/internal/efficiency/power_engine.go b/internal/efficiency/power_engine.go
+new file mode 100644
+index 0000000..e5968d1
+--- /dev/null
++++ b/internal/efficiency/power_engine.go
+@@ -0,0 +1,150 @@
++package efficiency
++
++import (
++	"context"
++	"fmt"
++	"sync"
++	"time"
++)
++
++// PowerAttempt is one externally-observed repair attempt plus the concrete
++// model currently bound to the Reasonix controller. The attempt itself carries
++// only host evidence; model prose is never a success signal.
++type PowerAttempt struct {
++	RepairAttempt
++	CurrentModelRef string `json:"currentModelRef,omitempty"`
++}
++
++// PowerSnapshot is the single APK-safe state for the Balance power/economy
++// loop. It intentionally contains only counters, policy decisions and model
++// refs; prompts, code, logs and cached fix text stay host-internal.
++type PowerSnapshot struct {
++	Cycle           RepairCycleSnapshot `json:"cycle"`
++	Execution       ExecutionSnapshot   `json:"execution"`
++	Budget          BudgetSnapshot      `json:"budget"`
++	NextAction      RouteAction         `json:"nextAction,omitempty"`
++	Terminal        bool                `json:"terminal"`
++	Blocked         bool                `json:"blocked"`
++	Reason          string              `json:"reason,omitempty"`
++	AutomaticSwitch bool                `json:"automaticSwitch"`
++	UpdatedAtUnixMS int64               `json:"updatedAtUnixMs"`
++}
++
++// PowerResult keeps content-bearing repair details private while exposing one
++// coherent snapshot to the host/APK.
++type PowerResult struct {
++	Snapshot PowerSnapshot
++	Repair   RepairCycleResult
++}
++
++// PowerEngine is the single deterministic coordinator for the previously
++// separate RepairCycle and ExecutionRouter. It does not call a provider
++// directly; model changes still go through Reasonix's native switchModel
++// adapter owned by ExecutionRouter.
++type PowerEngine struct {
++	mu sync.Mutex
++
++	cycle  *RepairCycle
++	exec   *ExecutionRouter
++	budget *Governor
++	snap   PowerSnapshot
++}
++
++func NewPowerEngine(cycle *RepairCycle, exec *ExecutionRouter, budget *Governor) *PowerEngine {
++	p := &PowerEngine{cycle: cycle, exec: exec, budget: budget}
++	p.snap = p.snapshotLocked("initialized", false)
++	return p
++}
++
++func (p *PowerEngine) Snapshot() PowerSnapshot {
++	if p == nil {
++		return PowerSnapshot{}
++	}
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	return p.snap
++}
++
++func (p *PowerEngine) Reset(currentModelRef string) PowerSnapshot {
++	if p == nil {
++		return PowerSnapshot{}
++	}
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	if p.cycle != nil {
++		p.cycle.Reset()
++	}
++	if p.exec != nil {
++		p.exec.Reset(currentModelRef)
++	}
++	p.snap = p.snapshotLocked("reset", false)
++	return p.snap
++}
++
++// Handle is the only Balance path that should combine verification, routing,
++// budget admission and model switching. A route is decided first, then the
++// concrete model switch is admitted immediately against the latest KZT budget.
++func (p *PowerEngine) Handle(ctx context.Context, in PowerAttempt) (PowerResult, error) {
++	if p == nil || p.cycle == nil || p.exec == nil {
++		return PowerResult{}, fmt.Errorf("power engine is not fully configured")
++	}
++	if ctx == nil {
++		ctx = context.Background()
++	}
++
++	p.mu.Lock()
++	defer p.mu.Unlock()
++
++	repair, err := p.cycle.Report(in.RepairAttempt)
++	if err != nil {
++		p.snap = p.snapshotLocked(err.Error(), true)
++		return PowerResult{Snapshot: p.snap, Repair: repair}, err
++	}
++
++	execSnap, execErr := p.exec.Apply(ctx, ExecutionRequest{
++		Decision:          repair.Snapshot.LastRoute,
++		CurrentModelRef:   in.CurrentModelRef,
++		EstimatedFlashKZT: in.EstimatedFlashKZT,
++		EstimatedProKZT:   in.EstimatedProKZT,
++		Finalization:      in.Finalization,
++	})
++
++	p.snap = p.snapshotLocked(repair.Snapshot.LastRoute.Reason, execErr != nil || execSnap.Blocked)
++	p.snap.Cycle = repair.Snapshot
++	p.snap.Execution = execSnap
++	p.snap.NextAction = repair.Snapshot.LastRoute.Action
++	p.snap.Terminal = powerRouteTerminal(repair.Snapshot.LastRoute.Action)
++	p.snap.AutomaticSwitch = execSnap.Enabled
++	p.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++	if execErr != nil {
++		p.snap.Reason = execSnap.Reason
++		return PowerResult{Snapshot: p.snap, Repair: repair}, execErr
++	}
++	return PowerResult{Snapshot: p.snap, Repair: repair}, nil
++}
++
++func (p *PowerEngine) snapshotLocked(reason string, blocked bool) PowerSnapshot {
++	out := PowerSnapshot{Reason: reason, Blocked: blocked, UpdatedAtUnixMS: time.Now().UnixMilli()}
++	if p.cycle != nil {
++		out.Cycle = p.cycle.Snapshot()
++		out.NextAction = out.Cycle.LastRoute.Action
++		out.Terminal = powerRouteTerminal(out.NextAction)
++	}
++	if p.exec != nil {
++		out.Execution = p.exec.Snapshot()
++		out.AutomaticSwitch = out.Execution.Enabled
++	}
++	if p.budget != nil {
++		out.Budget = p.budget.Snapshot()
++	}
++	return out
++}
++
++func powerRouteTerminal(a RouteAction) bool {
++	switch a {
++	case RouteFinalize, RouteStopBudget, RouteStopNoProgress:
++		return true
++	default:
++		return false
++	}
++}
+diff --git a/internal/efficiency/power_engine_test.go b/internal/efficiency/power_engine_test.go
+new file mode 100644
+index 0000000..88cd4b9
+--- /dev/null
++++ b/internal/efficiency/power_engine_test.go
+@@ -0,0 +1,77 @@
++package efficiency
++
++import (
++	"context"
++	"testing"
++)
++
++func TestPowerEngineUnifiesRepairRouteBudgetAndExecution(t *testing.T) {
++	gov := NewGovernor()
++	gov.Configure(BudgetConfig{BudgetKZT: 100, ReservePercent: 10, ProMaxPercent: 50, HardStop: true, FXKZTPerUnit: map[string]float64{"KZT": 1}})
++	esc := NewEscalator()
++	cycle := NewRepairCycle(esc, gov, nil)
++	exec := NewExecutionRouter(gov)
++	switches := []string{}
++	exec.SetSwitcher(func(_ context.Context, ref string) error {
++		switches = append(switches, ref)
++		return nil
++	})
++	if _, err := exec.Configure(ExecutionConfig{Enabled: true, FlashPrimaryRef: "flash-a", FlashAlternativeRef: "flash-b", ProRef: "pro", FlashRepairRef: "flash-a"}, "flash-a"); err != nil {
++		t.Fatal(err)
++	}
++	p := NewPowerEngine(cycle, exec, gov)
++
++	failed := VerificationReceipt{RequiredChecks: 1, ChecksFailed: 1}
++	passed := VerificationReceipt{RequiredChecks: 1, ChecksPassed: 1}
++	steps := []PowerAttempt{
++		{RepairAttempt: RepairAttempt{StrategyID: "A", FailureFingerprint: "E1", Verification: failed, EstimatedFlashKZT: 1, EstimatedProKZT: 5}, CurrentModelRef: "flash-a"},
++		{RepairAttempt: RepairAttempt{StrategyID: "B", FailureFingerprint: "E1", Verification: failed, EstimatedFlashKZT: 1, EstimatedProKZT: 5}, CurrentModelRef: "flash-b"},
++		{RepairAttempt: RepairAttempt{StrategyID: "pro-diagnosis", FailureFingerprint: "E1", Verification: failed, EstimatedFlashKZT: 1, EstimatedProKZT: 5}, CurrentModelRef: "pro"},
++		{RepairAttempt: RepairAttempt{StrategyID: "repair", ResolvedFingerprint: "E1", Verification: passed, Finalization: true}, CurrentModelRef: "flash-a"},
++	}
++
++	want := []RouteAction{RouteRetryFlash, RouteDiagnosePro, RouteExecuteFlash, RouteFinalize}
++	for i, step := range steps {
++		got, err := p.Handle(context.Background(), step)
++		if err != nil {
++			t.Fatalf("step %d: %v", i, err)
++		}
++		if got.Snapshot.NextAction != want[i] {
++			t.Fatalf("step %d action=%q want=%q snapshot=%+v", i, got.Snapshot.NextAction, want[i], got.Snapshot)
++		}
++	}
++	if len(switches) < 3 {
++		t.Fatalf("switches=%v, want flash-b -> pro -> flash-a", switches)
++	}
++	if got := p.Snapshot(); !got.Terminal || got.NextAction != RouteFinalize {
++		t.Fatalf("final snapshot=%+v", got)
++	}
++}
++
++func TestPowerEngineBudgetBlocksProBeforeSwitch(t *testing.T) {
++	gov := NewGovernor()
++	gov.Configure(BudgetConfig{BudgetKZT: 1, ReservePercent: 0, ProMaxPercent: 10, HardStop: true, FXKZTPerUnit: map[string]float64{"KZT": 1}})
++	cycle := NewRepairCycle(NewEscalator(), gov, nil)
++	exec := NewExecutionRouter(gov)
++	calls := 0
++	exec.SetSwitcher(func(context.Context, string) error { calls++; return nil })
++	if _, err := exec.Configure(ExecutionConfig{Enabled: true, FlashPrimaryRef: "flash-a", FlashAlternativeRef: "flash-b", ProRef: "pro"}, "flash-a"); err != nil {
++		t.Fatal(err)
++	}
++	p := NewPowerEngine(cycle, exec, gov)
++	fail := VerificationReceipt{RequiredChecks: 1, ChecksFailed: 1}
++	if _, err := p.Handle(context.Background(), PowerAttempt{RepairAttempt: RepairAttempt{StrategyID: "A", FailureFingerprint: "E", Verification: fail, EstimatedFlashKZT: .1, EstimatedProKZT: 5}, CurrentModelRef: "flash-a"}); err != nil {
++		t.Fatal(err)
++	}
++	before := calls
++	got, err := p.Handle(context.Background(), PowerAttempt{RepairAttempt: RepairAttempt{StrategyID: "B", FailureFingerprint: "E", Verification: fail, EstimatedFlashKZT: 2, EstimatedProKZT: 5}, CurrentModelRef: "flash-b"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got.Snapshot.NextAction != RouteStopBudget {
++		t.Fatalf("action=%q want=%q snapshot=%+v", got.Snapshot.NextAction, RouteStopBudget, got.Snapshot)
++	}
++	if calls != before {
++		t.Fatalf("terminal budget stop must not call switcher: before=%d after=%d", before, calls)
++	}
++}
+diff --git a/internal/serve/mod_app.go b/internal/serve/mod_app.go
+index ca267d2..9ce08be 100644
+--- a/internal/serve/mod_app.go
++++ b/internal/serve/mod_app.go
+@@ -397,6 +397,8 @@ func (s *Server) modAppBootstrap(w http.ResponseWriter, r *http.Request) {
+ 		"profile":         s.modProfile.Snapshot(),
+ 		"budget":          s.modGov.Snapshot(),
+ 		"execution":       s.modExec.Snapshot(),
++		"power":           s.modPower.Snapshot(),
++		"powerTurn":       s.modPowerTurn.Snapshot(),
+ 		"quality":         s.modQuality.Snapshot(),
+ 		"recovery":        s.modRecoverySnapshot(),
+ 		"resources":       efficiency.ReadResources(s.modWorkspacePath()),
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index 077180c..84938d2 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -16,7 +16,7 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.10"
++const balanceModVersion = "balance-mod-v0.11"
+ 
+ // modEvent is a typed machine event for the Android client. Most Balance Mod
+ // telemetry is content-free; v0.7 live.* events may additionally carry bounded,
+@@ -142,6 +142,7 @@ type modStatusPayload struct {
+ 	Router      efficiency.RouteDecision       `json:"router"`
+ 	Cycle       efficiency.RepairCycleSnapshot `json:"cycle"`
+ 	Execution   efficiency.ExecutionSnapshot   `json:"execution"`
++	Power       efficiency.PowerSnapshot       `json:"power"`
+ 	Profile     efficiency.ProjectProfile      `json:"profile"`
+ 	Environment modEnvironmentSnapshot         `json:"environment"`
+ 	Persistence map[string]any                 `json:"persistence"`
+@@ -188,6 +189,7 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 		Router:      s.modRouter.Snapshot(),
+ 		Cycle:       s.modCycle.Snapshot(),
+ 		Execution:   s.modExec.Snapshot(),
++		Power:       s.modPower.Snapshot(),
+ 		Profile:     s.modProfile.Snapshot(),
+ 		Environment: s.modEnvironmentSnapshot(context.Background(), false),
+ 		Persistence: s.modPersistenceStatus(),
+@@ -219,6 +221,7 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 			"projectManager":       "global-registry+supervisor-handoff-v0.9",
+ 			"taskManager":          "native-session-catalog-no-provider-v0.9",
+ 			"taskQueue":            "native-sessioninbox+reviewed-recovery+per-turn-budget-v0.10",
++			"unifiedPowerEngine":   "repair+router+budget+execution-single-path-v0.11",
+ 			"androidSupervisor":    "debian-process-wrapper-v0.8",
+ 		},
+ 	})
+@@ -454,49 +457,8 @@ func (s *Server) observeRepairAttempt(a efficiency.RepairAttempt) (efficiency.Re
+ }
+ 
+ func (s *Server) observeRepairAttemptCtx(ctx context.Context, a efficiency.RepairAttempt) (efficiency.RepairCycleResult, error) {
+-	res, err := s.modCycle.Report(a)
+-	if err != nil {
+-		s.modHub.Emit("repair.error", map[string]any{"reason": err.Error()})
+-		return res, err
+-	}
+-	s.modHub.Emit("repair.updated", res.Snapshot)
+-	s.modHub.Emit("router.decision", res.Snapshot.LastRoute)
+-	if res.Snapshot.Recovery.Requested {
+-		kind := "rollback.failed"
+-		if res.Snapshot.Recovery.Succeeded {
+-			kind = "rollback.completed"
+-		}
+-		s.modHub.Emit(kind, res.Snapshot.Recovery)
+-	}
+-
+-	beforeExec := s.modExec.Snapshot()
+-	execSnap, execErr := s.modExec.Apply(ctx, efficiency.ExecutionRequest{
+-		Decision:          res.Snapshot.LastRoute,
+-		CurrentModelRef:   currentModelRef(s.ctl()),
+-		EstimatedFlashKZT: a.EstimatedFlashKZT,
+-		EstimatedProKZT:   a.EstimatedProKZT,
+-		Finalization:      a.Finalization,
+-	})
+-	s.modHub.Emit("execution.updated", execSnap)
+-	if execSnap.Switches > beforeExec.Switches {
+-		s.modHub.Emit("model.switch.completed", map[string]any{
+-			"from": beforeExec.CurrentModelRef, "to": execSnap.CurrentModelRef, "mode": execSnap.Mode,
+-		})
+-		if execSnap.Mode == efficiency.ExecutionProDiagnosis {
+-			s.modHub.Emit("model.escalated", map[string]any{"to": execSnap.CurrentModelRef, "diagnosisOnly": true})
+-		}
+-		if execSnap.Mode == efficiency.ExecutionFlashRepair {
+-			s.modHub.Emit("model.returned_flash", map[string]any{"to": execSnap.CurrentModelRef})
+-		}
+-	}
+-	if execErr != nil {
+-		s.modHub.Emit("execution.blocked", map[string]any{"reason": execSnap.Reason, "action": execSnap.LastAction})
+-		return res, fmt.Errorf("apply execution route: %w", execErr)
+-	}
+-	if res.Snapshot.State == "done" {
+-		s.modHub.Emit("repair.completed", map[string]any{"attempts": res.Snapshot.Attempts})
+-	}
+-	return res, nil
++	res, err := s.applyUnifiedPowerAttemptCtx(ctx, a)
++	return res.Repair, err
+ }
+ 
+ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+@@ -519,6 +481,8 @@ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ 		"router":      s.modRouter.Snapshot(),
+ 		"cycle":       s.modCycle.Snapshot(),
+ 		"execution":   s.modExec.Snapshot(),
++		"power":       s.modPower.Snapshot(),
++		"powerTurn":   s.modPowerTurn.Snapshot(),
+ 		"recovery":    s.modRecoverySnapshot(),
+ 		"profile":     s.modProfile.Snapshot(),
+ 		"environment": s.modEnvironmentSnapshot(context.Background(), false),
+@@ -563,6 +527,7 @@ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ // allowed visible chat/action/result surface and never forwards hidden reasoning.
+ func (s *Server) observeCoreEvent(e event.Event) {
+ 	s.observeLiveCoreEvent(e)
++	s.observePowerCoreEvent(e)
+ 	quality, signals := s.modQuality.Observe(e)
+ 	for _, sig := range signals {
+ 		s.modHub.Emit(sig.Type, sig.Data)
+diff --git a/internal/serve/mod_power.go b/internal/serve/mod_power.go
+new file mode 100644
+index 0000000..b766bf4
+--- /dev/null
++++ b/internal/serve/mod_power.go
+@@ -0,0 +1,90 @@
++package serve
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++
++	"reasonix/internal/efficiency"
++)
++
++func (s *Server) modPowerGet(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, map[string]any{"engine": s.modPower.Snapshot(), "turn": s.modPowerTurn.Snapshot()})
++}
++
++func (s *Server) modPowerReset(w http.ResponseWriter, _ *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot reset unified power state while a turn is running", http.StatusConflict)
++		return
++	}
++	snap := s.modPower.Reset(currentModelRef(s.ctl()))
++	turn := s.modPowerTurn.Reset()
++	s.modHub.Emit("power.reset", map[string]any{"engine": snap, "turn": turn})
++	writeJSON(w, map[string]any{"engine": snap, "turn": turn})
++}
++
++func (s *Server) modPowerApplyPending(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot apply pending power route while a turn is running", http.StatusConflict)
++		return
++	}
++	a, ok := s.modPowerTurn.Pending()
++	if !ok {
++		http.Error(w, "no pending power route", http.StatusConflict)
++		return
++	}
++	res, err := s.applyUnifiedPowerAttemptCtx(r.Context(), a)
++	if err != nil {
++		s.modPowerTurn.Applied("blocked", false)
++		http.Error(w, err.Error(), http.StatusConflict)
++		return
++	}
++	s.modPowerTurn.Applied(string(res.Snapshot.NextAction), true)
++	writeJSON(w, map[string]any{"power": res.Snapshot, "turn": s.modPowerTurn.Snapshot()})
++}
++
++func (s *Server) applyUnifiedPowerAttempt(a efficiency.RepairAttempt) (efficiency.PowerResult, error) {
++	return s.applyUnifiedPowerAttemptCtx(context.Background(), a)
++}
++
++func (s *Server) applyUnifiedPowerAttemptCtx(ctx context.Context, a efficiency.RepairAttempt) (efficiency.PowerResult, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	beforeExec := s.modExec.Snapshot()
++	res, err := s.modPower.Handle(ctx, efficiency.PowerAttempt{
++		RepairAttempt:   a,
++		CurrentModelRef: currentModelRef(s.ctl()),
++	})
++	snap := res.Snapshot
++	s.modHub.Emit("power.updated", snap)
++	s.modHub.Emit("repair.updated", snap.Cycle)
++	s.modHub.Emit("router.decision", snap.Cycle.LastRoute)
++	s.modHub.Emit("execution.updated", snap.Execution)
++	if snap.Cycle.Recovery.Requested {
++		kind := "rollback.failed"
++		if snap.Cycle.Recovery.Succeeded {
++			kind = "rollback.completed"
++		}
++		s.modHub.Emit(kind, snap.Cycle.Recovery)
++	}
++	if snap.Execution.Switches > beforeExec.Switches {
++		s.modHub.Emit("model.switch.completed", map[string]any{
++			"from": beforeExec.CurrentModelRef, "to": snap.Execution.CurrentModelRef, "mode": snap.Execution.Mode,
++		})
++		if snap.Execution.Mode == efficiency.ExecutionProDiagnosis {
++			s.modHub.Emit("model.escalated", map[string]any{"to": snap.Execution.CurrentModelRef, "diagnosisOnly": true})
++		}
++		if snap.Execution.Mode == efficiency.ExecutionFlashRepair {
++			s.modHub.Emit("model.returned_flash", map[string]any{"to": snap.Execution.CurrentModelRef})
++		}
++	}
++	if err != nil {
++		s.modHub.Emit("power.blocked", map[string]any{"reason": snap.Reason, "action": snap.NextAction})
++		return res, fmt.Errorf("unified power engine: %w", err)
++	}
++	if snap.Cycle.State == "done" {
++		s.modHub.Emit("repair.completed", map[string]any{"attempts": snap.Cycle.Attempts})
++	}
++	return res, nil
++}
+diff --git a/internal/serve/mod_power_turn.go b/internal/serve/mod_power_turn.go
+new file mode 100644
+index 0000000..20ee7e4
+--- /dev/null
++++ b/internal/serve/mod_power_turn.go
+@@ -0,0 +1,271 @@
++package serve
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"fmt"
++	"strings"
++	"sync"
++	"time"
++
++	"reasonix/internal/efficiency"
++	"reasonix/internal/event"
++)
++
++type modPowerTurnSnapshot struct {
++	Active             bool   `json:"active"`
++	ModelRef           string `json:"modelRef,omitempty"`
++	StrategyID         string `json:"strategyId,omitempty"`
++	Mutations          int    `json:"mutations"`
++	Added              int    `json:"added"`
++	Removed            int    `json:"removed"`
++	ChecksPassed       int    `json:"checksPassed"`
++	ChecksFailed       int    `json:"checksFailed"`
++	LastFailureHash    string `json:"lastFailureHash,omitempty"`
++	PendingApplication bool   `json:"pendingApplication"`
++	LastDecision       string `json:"lastDecision,omitempty"`
++	UpdatedAtUnixMS    int64  `json:"updatedAtUnixMs"`
++}
++
++type modPowerTurnTracker struct {
++	mu sync.Mutex
++
++	snap            modPowerTurnSnapshot
++	lastFailureText string
++	completion      *event.CompletionSummaryInfo
++	pending         *efficiency.RepairAttempt
++}
++
++func newModPowerTurnTracker() *modPowerTurnTracker { return &modPowerTurnTracker{} }
++
++func (t *modPowerTurnTracker) Reset() modPowerTurnSnapshot {
++	if t == nil {
++		return modPowerTurnSnapshot{}
++	}
++	t.mu.Lock()
++	t.snap = modPowerTurnSnapshot{UpdatedAtUnixMS: time.Now().UnixMilli()}
++	t.lastFailureText = ""
++	t.completion = nil
++	t.pending = nil
++	out := t.snap
++	t.mu.Unlock()
++	return out
++}
++
++func (t *modPowerTurnTracker) Snapshot() modPowerTurnSnapshot {
++	if t == nil {
++		return modPowerTurnSnapshot{}
++	}
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	return t.snap
++}
++
++func (t *modPowerTurnTracker) Begin(modelRef, strategy string) {
++	if t == nil {
++		return
++	}
++	t.mu.Lock()
++	if t.pending != nil {
++		// Never silently discard a route that was derived from host evidence.
++		// A client that starts another turn without applying/reviewing it loses
++		// automatic power tracking for that turn, but the pending decision stays.
++		t.snap.Active = false
++		t.snap.LastDecision = "pending_route_requires_apply"
++		t.snap.PendingApplication = true
++		t.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++		t.mu.Unlock()
++		return
++	}
++	t.snap = modPowerTurnSnapshot{Active: true, ModelRef: strings.TrimSpace(modelRef), StrategyID: strings.TrimSpace(strategy), UpdatedAtUnixMS: time.Now().UnixMilli()}
++	t.lastFailureText = ""
++	t.completion = nil
++	t.mu.Unlock()
++}
++
++func (t *modPowerTurnTracker) Observe(e event.Event) {
++	if t == nil {
++		return
++	}
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	switch e.Kind {
++	case event.ToolDispatch:
++		if e.Tool.Partial {
++			return
++		}
++		if e.Tool.Added > 0 || e.Tool.Removed > 0 || (!e.Tool.ReadOnly && e.Tool.Diff != "") {
++			t.snap.Mutations++
++			t.snap.Added += e.Tool.Added
++			t.snap.Removed += e.Tool.Removed
++		}
++	case event.ToolResult:
++		if e.Tool.Execution != nil {
++			switch strings.ToLower(strings.TrimSpace(e.Tool.Execution.Verification)) {
++			case "passed":
++				t.snap.ChecksPassed++
++			case "failed":
++				t.snap.ChecksFailed++
++			}
++		}
++		if e.Tool.Err != "" {
++			t.lastFailureText = e.Tool.Name + "|" + e.Tool.Err
++			t.snap.LastFailureHash = modPowerHash(t.lastFailureText)
++		} else if e.Tool.Execution != nil && strings.EqualFold(e.Tool.Execution.Verification, "failed") {
++			t.lastFailureText = e.Tool.Name + "|" + e.Tool.Execution.FailurePhase + "|verification_failed"
++			t.snap.LastFailureHash = modPowerHash(t.lastFailureText)
++		}
++	case event.CompletionSummary:
++		if e.Completion != nil {
++			cp := *e.Completion
++			t.completion = &cp
++			// CompletionSummary is the host's canonical end-of-turn count. It
++			// replaces lower-level shell counts rather than double-counting.
++			t.snap.ChecksPassed = cp.ChecksPassed
++			t.snap.ChecksFailed = cp.ChecksFailed
++		}
++	}
++	t.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++}
++
++func (t *modPowerTurnTracker) Finish(e event.Event) (efficiency.RepairAttempt, bool) {
++	if t == nil || e.Kind != event.TurnDone {
++		return efficiency.RepairAttempt{}, false
++	}
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	if !t.snap.Active {
++		return efficiency.RepairAttempt{}, false
++	}
++
++	snap := t.snap
++	passed, failed := snap.ChecksPassed, snap.ChecksFailed
++	if t.completion != nil {
++		passed, failed = t.completion.ChecksPassed, t.completion.ChecksFailed
++	}
++	hasFailure := e.Err != nil || failed > 0 || e.Readiness != nil
++	if snap.Mutations == 0 && passed == 0 && failed == 0 && !hasFailure {
++		t.snap.Active = false
++		t.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++		return efficiency.RepairAttempt{}, false
++	}
++
++	required := passed + failed
++	if required == 0 {
++		// A mutating turn without host verification is not considered done.
++		required = 1
++		if hasFailure || snap.Mutations > 0 {
++			failed = 1
++		}
++	}
++
++	failure := snap.LastFailureHash
++	if failure == "" && (hasFailure || failed > 0) {
++		parts := []string{e.Outcome, fmt.Sprint(failed), fmt.Sprint(snap.Mutations)}
++		if e.Readiness != nil {
++			parts = append(parts, strings.Join(e.Readiness.Missing, ","))
++		}
++		if e.Err != nil {
++			parts = append(parts, e.Err.Error())
++		}
++		failure = modPowerHash(strings.Join(parts, "|"))
++	}
++
++	patch := ""
++	if snap.Added > 0 || snap.Removed > 0 {
++		patch = fmt.Sprintf("%d\t%d\t<turn>", snap.Added, snap.Removed)
++	}
++	a := efficiency.RepairAttempt{
++		StrategyID:         snap.StrategyID,
++		FailureFingerprint: failure,
++		PatchNumstat:       patch,
++		BuildLog:           t.lastFailureText,
++		Verification: efficiency.VerificationReceipt{
++			RequiredChecks: required,
++			ChecksPassed:   passed,
++			ChecksFailed:   failed,
++		},
++		Finalization: !hasFailure && failed == 0 && passed >= required,
++	}
++	if a.Finalization {
++		a.ResolvedFingerprint = failure
++	}
++	t.snap.Active = false
++	t.snap.PendingApplication = true
++	t.pending = &a
++	t.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++	return a, true
++}
++
++func (t *modPowerTurnTracker) Pending() (efficiency.RepairAttempt, bool) {
++	if t == nil {
++		return efficiency.RepairAttempt{}, false
++	}
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	if t.pending == nil {
++		return efficiency.RepairAttempt{}, false
++	}
++	return *t.pending, true
++}
++
++func (t *modPowerTurnTracker) Applied(decision string, clear bool) {
++	if t == nil {
++		return
++	}
++	t.mu.Lock()
++	t.snap.PendingApplication = !clear && t.pending != nil
++	t.snap.LastDecision = decision
++	if clear {
++		t.pending = nil
++		t.snap.PendingApplication = false
++	}
++	t.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++	t.mu.Unlock()
++}
++
++func modPowerHash(s string) string {
++	sum := sha256.Sum256([]byte(strings.TrimSpace(s)))
++	return hex.EncodeToString(sum[:12])
++}
++
++func (s *Server) observePowerCoreEvent(e event.Event) {
++	if s.modPowerTurn == nil {
++		return
++	}
++	if e.Kind == event.TurnStarted {
++		exec := s.modExec.Snapshot()
++		strategy := string(exec.Mode)
++		if strategy == "" || strategy == string(efficiency.ExecutionDisabled) {
++			strategy = "native:" + currentModelRef(s.ctl())
++		}
++		s.modPowerTurn.Begin(modPowerFirstNonEmpty(e.ModelRef, currentModelRef(s.ctl())), strategy)
++		return
++	}
++
++	s.modPowerTurn.Observe(e)
++	if e.Kind != event.TurnDone || e.Cancelled {
++		return
++	}
++	attempt, ok := s.modPowerTurn.Finish(e)
++	if !ok {
++		return
++	}
++	s.modHub.Emit("power.turn.observed", s.modPowerTurn.Snapshot())
++	s.modHub.Emit("power.route.pending", map[string]any{"strategyId": attempt.StrategyID, "failureFingerprint": attempt.FailureFingerprint != "", "finalization": attempt.Finalization})
++	_ = attempt // the content-bearing attempt stays private in modPowerTurn.pending
++	// Do not switch models from inside the TurnDone callback. Reasonix forbids a
++	// model rebuild while runtime work still owns the controller, and doing so
++	// here creates a race with a newly submitted turn. The APK/control plane
++	// applies this pending route explicitly at an idle boundary via
++	// POST /mod/power/apply-pending.
++}
++
++func modPowerFirstNonEmpty(vals ...string) string {
++	for _, v := range vals {
++		if strings.TrimSpace(v) != "" {
++			return strings.TrimSpace(v)
++		}
++	}
++	return ""
++}
+diff --git a/internal/serve/mod_power_turn_test.go b/internal/serve/mod_power_turn_test.go
+new file mode 100644
+index 0000000..6201405
+--- /dev/null
++++ b/internal/serve/mod_power_turn_test.go
+@@ -0,0 +1,114 @@
++package serve
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"reasonix/internal/config"
++	"reasonix/internal/control"
++	"reasonix/internal/event"
++)
++
++func TestModPowerTurnTrackerBuildsHostVerifiedAttempt(t *testing.T) {
++	tr := newModPowerTurnTracker()
++	tr.Begin("mock/flash", "flash_primary")
++	tr.Observe(event.Event{Kind: event.ToolDispatch, Tool: event.Tool{ID: "w1", Name: "edit_file", ReadOnly: false, FileDiff: event.FileDiff{Added: 3, Removed: 1, Diff: "+x"}}})
++	tr.Observe(event.Event{Kind: event.ToolResult, Tool: event.Tool{ID: "v1", Name: "bash", Execution: &event.ShellExecution{Verification: "failed", FailurePhase: "exit"}, Err: "exit status 1"}})
++	tr.Observe(event.Event{Kind: event.CompletionSummary, Completion: &event.CompletionSummaryInfo{ChecksPassed: 0, ChecksFailed: 1, Mutations: 1}})
++	attempt, ok := tr.Finish(event.Event{Kind: event.TurnDone, Outcome: "partial"})
++	if !ok {
++		t.Fatal("expected a power attempt")
++	}
++	if attempt.StrategyID != "flash_primary" || attempt.Verification.RequiredChecks != 1 || attempt.Verification.ChecksFailed != 1 {
++		t.Fatalf("attempt=%+v", attempt)
++	}
++	if attempt.FailureFingerprint == "" || attempt.Finalization {
++		t.Fatalf("failure attempt=%+v", attempt)
++	}
++	if attempt.PatchNumstat != "3\t1\t<turn>" {
++		t.Fatalf("patch=%q", attempt.PatchNumstat)
++	}
++}
++
++func TestModPowerTurnTrackerRefusesUnverifiedMutationAsDone(t *testing.T) {
++	tr := newModPowerTurnTracker()
++	tr.Begin("mock/flash", "flash_primary")
++	tr.Observe(event.Event{Kind: event.ToolDispatch, Tool: event.Tool{ID: "w1", Name: "edit_file", ReadOnly: false, FileDiff: event.FileDiff{Added: 1, Diff: "+x"}}})
++	attempt, ok := tr.Finish(event.Event{Kind: event.TurnDone})
++	if !ok {
++		t.Fatal("expected mutating turn to be evaluated")
++	}
++	if attempt.Verification.ChecksFailed != 1 || attempt.Finalization {
++		t.Fatalf("unverified mutation was treated as done: %+v", attempt)
++	}
++}
++
++func TestModPowerAPIExposesUnifiedState(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, ModelRef: "mock/flash"})
++	srv := New(ctrl, bc, config.ServeConfig{})
++	ts := httptest.NewServer(srv.Handler())
++	defer ts.Close()
++
++	resp, err := ts.Client().Get(ts.URL + "/mod/power")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("GET /mod/power = %d", resp.StatusCode)
++	}
++	var body map[string]any
++	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
++		t.Fatal(err)
++	}
++	if body["engine"] == nil || body["turn"] == nil {
++		t.Fatalf("body=%#v", body)
++	}
++
++	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mod/power/reset", strings.NewReader(`{}`))
++	req.Header.Set("Content-Type", "application/json")
++	resp2, err := ts.Client().Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp2.Body.Close()
++	if resp2.StatusCode != http.StatusOK {
++		t.Fatalf("POST /mod/power/reset = %d", resp2.StatusCode)
++	}
++}
++
++func TestModPowerPendingRouteAppliesOnlyAtExplicitIdleBoundary(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, ModelRef: "mock/flash"})
++	srv := New(ctrl, bc, config.ServeConfig{})
++	ts := httptest.NewServer(srv.Handler())
++	defer ts.Close()
++
++	srv.modPowerTurn.Begin("mock/flash", "flash_primary")
++	srv.modPowerTurn.Observe(event.Event{Kind: event.ToolDispatch, Tool: event.Tool{ID: "w", Name: "edit_file", ReadOnly: false, FileDiff: event.FileDiff{Added: 1, Diff: "+x"}}})
++	srv.modPowerTurn.Observe(event.Event{Kind: event.ToolResult, Tool: event.Tool{ID: "v", Name: "bash", Err: "exit 1", Execution: &event.ShellExecution{Verification: "failed"}}})
++	if _, ok := srv.modPowerTurn.Finish(event.Event{Kind: event.TurnDone, Outcome: "partial"}); !ok {
++		t.Fatal("expected pending attempt")
++	}
++	if !srv.modPowerTurn.Snapshot().PendingApplication {
++		t.Fatal("route should stay pending until explicit idle-boundary apply")
++	}
++
++	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mod/power/apply-pending", strings.NewReader(`{}`))
++	req.Header.Set("Content-Type", "application/json")
++	resp, err := ts.Client().Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("apply pending = %d", resp.StatusCode)
++	}
++	if srv.modPowerTurn.Snapshot().PendingApplication {
++		t.Fatal("successful apply must clear pending route")
++	}
++}
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index ec5e6e3..9a9ae2e 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -58,16 +58,18 @@ type Server struct {
+ 
+ 	// Balance mod v0.1: APK-facing economy/control telemetry. These are kept
+ 	// outside SessionAPI so upstream frontend contracts stay source-compatible.
+-	modGov      *efficiency.Governor
+-	modQuality  *efficiency.QualityMonitor
+-	modRouter   *efficiency.Escalator
+-	modCycle    *efficiency.RepairCycle
+-	modExec     *efficiency.ExecutionRouter
+-	modProfile  *efficiency.ProjectProfileManager
+-	modHub      *modBroadcaster
+-	modMu       sync.RWMutex
+-	modTaskGate modTaskCostGateStatus
+-	modEnv      modEnvironmentSnapshot
++	modGov       *efficiency.Governor
++	modQuality   *efficiency.QualityMonitor
++	modRouter    *efficiency.Escalator
++	modCycle     *efficiency.RepairCycle
++	modExec      *efficiency.ExecutionRouter
++	modPower     *efficiency.PowerEngine
++	modPowerTurn *modPowerTurnTracker
++	modProfile   *efficiency.ProjectProfileManager
++	modHub       *modBroadcaster
++	modMu        sync.RWMutex
++	modTaskGate  modTaskCostGateStatus
++	modEnv       modEnvironmentSnapshot
+ 	// v0.8 persists APK-owned policy per workspace so backend restarts/workspace
+ 	// supervisor handoffs do not reset the user budget or tool/profile policy.
+ 	modPersistMu   sync.Mutex
+@@ -137,6 +139,8 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 	}
+ 	s.modCycle = efficiency.NewRepairCycle(s.modRouter, s.modGov, cache)
+ 	s.modCycle.SetRollback(func(reason string) error { return s.modRollbackLatestCode(reason) })
++	s.modPower = efficiency.NewPowerEngine(s.modCycle, s.modExec, s.modGov)
++	s.modPowerTurn = newModPowerTurnTracker()
+ 	// Restore only APK-owned policy. Native skills/instruction files remain owned
+ 	// by Reasonix itself. A corrupt state is fail-closed and reported in bootstrap.
+ 	s.loadModAppState()
+@@ -585,6 +589,9 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("GET /mod/cycle", s.modCycleGet)
+ 	mux.HandleFunc("POST /mod/cycle/reset", s.modCycleReset)
+ 	mux.HandleFunc("GET /mod/execution", s.modExecutionGet)
++	mux.HandleFunc("GET /mod/power", s.modPowerGet)
++	mux.HandleFunc("POST /mod/power/reset", s.modPowerReset)
++	mux.HandleFunc("POST /mod/power/apply-pending", s.modPowerApplyPending)
+ 	mux.HandleFunc("POST /mod/execution/config", s.modExecutionConfigure)
+ 	mux.HandleFunc("POST /mod/execution/reset", s.modExecutionReset)
+ 	mux.HandleFunc("GET /mod/agent", s.modAgentGet)
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index 01cc32f..f16ad86 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,82 +5,91 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/32] Unit tests: Balance Mod core + APK bridge"
++echo "[1/35] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/32] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++echo "[2/35] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
+ 
+-echo "[3/32] Failure cache: verified-only persistence + corruption recovery"
++echo "[3/35] Failure cache: verified-only persistence + corruption recovery"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
+ 
+-echo "[4/32] Context/patch economy: log reducer + patch governor"
++echo "[4/35] Context/patch economy: log reducer + patch governor"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
+ 
+-echo "[5/32] Unified repair cycle: verifier -> router -> cache"
++echo "[5/35] Unified repair cycle: verifier -> router -> cache"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestVerificationReceiptRequiresHostEvidence|TestRepairCycleFlashFlashProFlashAndVerifiedCache)$' -count=1
+ 
+-echo "[6/32] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
++echo "[6/35] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleDrivenByOfflineMockProvider$' -count=1
+ 
+-echo "[7/32] Recovery policy: regression/oversize rollback + fail-closed conflict"
++echo "[7/35] Recovery policy: regression/oversize rollback + fail-closed conflict"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleRollback' -count=1
+ 
+-echo "[8/32] APK cycle/recovery API integration"
++echo "[8/35] APK cycle/recovery API integration"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModCycleAPIAndHostRepairWiring|TestModRecoveryAPIIsFailClosedWithoutCheckpoint)$' -count=1
+ 
+-echo "[9/32] Execution router: model slots + immediate KZT admission re-check"
++echo "[9/35] Execution router: model slots + immediate KZT admission re-check"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouter' -count=1
+ 
+-echo "[10/32] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
++echo "[10/35] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModExecutionRouterUsesNativeServeModelSwitch$' -count=1
+ 
+-echo "[11/32] APK execution config/status contract"
++echo "[11/35] APK execution config/status contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModExecutionAPIIsStrictAndAPKVisible|TestModStatusExposesTypedAPKSurface)$' -count=1
+ 
+-echo "[12/32] Universal agent control: native per-tool allow/ask/deny + schema trim"
++echo "[12/35] Universal agent control: native per-tool allow/ask/deny + schema trim"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control ./internal/tool -run '^(TestSessionToolDecisions|TestSessionHiddenTools)' -count=1
+ 
+-echo "[13/32] APK agent/tools API contract"
++echo "[13/35] APK agent/tools API contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAgentToolsAPIUsesNativeRuntimePolicy$' -count=1
+ 
+-echo "[14/32] APK instructions + workspace file bridge"
++echo "[14/35] APK instructions + workspace file bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModInstructionsAndWorkspaceFileAPI|TestModWorkspaceFileRejectsTraversal)$' -count=1
+ 
+-echo "[15/32] Provider-agnostic project profile"
++echo "[15/35] Provider-agnostic project profile"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestProjectProfile' -count=1
+ 
+-echo "[16/32] Capability Registry + Chat/Agent mode + Tool Packs"
++echo "[16/35] Capability Registry + Chat/Agent mode + Tool Packs"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProjectChatModeHidesMutatingToolsAndRestoresAgentMode|TestModProjectToolPackRestrictsSurfaceAndManualDenySurvives|TestModEnvironmentAndProjectContract)$' -count=1
+ 
+-echo "[17/32] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
++echo "[17/35] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModLive' -count=1
+ 
+-echo "[18/32] Restart-safe KZT ledger persistence"
++echo "[18/35] Restart-safe KZT ledger persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestBudgetPersistentState' -count=1
+ 
+-echo "[19/32] APK bootstrap + atomic apply + restart persistence"
++echo "[19/35] APK bootstrap + atomic apply + restart persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModApp' -count=1
+ 
+-echo "[20/32] APK project registry + supervisor handoff"
++echo "[20/35] APK project registry + supervisor handoff"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModProjectRegistryAndSupervisorHandoff$' -count=1
+ 
+-echo "[21/32] Native task catalog + local rename (no provider listing call)"
++echo "[21/35] Native task catalog + local rename (no provider listing call)"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModTaskCatalogUsesNativeSessionsAndRename$' -count=1
+ 
+-echo "[22/32] APK durable task queue + per-turn budget metadata"
++echo "[22/35] APK durable task queue + per-turn budget metadata"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve ./internal/control -run '^(TestModQueue|TestParseInboxTaskBudget)' -count=1
+ 
+-echo "[23/32] Native session-inbox crash recovery regression"
++echo "[23/35] Unified power engine: repair + router + budget + native execution"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestPowerEngine' -count=1
++
++echo "[24/35] Native turn evidence -> pending power route (no mid-turn model race)"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModPowerTurnTracker' -count=1
++
++echo "[25/35] APK unified power endpoint + explicit idle-boundary apply"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModPowerAPIExposesUnifiedState|TestModPowerPendingRouteAppliesOnlyAtExplicitIdleBoundary)$' -count=1
++
++echo "[26/35] Native session-inbox crash recovery regression"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control -run '^TestInboxSnapshotRecoversUnownedInFlightItem$' -count=1
+ 
+-echo "[24/32] Debian Android backend supervisor syntax"
++echo "[27/35] Debian Android backend supervisor syntax"
+ bash -n ./scripts/reasonix_android_backend.sh
+ 
+-echo "[25/32] Native Reasonix completion gate regression test"
++echo "[28/35] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[26/32] Build CLI only (skip example plugin)"
++echo "[29/35] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -106,7 +115,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[27/32] Offline normal tool-loop"
++echo "[30/35] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+@@ -133,7 +142,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[28/32] Offline anti-loop intervention"
++echo "[31/35] Offline anti-loop intervention"
+ LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+@@ -141,27 +150,27 @@ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+   exit 1
+ fi
+ 
+-echo "[29/32] Universal agent-control contract summary"
++echo "[32/35] Universal agent-control contract summary"
+ echo "  - workspace root + confined file browser: PASS"
+ echo "  - per-tool allow/ask/deny via native gate: PASS"
+ echo "  - instruction editor via native memory docs: PASS"
+ echo "  - skill management surface: compiled in core serve tests"
+ 
+-echo "[30/32] Universal APK protocol summary"
++echo "[33/35] Universal APK protocol summary"
+ echo "  - dynamic Capability Registry + Tool Packs: PASS"
+ echo "  - Chat mode denies mutating tools without creating a second agent: PASS"
+ echo "  - APK environment endpoint reuses Reasonix native probes/cache + project markers: PASS"
+ echo "  - project profile is provider-agnostic and APK-replayable: PASS"
+ echo "  - live event history exposes actions/diffs/results but not hidden reasoning: PASS"
+ 
+-echo "[31/32] APK supervisor/control-plane summary"
++echo "[34/35] APK supervisor/control-plane summary"
+ echo "  - bootstrap + atomic settings apply: PASS"
+ echo "  - task start/stop aliases reuse native submit/cancel: PASS"
+ echo "  - workspace-scoped policy survives backend restart: PASS"
+ echo "  - KZT/Pro spend ledger survives restart: PASS"
+ echo "  - Debian Android supervisor wrapper syntax: PASS"
+ 
+-echo "[32/32] PASS — no provider API key/network was used"
++echo "[35/35] PASS — no provider API key/network was used"
+ echo "  - v0.1 KZT budget/resource telemetry: PASS"
+ echo "  - v0.2 native anti-loop/completion telemetry: PASS"
+ echo "  - v0.3 router/cache/log/patch modules: PASS"
+@@ -172,4 +181,5 @@ echo "  - v0.7 capability/environment/project/live APK protocol: PASS"
+ echo "  - v0.8 APK control plane + restart-safe persistence + supervisor: PASS"
+ echo "  - v0.9 project registry + native task catalog: PASS"
+ echo "  - v0.10 native durable task queue + reviewed recovery + per-turn budgets: PASS"
+-echo "BALANCE_MOD_V10_SMOKE_PASS"
++echo "  - v0.11 unified power engine + native turn-evidence bridge: PASS"
++echo "BALANCE_MOD_V11_SMOKE_PASS"

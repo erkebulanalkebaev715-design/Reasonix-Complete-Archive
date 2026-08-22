@@ -1,0 +1,12 @@
+{
+  "id": "20260818-095440.250434045-deepseek-v4-flash",
+  "created_at": "2026-08-18T09:54:42.134687929Z",
+  "updated_at": "2026-08-18T09:54:42.290763352Z",
+  "model": "deepseek-v20/deepseek-v4-flash",
+  "revision": 1,
+  "content_digest": "9e5d342b7826fcc88ac43ddfb0db950af26be9854be04c80383b7f779676081b",
+  "writer_id": "localhost-10760-ece03f25ae3cba06",
+  "schema_version": 2,
+  "turns": 1,
+  "preview": "Reply exactly BALANCE_V20_REAL_PROVIDER_OK. Do not use any tool. Do not add a…"
+}

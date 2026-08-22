@@ -1,0 +1,38 @@
+{
+  "schema": "balance-rc-v1",
+  "modVersion": "balance-mod-v0.18",
+  "baseline": "balance-mod-v0.17",
+  "apkContract": "balance-apk-v1",
+  "mode": "agent",
+  "provider": {
+    "name": "balance-rc-mock",
+    "kind": "mock",
+    "scenario": "smoke",
+    "networkRequired": false,
+    "apiKeyRequired": false
+  },
+  "budget": {
+    "budgetKzt": 1000,
+    "reservePercent": 15,
+    "proMaxPercent": 25,
+    "hardStop": true,
+    "fxKztPerUnit": {
+      "CNY": 70
+    }
+  },
+  "requiredGates": [
+    "apk-contract",
+    "localhost-http",
+    "native-tool-loop",
+    "live-history",
+    "hard-precall-budget",
+    "offline-stress",
+    "crash-replay-hardening",
+    "full-regression"
+  ],
+  "forbiddenBeforePass": [
+    "real-provider",
+    "provider-api-key",
+    "network-dependent-agent-test"
+  ]
+}

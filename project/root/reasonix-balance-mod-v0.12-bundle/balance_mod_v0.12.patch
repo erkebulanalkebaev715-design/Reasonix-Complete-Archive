@@ -1,0 +1,1352 @@
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+index d118da2..1f0890a 100644
+--- a/docs/BALANCE_MOD.md
++++ b/docs/BALANCE_MOD.md
+@@ -542,3 +542,27 @@ silently consuming another strategy step.
+ 
+ The v0.11 offline gate must end with `BALANCE_MOD_V11_SMOKE_PASS`. No real
+ provider key is required or used.
++
++## v0.12 — idle-boundary automatic continuation
++
++Balance Mod can now advance a verified repair route without an APK button between
++attempts. The orchestrator is host-owned: it waits for Reasonix's TurnDone
++finishing boundary, temporarily pauses the native durable session inbox, applies
++the pending PowerEngine route, places one bounded continuation at the front of
++the same inbox, then resumes native dispatch.
++
++Safety rules:
++
++- direct HTTP task submission is gated only during the short model-transition
++  lease; user work can still be added durably to the queue;
++- an already user-paused queue is never overridden;
++- KZT hard-stop work prepares a native per-turn cost budget before model
++  switching, and fails closed if FX/pricing cannot enforce it;
++- terminal/budget/no-progress routes never enqueue another turn;
++- automatic continuations are bounded (default 4, maximum 12);
++- the pending route remains available for manual APK review whenever automation
++  is refused;
++- no hidden reasoning is exported or used as a completion signal.
++
++APK endpoints: `GET /mod/orchestrator`, `POST /mod/orchestrator/config`,
++`POST /mod/orchestrator/stop`, and `POST /mod/orchestrator/resume`.
+diff --git a/internal/serve/mod_app.go b/internal/serve/mod_app.go
+index 9ce08be..7e981b7 100644
+--- a/internal/serve/mod_app.go
++++ b/internal/serve/mod_app.go
+@@ -27,6 +27,7 @@ type modPersistedAppState struct {
+ 	ApprovalMode  string                           `json:"approvalMode,omitempty"`
+ 	Budget        efficiency.BudgetPersistentState `json:"budget"`
+ 	Execution     efficiency.ExecutionConfig       `json:"execution"`
++	Orchestrator  *modAutoConfig                   `json:"orchestrator,omitempty"`
+ }
+ 
+ func canonicalModWorkspace(root string) string {
+@@ -67,6 +68,7 @@ func (s *Server) modPersistenceStatus() map[string]any {
+ }
+ 
+ func (s *Server) captureModAppState() modPersistedAppState {
++	auto := s.modAuto.Snapshot().Config
+ 	return modPersistedAppState{
+ 		SchemaVersion: modAppStateSchema,
+ 		Workspace:     canonicalModWorkspace(s.modWorkspacePath()),
+@@ -76,6 +78,7 @@ func (s *Server) captureModAppState() modPersistedAppState {
+ 		ApprovalMode:  s.ctl().ToolApprovalMode(),
+ 		Budget:        s.modGov.PersistentState(),
+ 		Execution:     s.modExec.Snapshot().Config,
++		Orchestrator:  &auto,
+ 	}
+ }
+ 
+@@ -232,6 +235,12 @@ func (s *Server) loadModAppState() {
+ 		s.setModPersistenceError(err)
+ 		return
+ 	}
++	if st.Orchestrator != nil {
++		if _, err := s.modAuto.Configure(*st.Orchestrator); err != nil {
++			s.setModPersistenceError(err)
++			return
++		}
++	}
+ 	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
+ 		s.setModPersistenceError(err)
+ 		return
+@@ -254,6 +263,7 @@ type modAppApplyRequest struct {
+ 	Budget           *efficiency.BudgetConfig    `json:"budget,omitempty"`
+ 	ResetBudgetSpend bool                        `json:"resetBudgetSpend,omitempty"`
+ 	Execution        *efficiency.ExecutionConfig `json:"execution,omitempty"`
++	Orchestrator     *modAutoConfig              `json:"orchestrator,omitempty"`
+ 	ToolDecisions    *map[string]string          `json:"toolDecisions,omitempty"`
+ 	ApprovalMode     *string                     `json:"approvalMode,omitempty"`
+ }
+@@ -278,6 +288,11 @@ func (s *Server) validateModAppApply(req modAppApplyRequest) (map[string]string,
+ 			return nil, err
+ 		}
+ 	}
++	if req.Orchestrator != nil {
++		if err := validateModAutoConfig(*req.Orchestrator); err != nil {
++			return nil, err
++		}
++	}
+ 	if req.Execution != nil {
+ 		if err := efficiency.ValidateExecutionConfig(*req.Execution); err != nil {
+ 			return nil, err
+@@ -307,6 +322,10 @@ func (s *Server) validateModAppApply(req modAppApplyRequest) (map[string]string,
+ }
+ 
+ func (s *Server) modAppApply(w http.ResponseWriter, r *http.Request) {
++	if s.modAuto != nil && s.modAuto.BlocksSubmit() {
++		http.Error(w, "cannot change APK control state during automatic continuation", http.StatusConflict)
++		return
++	}
+ 	if s.ctl().Running() {
+ 		http.Error(w, "cannot change APK control state while a turn is running", http.StatusConflict)
+ 		return
+@@ -329,12 +348,14 @@ func (s *Server) modAppApply(w http.ResponseWriter, r *http.Request) {
+ 	beforeMode := s.ctl().ToolApprovalMode()
+ 	beforeBudget := s.modGov.PersistentState()
+ 	beforeExec := s.modExec.Snapshot()
++	beforeAuto := s.modAuto.Snapshot().Config
+ 	rollback := func() {
+ 		_, _ = s.modProfile.Configure(beforeProfile)
+ 		s.setModToolDecisions(beforeTools)
+ 		s.ctl().SetToolApprovalMode(beforeMode)
+ 		_, _ = s.modGov.RestorePersistentState(beforeBudget)
+ 		_, _ = s.modExec.Configure(beforeExec.Config, currentModelRef(s.ctl()))
++		_, _ = s.modAuto.Configure(beforeAuto)
+ 		_ = s.applyModToolDecisionsToCurrentController()
+ 		_ = s.applyModTaskCostBudget()
+ 	}
+@@ -378,6 +399,13 @@ func (s *Server) modAppApply(w http.ResponseWriter, r *http.Request) {
+ 			return
+ 		}
+ 	}
++	if req.Orchestrator != nil {
++		if _, err := s.modAuto.Configure(*req.Orchestrator); err != nil {
++			rollback()
++			http.Error(w, err.Error(), http.StatusConflict)
++			return
++		}
++	}
+ 	if err := s.persistModAppState(); err != nil {
+ 		rollback()
+ 		http.Error(w, "persist app config: "+err.Error(), http.StatusInternalServerError)
+@@ -399,6 +427,7 @@ func (s *Server) modAppBootstrap(w http.ResponseWriter, r *http.Request) {
+ 		"execution":       s.modExec.Snapshot(),
+ 		"power":           s.modPower.Snapshot(),
+ 		"powerTurn":       s.modPowerTurn.Snapshot(),
++		"orchestrator":    s.modAuto.Snapshot(),
+ 		"quality":         s.modQuality.Snapshot(),
+ 		"recovery":        s.modRecoverySnapshot(),
+ 		"resources":       efficiency.ReadResources(s.modWorkspacePath()),
+@@ -420,7 +449,9 @@ func (s *Server) modAppBootstrap(w http.ResponseWriter, r *http.Request) {
+ 			"queue": "/mod/queue", "enqueueTask": "/mod/queue/items",
+ 			"pauseQueue": "/mod/queue/pause", "resumeQueue": "/mod/queue/resume",
+ 			"queueRecovery": "/mod/queue/recovery",
+-			"newTask":       "/new", "resumeTask": "/resume", "deleteTask": "/delete-session",
++			"orchestrator":  "/mod/orchestrator", "orchestratorConfig": "/mod/orchestrator/config",
++			"orchestratorStop": "/mod/orchestrator/stop", "orchestratorResume": "/mod/orchestrator/resume",
++			"newTask": "/new", "resumeTask": "/resume", "deleteTask": "/delete-session",
+ 		},
+ 		"workspaceSwitch": map[string]any{
+ 			"live":   false,
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index 84938d2..fd3836d 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -16,7 +16,7 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.11"
++const balanceModVersion = "balance-mod-v0.12"
+ 
+ // modEvent is a typed machine event for the Android client. Most Balance Mod
+ // telemetry is content-free; v0.7 live.* events may additionally carry bounded,
+@@ -132,21 +132,22 @@ type modTaskCostGateStatus struct {
+ }
+ 
+ type modStatusPayload struct {
+-	ModVersion  string                         `json:"modVersion"`
+-	Running     bool                           `json:"running"`
+-	ModelRef    string                         `json:"modelRef,omitempty"`
+-	Budget      efficiency.BudgetSnapshot      `json:"budget"`
+-	TaskGate    modTaskCostGateStatus          `json:"taskCostGate"`
+-	Resources   efficiency.ResourceSnapshot    `json:"resources"`
+-	Quality     efficiency.QualitySnapshot     `json:"quality"`
+-	Router      efficiency.RouteDecision       `json:"router"`
+-	Cycle       efficiency.RepairCycleSnapshot `json:"cycle"`
+-	Execution   efficiency.ExecutionSnapshot   `json:"execution"`
+-	Power       efficiency.PowerSnapshot       `json:"power"`
+-	Profile     efficiency.ProjectProfile      `json:"profile"`
+-	Environment modEnvironmentSnapshot         `json:"environment"`
+-	Persistence map[string]any                 `json:"persistence"`
+-	Features    map[string]string              `json:"features"`
++	ModVersion   string                         `json:"modVersion"`
++	Running      bool                           `json:"running"`
++	ModelRef     string                         `json:"modelRef,omitempty"`
++	Budget       efficiency.BudgetSnapshot      `json:"budget"`
++	TaskGate     modTaskCostGateStatus          `json:"taskCostGate"`
++	Resources    efficiency.ResourceSnapshot    `json:"resources"`
++	Quality      efficiency.QualitySnapshot     `json:"quality"`
++	Router       efficiency.RouteDecision       `json:"router"`
++	Cycle        efficiency.RepairCycleSnapshot `json:"cycle"`
++	Execution    efficiency.ExecutionSnapshot   `json:"execution"`
++	Power        efficiency.PowerSnapshot       `json:"power"`
++	Orchestrator modAutoSnapshot                `json:"orchestrator"`
++	Profile      efficiency.ProjectProfile      `json:"profile"`
++	Environment  modEnvironmentSnapshot         `json:"environment"`
++	Persistence  map[string]any                 `json:"persistence"`
++	Features     map[string]string              `json:"features"`
+ }
+ 
+ type taskCostBudgetSetter interface {
+@@ -179,20 +180,21 @@ func (s *Server) setModTaskGate(v modTaskCostGateStatus) {
+ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 	ctl := s.ctl()
+ 	writeJSON(w, modStatusPayload{
+-		ModVersion:  balanceModVersion,
+-		Running:     ctl.Running(),
+-		ModelRef:    ctl.ModelRef(),
+-		Budget:      s.modGov.Snapshot(),
+-		TaskGate:    s.modTaskGateSnapshot(),
+-		Resources:   efficiency.ReadResources(s.modWorkspacePath()),
+-		Quality:     s.modQuality.Snapshot(),
+-		Router:      s.modRouter.Snapshot(),
+-		Cycle:       s.modCycle.Snapshot(),
+-		Execution:   s.modExec.Snapshot(),
+-		Power:       s.modPower.Snapshot(),
+-		Profile:     s.modProfile.Snapshot(),
+-		Environment: s.modEnvironmentSnapshot(context.Background(), false),
+-		Persistence: s.modPersistenceStatus(),
++		ModVersion:   balanceModVersion,
++		Running:      ctl.Running(),
++		ModelRef:     ctl.ModelRef(),
++		Budget:       s.modGov.Snapshot(),
++		TaskGate:     s.modTaskGateSnapshot(),
++		Resources:    efficiency.ReadResources(s.modWorkspacePath()),
++		Quality:      s.modQuality.Snapshot(),
++		Router:       s.modRouter.Snapshot(),
++		Cycle:        s.modCycle.Snapshot(),
++		Execution:    s.modExec.Snapshot(),
++		Power:        s.modPower.Snapshot(),
++		Orchestrator: s.modAuto.Snapshot(),
++		Profile:      s.modProfile.Snapshot(),
++		Environment:  s.modEnvironmentSnapshot(context.Background(), false),
++		Persistence:  s.modPersistenceStatus(),
+ 		Features: map[string]string{
+ 			"budget":               "post-round-gate-v0.1",
+ 			"apkBridge":            "http+sse-v0.2",
+@@ -222,6 +224,7 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 			"taskManager":          "native-session-catalog-no-provider-v0.9",
+ 			"taskQueue":            "native-sessioninbox+reviewed-recovery+per-turn-budget-v0.10",
+ 			"unifiedPowerEngine":   "repair+router+budget+execution-single-path-v0.11",
++			"autoContinuation":     "idle-boundary+durable-inbox+submit-gate-v0.12",
+ 			"androidSupervisor":    "debian-process-wrapper-v0.8",
+ 		},
+ 	})
+@@ -235,6 +238,10 @@ func (s *Server) modBudgetGet(w http.ResponseWriter, _ *http.Request) {
+ }
+ 
+ func (s *Server) modBudgetSet(w http.ResponseWriter, r *http.Request) {
++	if s.modAuto != nil && s.modAuto.BlocksSubmit() {
++		http.Error(w, "cannot change budget during automatic continuation", http.StatusConflict)
++		return
++	}
+ 	if s.ctl().Running() {
+ 		http.Error(w, "cannot change budget while a turn is running", http.StatusConflict)
+ 		return
+@@ -259,6 +266,10 @@ func (s *Server) modBudgetSet(w http.ResponseWriter, r *http.Request) {
+ }
+ 
+ func (s *Server) modBudgetReset(w http.ResponseWriter, _ *http.Request) {
++	if s.modAuto != nil && s.modAuto.BlocksSubmit() {
++		http.Error(w, "cannot reset budget during automatic continuation", http.StatusConflict)
++		return
++	}
+ 	if s.ctl().Running() {
+ 		http.Error(w, "cannot reset budget while a turn is running", http.StatusConflict)
+ 		return
+@@ -313,6 +324,10 @@ func (s *Server) modExecutionGet(w http.ResponseWriter, _ *http.Request) {
+ }
+ 
+ func (s *Server) modExecutionConfigure(w http.ResponseWriter, r *http.Request) {
++	if s.modAuto != nil && s.modAuto.BlocksSubmit() {
++		http.Error(w, "cannot change execution routing during automatic continuation", http.StatusConflict)
++		return
++	}
+ 	if s.ctl().Running() {
+ 		http.Error(w, "cannot change execution routing while a turn is running", http.StatusConflict)
+ 		return
+@@ -350,6 +365,10 @@ func (s *Server) modExecutionConfigure(w http.ResponseWriter, r *http.Request) {
+ }
+ 
+ func (s *Server) modExecutionReset(w http.ResponseWriter, _ *http.Request) {
++	if s.modAuto != nil && s.modAuto.BlocksSubmit() {
++		http.Error(w, "cannot reset execution routing during automatic continuation", http.StatusConflict)
++		return
++	}
+ 	if s.ctl().Running() {
+ 		http.Error(w, "cannot reset execution routing while a turn is running", http.StatusConflict)
+ 		return
+diff --git a/internal/serve/mod_orchestrator.go b/internal/serve/mod_orchestrator.go
+new file mode 100644
+index 0000000..42e7db4
+--- /dev/null
++++ b/internal/serve/mod_orchestrator.go
+@@ -0,0 +1,560 @@
++package serve
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"strings"
++	"sync"
++	"time"
++
++	"reasonix/internal/control"
++	"reasonix/internal/efficiency"
++	"reasonix/internal/sessioninbox"
++)
++
++// modAutoConfig controls host-owned continuation between verified repair turns.
++// It never grants model permissions and never bypasses the existing budget,
++// execution-router, permission, verifier, or durable-inbox gates.
++type modAutoConfig struct {
++	Enabled          bool `json:"enabled"`
++	MaxContinuations int  `json:"maxContinuations"`
++	IdleWaitSeconds  int  `json:"idleWaitSeconds"`
++}
++
++func defaultModAutoConfig() modAutoConfig {
++	return modAutoConfig{Enabled: true, MaxContinuations: 4, IdleWaitSeconds: 15}
++}
++
++func normalizeModAutoConfig(c modAutoConfig) modAutoConfig {
++	if c.MaxContinuations == 0 {
++		c.MaxContinuations = 4
++	}
++	if c.IdleWaitSeconds == 0 {
++		c.IdleWaitSeconds = 15
++	}
++	return c
++}
++
++func validateModAutoConfig(c modAutoConfig) error {
++	c = normalizeModAutoConfig(c)
++	if c.MaxContinuations < 1 || c.MaxContinuations > 12 {
++		return fmt.Errorf("maxContinuations must be between 1 and 12")
++	}
++	if c.IdleWaitSeconds < 1 || c.IdleWaitSeconds > 120 {
++		return fmt.Errorf("idleWaitSeconds must be between 1 and 120")
++	}
++	return nil
++}
++
++type modAutoSnapshot struct {
++	Config            modAutoConfig `json:"config"`
++	State             string        `json:"state"`
++	Active            bool          `json:"active"`
++	SubmitGate        bool          `json:"submitGate"`
++	PendingRoute      bool          `json:"pendingRoute"`
++	Continuations     int           `json:"continuations"`
++	LastAction        string        `json:"lastAction,omitempty"`
++	LastQueueItemID   string        `json:"lastQueueItemId,omitempty"`
++	LastReason        string        `json:"lastReason,omitempty"`
++	StartedAtUnixMS   int64         `json:"startedAtUnixMs,omitempty"`
++	UpdatedAtUnixMS   int64         `json:"updatedAtUnixMs"`
++	AutomaticDispatch bool          `json:"automaticDispatch"`
++}
++
++// modAutoOrchestrator owns only the continuation lease/state. Actual model
++// switching stays in PowerEngine/ExecutionRouter and actual work admission stays
++// in Reasonix's native durable session inbox.
++type modAutoOrchestrator struct {
++	mu     sync.Mutex
++	cfg    modAutoConfig
++	snap   modAutoSnapshot
++	seq    uint64
++	cancel context.CancelFunc
++}
++
++func newModAutoOrchestrator() *modAutoOrchestrator {
++	c := defaultModAutoConfig()
++	return &modAutoOrchestrator{cfg: c, snap: modAutoSnapshot{Config: c, State: "idle", AutomaticDispatch: true, UpdatedAtUnixMS: time.Now().UnixMilli()}}
++}
++
++func (o *modAutoOrchestrator) Snapshot() modAutoSnapshot {
++	if o == nil {
++		return modAutoSnapshot{}
++	}
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	return o.snap
++}
++
++func (o *modAutoOrchestrator) Configure(c modAutoConfig) (modAutoSnapshot, error) {
++	if o == nil {
++		return modAutoSnapshot{}, fmt.Errorf("orchestrator unavailable")
++	}
++	c = normalizeModAutoConfig(c)
++	if err := validateModAutoConfig(c); err != nil {
++		return modAutoSnapshot{}, err
++	}
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	if o.snap.Active {
++		return o.snap, fmt.Errorf("cannot reconfigure orchestrator during an active continuation transition")
++	}
++	o.cfg = c
++	o.snap.Config = c
++	o.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++	if !c.Enabled {
++		o.snap.State = "disabled"
++		o.snap.SubmitGate = false
++	} else if o.snap.State == "disabled" {
++		o.snap.State = "idle"
++	}
++	return o.snap, nil
++}
++
++func (o *modAutoOrchestrator) tryBegin() (context.Context, uint64, bool, string) {
++	if o == nil {
++		return nil, 0, false, "orchestrator unavailable"
++	}
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	if !o.cfg.Enabled {
++		o.snap.State = "disabled"
++		o.snap.PendingRoute = true
++		o.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++		return nil, 0, false, "automatic continuation is disabled"
++	}
++	if o.snap.Active {
++		return nil, 0, false, "continuation transition already active"
++	}
++	if o.snap.State == "idle" || o.snap.State == "terminal" {
++		o.snap.Continuations = 0
++	}
++	if o.snap.Continuations >= o.cfg.MaxContinuations {
++		o.snap.State = "limit_reached"
++		o.snap.PendingRoute = true
++		o.snap.LastReason = "automatic continuation limit reached"
++		o.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++		return nil, 0, false, o.snap.LastReason
++	}
++	o.seq++
++	ctx, cancel := context.WithCancel(context.Background())
++	o.cancel = cancel
++	o.snap.Active = true
++	o.snap.SubmitGate = true
++	o.snap.PendingRoute = true
++	o.snap.State = "waiting_idle"
++	o.snap.LastReason = ""
++	o.snap.StartedAtUnixMS = time.Now().UnixMilli()
++	o.snap.UpdatedAtUnixMS = o.snap.StartedAtUnixMS
++	return ctx, o.seq, true, ""
++}
++
++func (o *modAutoOrchestrator) isCurrent(seq uint64) bool {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	return o.snap.Active && o.seq == seq
++}
++
++func (o *modAutoOrchestrator) stage(seq uint64, state, action, reason string) {
++	if o == nil {
++		return
++	}
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	if o.seq != seq {
++		return
++	}
++	o.snap.State = state
++	if action != "" {
++		o.snap.LastAction = action
++	}
++	if reason != "" {
++		o.snap.LastReason = reason
++	}
++	o.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++}
++
++func (o *modAutoOrchestrator) finish(seq uint64, state, action, reason, itemID string, consumed bool) {
++	if o == nil {
++		return
++	}
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	if o.seq != seq {
++		return
++	}
++	if o.cancel != nil {
++		o.cancel()
++		o.cancel = nil
++	}
++	o.snap.Active = false
++	o.snap.SubmitGate = false
++	o.snap.PendingRoute = !consumed
++	o.snap.State = state
++	if action != "" {
++		o.snap.LastAction = action
++	}
++	if reason != "" {
++		o.snap.LastReason = reason
++	}
++	if itemID != "" {
++		o.snap.LastQueueItemID = itemID
++	}
++	if state == "queued" || state == "running" {
++		o.snap.Continuations++
++	}
++	o.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++}
++
++func (o *modAutoOrchestrator) Reset() modAutoSnapshot {
++	if o == nil {
++		return modAutoSnapshot{}
++	}
++	o.mu.Lock()
++	if o.cancel != nil {
++		o.cancel()
++		o.cancel = nil
++	}
++	o.seq++
++	o.snap = modAutoSnapshot{Config: o.cfg, State: "idle", AutomaticDispatch: true, UpdatedAtUnixMS: time.Now().UnixMilli()}
++	if !o.cfg.Enabled {
++		o.snap.State = "disabled"
++	}
++	out := o.snap
++	o.mu.Unlock()
++	return out
++}
++
++func (o *modAutoOrchestrator) Stop(reason string) modAutoSnapshot {
++	if o == nil {
++		return modAutoSnapshot{}
++	}
++	o.mu.Lock()
++	if o.cancel != nil {
++		o.cancel()
++		o.cancel = nil
++	}
++	o.seq++
++	o.snap.Active = false
++	o.snap.SubmitGate = false
++	o.snap.State = "stopped"
++	o.snap.LastReason = strings.TrimSpace(reason)
++	o.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++	out := o.snap
++	o.mu.Unlock()
++	return out
++}
++
++func (o *modAutoOrchestrator) noteBlocked(reason string, pending bool) modAutoSnapshot {
++	if o == nil {
++		return modAutoSnapshot{}
++	}
++	o.mu.Lock()
++	o.snap.Active = false
++	o.snap.SubmitGate = false
++	o.snap.PendingRoute = pending
++	o.snap.State = "blocked"
++	o.snap.LastReason = strings.TrimSpace(reason)
++	o.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++	out := o.snap
++	o.mu.Unlock()
++	return out
++}
++
++func (o *modAutoOrchestrator) BlocksSubmit() bool {
++	if o == nil {
++		return false
++	}
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	return o.snap.SubmitGate
++}
++
++func modAutoContinuationText(action efficiency.RouteAction) (display, prompt string, ok bool) {
++	switch action {
++	case efficiency.RouteRetryFlash:
++		return "Balance Auto · alternative Flash repair",
++			"Continue the current task using a materially different approach from the previous failed attempt. Inspect the current workspace state before editing. Do not repeat the same failed strategy. Keep the patch focused and run the relevant build/tests/verifier before claiming completion.", true
++	case efficiency.RouteDiagnosePro:
++		return "Balance Auto · Pro diagnosis",
++			"Diagnose the unresolved technical failure in the current task. Focus on the root cause and produce a concise concrete repair direction for the next executor. Avoid unrelated changes and do not claim completion without host verification.", true
++	case efficiency.RouteExecuteFlash:
++		return "Balance Auto · Flash repair after diagnosis",
++			"Continue the current task as the repair executor. Use the latest diagnosis plus the current workspace state, make the smallest justified fix, and run the relevant build/tests/verifier before claiming completion.", true
++	case efficiency.RouteContinueFlash:
++		return "Balance Auto · continue Flash",
++			"Continue the current task from the current workspace state. Make objective progress and run the relevant build/tests/verifier before claiming completion.", true
++	default:
++		return "", "", false
++	}
++}
++
++func (s *Server) modAutoGet(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, s.modAuto.Snapshot())
++}
++
++func (s *Server) modAutoConfigure(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() || s.modAuto.BlocksSubmit() {
++		http.Error(w, "cannot change orchestrator config while work is active", http.StatusConflict)
++		return
++	}
++	cfg := defaultModAutoConfig()
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&cfg); err != nil {
++		http.Error(w, "invalid orchestrator config: "+err.Error(), http.StatusBadRequest)
++		return
++	}
++	snap, err := s.modAuto.Configure(cfg)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	s.modHub.Emit("orchestrator.configured", snap)
++	s.persistModAppStateBestEffort()
++	writeJSON(w, snap)
++}
++
++func (s *Server) modAutoStop(w http.ResponseWriter, _ *http.Request) {
++	before := s.modAuto.Snapshot()
++	if before.Active && before.State == "applying_route" {
++		http.Error(w, "route application is atomic; retry stop after the model-switch boundary finishes", http.StatusConflict)
++		return
++	}
++	wasActive := before.Active
++	snap := s.modAuto.Stop("stopped by APK")
++	if wasActive {
++		// An active orchestrator owns the temporary queue pause. Explicit stop
++		// releases it; a queue that was already user-paused can never enter the
++		// active state in the first place.
++		_ = s.ctl().SetInboxPaused(false)
++	}
++	s.modHub.Emit("orchestrator.stopped", snap)
++	writeJSON(w, snap)
++}
++
++func (s *Server) modAutoResume(w http.ResponseWriter, _ *http.Request) {
++	if _, ok := s.modPowerTurn.Pending(); !ok {
++		http.Error(w, "no pending power route", http.StatusConflict)
++		return
++	}
++	if !s.modAuto.Snapshot().Config.Enabled {
++		cfg := s.modAuto.Snapshot().Config
++		cfg.Enabled = true
++		if _, err := s.modAuto.Configure(cfg); err != nil {
++			http.Error(w, err.Error(), http.StatusConflict)
++			return
++		}
++	}
++	if err := s.scheduleModAutoContinuation(); err != nil {
++		http.Error(w, err.Error(), http.StatusConflict)
++		return
++	}
++	writeJSON(w, s.modAuto.Snapshot())
++}
++
++func (s *Server) scheduleModAutoContinuation() error {
++	if s.modAuto == nil {
++		return fmt.Errorf("orchestrator unavailable")
++	}
++	if _, ok := s.modPowerTurn.Pending(); !ok {
++		return fmt.Errorf("no pending power route")
++	}
++	if !s.modExec.Snapshot().Enabled {
++		s.modAuto.noteBlocked("execution routing is disabled", true)
++		return fmt.Errorf("execution routing is disabled")
++	}
++	api := s.ctl()
++	modEnsureInboxSession(api)
++	if strings.TrimSpace(api.SessionPath()) == "" {
++		return fmt.Errorf("automatic continuation requires a persisted session")
++	}
++	queue := api.InboxSnapshot()
++	if queue.Paused {
++		return fmt.Errorf("task queue is paused; automatic continuation will not override a user pause")
++	}
++	ctx, seq, ok, reason := s.modAuto.tryBegin()
++	if !ok {
++		return fmt.Errorf("%s", reason)
++	}
++	// Pause synchronously while TurnDone fan-out is still active. This prevents
++	// the native inbox dispatcher from starting an older queued user task on the
++	// model tier selected for the repair continuation.
++	if err := api.SetInboxPaused(true); err != nil {
++		s.modAuto.finish(seq, "blocked", "", "cannot pause durable queue: "+err.Error(), "", false)
++		return err
++	}
++	sessionPath := api.SessionPath()
++	s.modHub.Emit("orchestrator.scheduled", map[string]any{"state": "waiting_idle"})
++	go s.runModAutoContinuation(ctx, seq, sessionPath)
++	return nil
++}
++
++func (s *Server) runModAutoContinuation(ctx context.Context, seq uint64, sessionPath string) {
++	if err := s.waitModAutoIdle(ctx, seq); err != nil {
++		s.finishModAutoBlocked(seq, "idle boundary unavailable: "+err.Error())
++		return
++	}
++	if !s.modAuto.isCurrent(seq) {
++		return
++	}
++	if current := strings.TrimSpace(s.ctl().SessionPath()); current != strings.TrimSpace(sessionPath) {
++		reason := "session changed before continuation could be applied"
++		s.modAuto.finish(seq, "blocked", "", reason, "", false)
++		s.modHub.Emit("orchestrator.blocked", map[string]any{"reason": reason})
++		return
++	}
++
++	attempt, ok := s.modPowerTurn.Pending()
++	if !ok {
++		s.restoreModAutoQueue()
++		s.modAuto.finish(seq, "idle", "", "pending route disappeared", "", true)
++		return
++	}
++
++	// Prepare the durable turn budget before changing models. If KZT cannot be
++	// enforced for the configured execution models, fail closed and leave the
++	// route pending for explicit review instead of switching tiers first.
++	extra := map[string]string{}
++	budgetSnap := s.modGov.Snapshot()
++	if budgetSnap.Enabled && budgetSnap.HardStop {
++		if budgetSnap.RemainingKZT <= 0 {
++			s.finishModAutoBlocked(seq, "workspace KZT budget is exhausted")
++			return
++		}
++		var err error
++		extra, _, err = s.modQueueBudgetExtras(modQueueBudgetRequest{BudgetKZT: budgetSnap.RemainingKZT})
++		if err != nil {
++			s.finishModAutoBlocked(seq, err.Error())
++			return
++		}
++	}
++
++	s.modAuto.stage(seq, "applying_route", "", "")
++	res, err := s.applyUnifiedPowerAttemptCtx(ctx, attempt)
++	if err != nil {
++		s.modPowerTurn.Applied("blocked", false)
++		s.finishModAutoBlocked(seq, err.Error())
++		return
++	}
++	if !s.modAuto.isCurrent(seq) {
++		return
++	}
++	action := res.Snapshot.NextAction
++	s.modPowerTurn.Applied(string(action), true)
++	if res.Snapshot.Terminal || res.Snapshot.Blocked {
++		s.restoreModAutoQueue()
++		state := "terminal"
++		if res.Snapshot.Blocked {
++			state = "blocked"
++		}
++		s.modAuto.finish(seq, state, string(action), res.Snapshot.Reason, "", true)
++		s.modHub.Emit("orchestrator.finished", s.modAuto.Snapshot())
++		return
++	}
++
++	display, prompt, ok := modAutoContinuationText(action)
++	if !ok {
++		s.finishModAutoBlocked(seq, "route has no automatic continuation mapping: "+string(action))
++		return
++	}
++	api := s.ctl()
++	if strings.TrimSpace(api.SessionPath()) != strings.TrimSpace(sessionPath) {
++		reason := "session changed after route application"
++		s.modAuto.finish(seq, "blocked", string(action), reason, "", false)
++		s.modHub.Emit("orchestrator.blocked", map[string]any{"reason": reason})
++		return
++	}
++
++	rec, err := api.EnqueueInbox(control.InboxRequest{
++		Intent:      sessioninbox.IntentFollowup,
++		Display:     display,
++		Raw:         prompt,
++		Submit:      prompt,
++		Source:      "balance-auto",
++		Idempotency: fmt.Sprintf("balance-auto-%d-%s", seq, action),
++		Extra:       extra,
++	})
++	if err != nil {
++		s.finishModAutoBlocked(seq, "cannot persist automatic continuation: "+err.Error())
++		return
++	}
++	if err := api.MoveInboxItem(rec.ItemID, 0); err != nil {
++		_ = api.DeleteInboxItem(rec.ItemID)
++		s.finishModAutoBlocked(seq, "cannot prioritize automatic continuation: "+err.Error())
++		return
++	}
++
++	s.modAuto.stage(seq, "queued", string(action), "")
++	// Resuming the queue invokes Reasonix's native FIFO dispatcher synchronously.
++	// Because the auto item was moved to index 0, it owns the next admission.
++	if err := api.SetInboxPaused(false); err != nil {
++		s.modAuto.finish(seq, "blocked", string(action), "cannot resume durable queue: "+err.Error(), rec.ItemID, true)
++		return
++	}
++	state := "queued"
++	if api.Running() {
++		state = "running"
++	}
++	s.modAuto.finish(seq, state, string(action), "", rec.ItemID, true)
++	s.modHub.Emit("orchestrator.continuation", map[string]any{"action": action, "itemId": rec.ItemID, "state": state})
++}
++
++func (s *Server) waitModAutoIdle(ctx context.Context, seq uint64) error {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	cfg := s.modAuto.Snapshot().Config
++	deadline := time.NewTimer(time.Duration(cfg.IdleWaitSeconds) * time.Second)
++	defer deadline.Stop()
++
++	if waiter, ok := any(s.ctl()).(interface {
++		TurnFinishingDone() (<-chan struct{}, bool)
++	}); ok {
++		if done, active := waiter.TurnFinishingDone(); active {
++			select {
++			case <-done:
++			case <-ctx.Done():
++				return ctx.Err()
++			case <-deadline.C:
++				return fmt.Errorf("timed out waiting for TurnDone boundary")
++			}
++		}
++	}
++
++	ticker := time.NewTicker(25 * time.Millisecond)
++	defer ticker.Stop()
++	for {
++		if !s.modAuto.isCurrent(seq) {
++			return context.Canceled
++		}
++		if !controllerHasActiveRuntimeWork(s.ctl()) {
++			return nil
++		}
++		select {
++		case <-ctx.Done():
++			return ctx.Err()
++		case <-deadline.C:
++			return fmt.Errorf("timed out waiting for controller idle state")
++		case <-ticker.C:
++		}
++	}
++}
++
++func (s *Server) restoreModAutoQueue() {
++	api := s.ctl()
++	if snap := api.InboxSnapshot(); snap.Paused {
++		_ = api.SetInboxPaused(false)
++	}
++}
++
++func (s *Server) finishModAutoBlocked(seq uint64, reason string) {
++	if s.modAuto == nil || !s.modAuto.isCurrent(seq) {
++		return
++	}
++	s.restoreModAutoQueue()
++	s.modAuto.finish(seq, "blocked", "", reason, "", false)
++	s.modHub.Emit("orchestrator.blocked", map[string]any{"reason": reason})
++}
+diff --git a/internal/serve/mod_orchestrator_test.go b/internal/serve/mod_orchestrator_test.go
+new file mode 100644
+index 0000000..fd9a5f9
+--- /dev/null
++++ b/internal/serve/mod_orchestrator_test.go
+@@ -0,0 +1,139 @@
++package serve
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"reasonix/internal/config"
++	"reasonix/internal/control"
++	"reasonix/internal/efficiency"
++	"reasonix/internal/event"
++)
++
++func TestModAutoOrchestratorLeaseAndLimit(t *testing.T) {
++	o := newModAutoOrchestrator()
++	if _, err := o.Configure(modAutoConfig{Enabled: true, MaxContinuations: 2, IdleWaitSeconds: 1}); err != nil {
++		t.Fatal(err)
++	}
++	ctx, seq, ok, reason := o.tryBegin()
++	if !ok || ctx == nil || seq == 0 || reason != "" {
++		t.Fatalf("begin=(%v,%d,%v,%q)", ctx, seq, ok, reason)
++	}
++	if !o.BlocksSubmit() {
++		t.Fatal("active transition must gate direct submit")
++	}
++	o.finish(seq, "running", string(efficiency.RouteRetryFlash), "", "q1", true)
++	if o.Snapshot().Continuations != 1 || o.BlocksSubmit() {
++		t.Fatalf("after first=%+v", o.Snapshot())
++	}
++	_, seq2, ok, _ := o.tryBegin()
++	if !ok {
++		t.Fatal("second continuation should be admitted")
++	}
++	o.finish(seq2, "running", string(efficiency.RouteDiagnosePro), "", "q2", true)
++	if _, _, ok, _ := o.tryBegin(); ok {
++		t.Fatal("third continuation must be blocked by maxContinuations")
++	}
++}
++
++func TestModAutoContinuationPromptsCoverOnlyNonTerminalRoutes(t *testing.T) {
++	for _, action := range []efficiency.RouteAction{
++		efficiency.RouteRetryFlash,
++		efficiency.RouteDiagnosePro,
++		efficiency.RouteExecuteFlash,
++		efficiency.RouteContinueFlash,
++	} {
++		display, prompt, ok := modAutoContinuationText(action)
++		if !ok || strings.TrimSpace(display) == "" || strings.TrimSpace(prompt) == "" {
++			t.Fatalf("action %s has no continuation", action)
++		}
++	}
++	for _, action := range []efficiency.RouteAction{efficiency.RouteFinalize, efficiency.RouteStopBudget, efficiency.RouteStopNoProgress} {
++		if _, _, ok := modAutoContinuationText(action); ok {
++			t.Fatalf("terminal action %s must not auto-continue", action)
++		}
++	}
++}
++
++func TestModAutoSubmitGateRejectsDirectHTTPDuringTransition(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, ModelRef: "mock/flash", SessionDir: t.TempDir()})
++	s := New(ctrl, bc, config.ServeConfig{})
++	ts := httptest.NewServer(s.Handler())
++	defer ts.Close()
++
++	_, seq, ok, _ := s.modAuto.tryBegin()
++	if !ok {
++		t.Fatal("failed to acquire test continuation lease")
++	}
++	defer s.modAuto.finish(seq, "stopped", "", "test cleanup", "", false)
++
++	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/submit", strings.NewReader(`{"input":"user turn"}`))
++	req.Header.Set("Content-Type", "application/json")
++	resp, err := ts.Client().Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusConflict {
++		t.Fatalf("status=%d want 409", resp.StatusCode)
++	}
++}
++
++func TestModAutoScheduleFailsClosedWithoutExecutionRouting(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, ModelRef: "mock/flash", SessionDir: t.TempDir()})
++	s := New(ctrl, bc, config.ServeConfig{})
++	s.modPowerTurn.Begin("mock/flash", "flash_primary")
++	s.modPowerTurn.Observe(fakeFailedVerificationEvent())
++	if _, ok := s.modPowerTurn.Finish(fakeTurnDoneEvent()); !ok {
++		t.Fatal("expected pending repair attempt")
++	}
++	if err := s.scheduleModAutoContinuation(); err == nil || !strings.Contains(err.Error(), "execution routing is disabled") {
++		t.Fatalf("err=%v", err)
++	}
++	if !s.modPowerTurn.Snapshot().PendingApplication {
++		t.Fatal("fail-closed schedule must leave route pending")
++	}
++}
++
++func fakeFailedVerificationEvent() event.Event {
++	return event.Event{Kind: event.ToolResult, Tool: event.Tool{ID: "v", Name: "bash", Err: "exit 1", Execution: &event.ShellExecution{Verification: "failed"}}}
++}
++
++func fakeTurnDoneEvent() event.Event { return event.Event{Kind: event.TurnDone, Outcome: "partial"} }
++
++func TestModAutoAPIConfigAndStop(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, ModelRef: "mock/flash", SessionDir: t.TempDir()})
++	s := New(ctrl, bc, config.ServeConfig{})
++	ts := httptest.NewServer(s.Handler())
++	defer ts.Close()
++
++	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mod/orchestrator/config", strings.NewReader(`{"enabled":true,"maxContinuations":3,"idleWaitSeconds":5}`))
++	req.Header.Set("Content-Type", "application/json")
++	resp, err := ts.Client().Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("config status=%d", resp.StatusCode)
++	}
++	if got := s.modAuto.Snapshot().Config.MaxContinuations; got != 3 {
++		t.Fatalf("maxContinuations=%d", got)
++	}
++
++	req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/mod/orchestrator/stop", strings.NewReader(`{}`))
++	req2.Header.Set("Content-Type", "application/json")
++	resp2, err := ts.Client().Do(req2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	resp2.Body.Close()
++	if resp2.StatusCode != http.StatusOK || s.modAuto.Snapshot().State != "stopped" {
++		t.Fatalf("stop status=%d snapshot=%+v", resp2.StatusCode, s.modAuto.Snapshot())
++	}
++}
+diff --git a/internal/serve/mod_power.go b/internal/serve/mod_power.go
+index b766bf4..081b83a 100644
+--- a/internal/serve/mod_power.go
++++ b/internal/serve/mod_power.go
+@@ -9,21 +9,30 @@ import (
+ )
+ 
+ func (s *Server) modPowerGet(w http.ResponseWriter, _ *http.Request) {
+-	writeJSON(w, map[string]any{"engine": s.modPower.Snapshot(), "turn": s.modPowerTurn.Snapshot()})
++	writeJSON(w, map[string]any{"engine": s.modPower.Snapshot(), "turn": s.modPowerTurn.Snapshot(), "orchestrator": s.modAuto.Snapshot()})
+ }
+ 
+ func (s *Server) modPowerReset(w http.ResponseWriter, _ *http.Request) {
++	if s.modAuto != nil && s.modAuto.BlocksSubmit() {
++		http.Error(w, "cannot reset unified power state during automatic continuation", http.StatusConflict)
++		return
++	}
+ 	if s.ctl().Running() {
+ 		http.Error(w, "cannot reset unified power state while a turn is running", http.StatusConflict)
+ 		return
+ 	}
+ 	snap := s.modPower.Reset(currentModelRef(s.ctl()))
+ 	turn := s.modPowerTurn.Reset()
+-	s.modHub.Emit("power.reset", map[string]any{"engine": snap, "turn": turn})
+-	writeJSON(w, map[string]any{"engine": snap, "turn": turn})
++	auto := s.modAuto.Reset()
++	s.modHub.Emit("power.reset", map[string]any{"engine": snap, "turn": turn, "orchestrator": auto})
++	writeJSON(w, map[string]any{"engine": snap, "turn": turn, "orchestrator": auto})
+ }
+ 
+ func (s *Server) modPowerApplyPending(w http.ResponseWriter, r *http.Request) {
++	if s.modAuto != nil && s.modAuto.BlocksSubmit() {
++		http.Error(w, "automatic continuation already owns the pending route", http.StatusConflict)
++		return
++	}
+ 	if s.ctl().Running() {
+ 		http.Error(w, "cannot apply pending power route while a turn is running", http.StatusConflict)
+ 		return
+diff --git a/internal/serve/mod_power_turn.go b/internal/serve/mod_power_turn.go
+index 20ee7e4..96a2f0c 100644
+--- a/internal/serve/mod_power_turn.go
++++ b/internal/serve/mod_power_turn.go
+@@ -254,11 +254,14 @@ func (s *Server) observePowerCoreEvent(e event.Event) {
+ 	s.modHub.Emit("power.turn.observed", s.modPowerTurn.Snapshot())
+ 	s.modHub.Emit("power.route.pending", map[string]any{"strategyId": attempt.StrategyID, "failureFingerprint": attempt.FailureFingerprint != "", "finalization": attempt.Finalization})
+ 	_ = attempt // the content-bearing attempt stays private in modPowerTurn.pending
+-	// Do not switch models from inside the TurnDone callback. Reasonix forbids a
+-	// model rebuild while runtime work still owns the controller, and doing so
+-	// here creates a race with a newly submitted turn. The APK/control plane
+-	// applies this pending route explicitly at an idle boundary via
+-	// POST /mod/power/apply-pending.
++	// v0.12 schedules the route at a real idle boundary. The scheduler pauses
++	// the native durable inbox before TurnDone fan-out finishes, then performs
++	// model switching and continuation admission outside this callback. If any
++	// safety gate refuses automation, the pending route remains available for
++	// explicit APK review/apply instead of being silently discarded.
++	if err := s.scheduleModAutoContinuation(); err != nil {
++		s.modHub.Emit("orchestrator.pending", map[string]any{"reason": err.Error()})
++	}
+ }
+ 
+ func modPowerFirstNonEmpty(vals ...string) string {
+diff --git a/internal/serve/mod_queue.go b/internal/serve/mod_queue.go
+index 130b6a3..d567949 100644
+--- a/internal/serve/mod_queue.go
++++ b/internal/serve/mod_queue.go
+@@ -394,6 +394,14 @@ func (s *Server) modQueueMove(w http.ResponseWriter, r *http.Request) {
+ }
+ 
+ func (s *Server) modQueuePause(w http.ResponseWriter, _ *http.Request) {
++	if s.modAuto != nil && s.modAuto.BlocksSubmit() {
++		auto := s.modAuto.Snapshot()
++		if auto.State == "applying_route" {
++			http.Error(w, "cannot pause queue during atomic route application", http.StatusConflict)
++			return
++		}
++		s.modAuto.Stop("queue paused by APK")
++	}
+ 	api := s.ctl()
+ 	modEnsureInboxSession(api)
+ 	if err := api.SetInboxPaused(true); err != nil {
+@@ -405,6 +413,10 @@ func (s *Server) modQueuePause(w http.ResponseWriter, _ *http.Request) {
+ }
+ 
+ func (s *Server) modQueueResume(w http.ResponseWriter, _ *http.Request) {
++	if s.modAuto != nil && s.modAuto.BlocksSubmit() {
++		http.Error(w, "automatic continuation owns the temporary queue pause; stop the orchestrator before manual resume", http.StatusConflict)
++		return
++	}
+ 	api := s.ctl()
+ 	modEnsureInboxSession(api)
+ 	if err := api.SetInboxPaused(false); err != nil {
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index 9a9ae2e..92680b0 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -65,6 +65,7 @@ type Server struct {
+ 	modExec      *efficiency.ExecutionRouter
+ 	modPower     *efficiency.PowerEngine
+ 	modPowerTurn *modPowerTurnTracker
++	modAuto      *modAutoOrchestrator
+ 	modProfile   *efficiency.ProjectProfileManager
+ 	modHub       *modBroadcaster
+ 	modMu        sync.RWMutex
+@@ -141,6 +142,7 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 	s.modCycle.SetRollback(func(reason string) error { return s.modRollbackLatestCode(reason) })
+ 	s.modPower = efficiency.NewPowerEngine(s.modCycle, s.modExec, s.modGov)
+ 	s.modPowerTurn = newModPowerTurnTracker()
++	s.modAuto = newModAutoOrchestrator()
+ 	// Restore only APK-owned policy. Native skills/instruction files remain owned
+ 	// by Reasonix itself. A corrupt state is fail-closed and reported in bootstrap.
+ 	s.loadModAppState()
+@@ -592,6 +594,10 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("GET /mod/power", s.modPowerGet)
+ 	mux.HandleFunc("POST /mod/power/reset", s.modPowerReset)
+ 	mux.HandleFunc("POST /mod/power/apply-pending", s.modPowerApplyPending)
++	mux.HandleFunc("GET /mod/orchestrator", s.modAutoGet)
++	mux.HandleFunc("POST /mod/orchestrator/config", s.modAutoConfigure)
++	mux.HandleFunc("POST /mod/orchestrator/stop", s.modAutoStop)
++	mux.HandleFunc("POST /mod/orchestrator/resume", s.modAutoResume)
+ 	mux.HandleFunc("POST /mod/execution/config", s.modExecutionConfigure)
+ 	mux.HandleFunc("POST /mod/execution/reset", s.modExecutionReset)
+ 	mux.HandleFunc("GET /mod/agent", s.modAgentGet)
+@@ -851,6 +857,10 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "shell commands are unavailable over HTTP", http.StatusForbidden)
+ 		return
+ 	}
++	if s.modAuto != nil && s.modAuto.BlocksSubmit() {
++		http.Error(w, "automatic continuation is transitioning; queue user input with POST /mod/queue/items or stop the orchestrator first", http.StatusConflict)
++		return
++	}
+ 	// Intercept /model <ref> for runtime model switching (the controller's
+ 	// Submit path only lists models — switching is frontend-specific).
+ 	if strings.HasPrefix(trimmed, "/model ") {
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index f16ad86..7df111b 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,91 +5,100 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/35] Unit tests: Balance Mod core + APK bridge"
++echo "[1/38] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/35] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++echo "[2/38] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
+ 
+-echo "[3/35] Failure cache: verified-only persistence + corruption recovery"
++echo "[3/38] Failure cache: verified-only persistence + corruption recovery"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
+ 
+-echo "[4/35] Context/patch economy: log reducer + patch governor"
++echo "[4/38] Context/patch economy: log reducer + patch governor"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
+ 
+-echo "[5/35] Unified repair cycle: verifier -> router -> cache"
++echo "[5/38] Unified repair cycle: verifier -> router -> cache"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestVerificationReceiptRequiresHostEvidence|TestRepairCycleFlashFlashProFlashAndVerifiedCache)$' -count=1
+ 
+-echo "[6/35] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
++echo "[6/38] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleDrivenByOfflineMockProvider$' -count=1
+ 
+-echo "[7/35] Recovery policy: regression/oversize rollback + fail-closed conflict"
++echo "[7/38] Recovery policy: regression/oversize rollback + fail-closed conflict"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleRollback' -count=1
+ 
+-echo "[8/35] APK cycle/recovery API integration"
++echo "[8/38] APK cycle/recovery API integration"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModCycleAPIAndHostRepairWiring|TestModRecoveryAPIIsFailClosedWithoutCheckpoint)$' -count=1
+ 
+-echo "[9/35] Execution router: model slots + immediate KZT admission re-check"
++echo "[9/38] Execution router: model slots + immediate KZT admission re-check"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouter' -count=1
+ 
+-echo "[10/35] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
++echo "[10/38] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModExecutionRouterUsesNativeServeModelSwitch$' -count=1
+ 
+-echo "[11/35] APK execution config/status contract"
++echo "[11/38] APK execution config/status contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModExecutionAPIIsStrictAndAPKVisible|TestModStatusExposesTypedAPKSurface)$' -count=1
+ 
+-echo "[12/35] Universal agent control: native per-tool allow/ask/deny + schema trim"
++echo "[12/38] Universal agent control: native per-tool allow/ask/deny + schema trim"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control ./internal/tool -run '^(TestSessionToolDecisions|TestSessionHiddenTools)' -count=1
+ 
+-echo "[13/35] APK agent/tools API contract"
++echo "[13/38] APK agent/tools API contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAgentToolsAPIUsesNativeRuntimePolicy$' -count=1
+ 
+-echo "[14/35] APK instructions + workspace file bridge"
++echo "[14/38] APK instructions + workspace file bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModInstructionsAndWorkspaceFileAPI|TestModWorkspaceFileRejectsTraversal)$' -count=1
+ 
+-echo "[15/35] Provider-agnostic project profile"
++echo "[15/38] Provider-agnostic project profile"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestProjectProfile' -count=1
+ 
+-echo "[16/35] Capability Registry + Chat/Agent mode + Tool Packs"
++echo "[16/38] Capability Registry + Chat/Agent mode + Tool Packs"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProjectChatModeHidesMutatingToolsAndRestoresAgentMode|TestModProjectToolPackRestrictsSurfaceAndManualDenySurvives|TestModEnvironmentAndProjectContract)$' -count=1
+ 
+-echo "[17/35] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
++echo "[17/38] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModLive' -count=1
+ 
+-echo "[18/35] Restart-safe KZT ledger persistence"
++echo "[18/38] Restart-safe KZT ledger persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestBudgetPersistentState' -count=1
+ 
+-echo "[19/35] APK bootstrap + atomic apply + restart persistence"
++echo "[19/38] APK bootstrap + atomic apply + restart persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModApp' -count=1
+ 
+-echo "[20/35] APK project registry + supervisor handoff"
++echo "[20/38] APK project registry + supervisor handoff"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModProjectRegistryAndSupervisorHandoff$' -count=1
+ 
+-echo "[21/35] Native task catalog + local rename (no provider listing call)"
++echo "[21/38] Native task catalog + local rename (no provider listing call)"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModTaskCatalogUsesNativeSessionsAndRename$' -count=1
+ 
+-echo "[22/35] APK durable task queue + per-turn budget metadata"
++echo "[22/38] APK durable task queue + per-turn budget metadata"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve ./internal/control -run '^(TestModQueue|TestParseInboxTaskBudget)' -count=1
+ 
+-echo "[23/35] Unified power engine: repair + router + budget + native execution"
++echo "[23/38] Unified power engine: repair + router + budget + native execution"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestPowerEngine' -count=1
+ 
+-echo "[24/35] Native turn evidence -> pending power route (no mid-turn model race)"
++echo "[24/38] Native turn evidence -> pending power route (no mid-turn model race)"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModPowerTurnTracker' -count=1
+ 
+-echo "[25/35] APK unified power endpoint + explicit idle-boundary apply"
++echo "[25/38] APK unified power endpoint + explicit idle-boundary apply"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModPowerAPIExposesUnifiedState|TestModPowerPendingRouteAppliesOnlyAtExplicitIdleBoundary)$' -count=1
+ 
+-echo "[26/35] Native session-inbox crash recovery regression"
++echo "[26/38] Auto continuation policy: bounded lease + terminal route mapping"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModAutoOrchestratorLeaseAndLimit|TestModAutoContinuationPromptsCoverOnlyNonTerminalRoutes)$' -count=1
++
++echo "[27/38] Auto continuation safety: direct-submit gate + fail-closed without execution routing"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModAutoSubmitGateRejectsDirectHTTPDuringTransition|TestModAutoScheduleFailsClosedWithoutExecutionRouting)$' -count=1
++
++echo "[28/38] APK orchestrator config/stop contract"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAutoAPIConfigAndStop$' -count=1
++
++echo "[29/38] Native session-inbox crash recovery regression"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control -run '^TestInboxSnapshotRecoversUnownedInFlightItem$' -count=1
+ 
+-echo "[27/35] Debian Android backend supervisor syntax"
++echo "[30/38] Debian Android backend supervisor syntax"
+ bash -n ./scripts/reasonix_android_backend.sh
+ 
+-echo "[28/35] Native Reasonix completion gate regression test"
++echo "[31/38] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[29/35] Build CLI only (skip example plugin)"
++echo "[32/38] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -115,7 +124,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[30/35] Offline normal tool-loop"
++echo "[33/38] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+@@ -142,7 +151,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[31/35] Offline anti-loop intervention"
++echo "[34/38] Offline anti-loop intervention"
+ LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+@@ -150,27 +159,27 @@ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+   exit 1
+ fi
+ 
+-echo "[32/35] Universal agent-control contract summary"
++echo "[35/38] Universal agent-control contract summary"
+ echo "  - workspace root + confined file browser: PASS"
+ echo "  - per-tool allow/ask/deny via native gate: PASS"
+ echo "  - instruction editor via native memory docs: PASS"
+ echo "  - skill management surface: compiled in core serve tests"
+ 
+-echo "[33/35] Universal APK protocol summary"
++echo "[36/38] Universal APK protocol summary"
+ echo "  - dynamic Capability Registry + Tool Packs: PASS"
+ echo "  - Chat mode denies mutating tools without creating a second agent: PASS"
+ echo "  - APK environment endpoint reuses Reasonix native probes/cache + project markers: PASS"
+ echo "  - project profile is provider-agnostic and APK-replayable: PASS"
+ echo "  - live event history exposes actions/diffs/results but not hidden reasoning: PASS"
+ 
+-echo "[34/35] APK supervisor/control-plane summary"
++echo "[37/38] APK supervisor/control-plane summary"
+ echo "  - bootstrap + atomic settings apply: PASS"
+ echo "  - task start/stop aliases reuse native submit/cancel: PASS"
+ echo "  - workspace-scoped policy survives backend restart: PASS"
+ echo "  - KZT/Pro spend ledger survives restart: PASS"
+ echo "  - Debian Android supervisor wrapper syntax: PASS"
+ 
+-echo "[35/35] PASS — no provider API key/network was used"
++echo "[38/38] PASS — no provider API key/network was used"
+ echo "  - v0.1 KZT budget/resource telemetry: PASS"
+ echo "  - v0.2 native anti-loop/completion telemetry: PASS"
+ echo "  - v0.3 router/cache/log/patch modules: PASS"
+@@ -182,4 +191,5 @@ echo "  - v0.8 APK control plane + restart-safe persistence + supervisor: PASS"
+ echo "  - v0.9 project registry + native task catalog: PASS"
+ echo "  - v0.10 native durable task queue + reviewed recovery + per-turn budgets: PASS"
+ echo "  - v0.11 unified power engine + native turn-evidence bridge: PASS"
+-echo "BALANCE_MOD_V11_SMOKE_PASS"
++echo "  - v0.12 idle-boundary auto continuation + durable inbox handoff: PASS"
++echo "BALANCE_MOD_V12_SMOKE_PASS"
+diff --git a/scripts/balance_mod_smoke_quick.sh b/scripts/balance_mod_smoke_quick.sh
+new file mode 100755
+index 0000000..dd8df08
+--- /dev/null
++++ b/scripts/balance_mod_smoke_quick.sh
+@@ -0,0 +1,19 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++GO_BIN="${GO_BIN:-go}"
++cd "$ROOT"
++
++echo "[1/4] v0.12 orchestrator policy + APK contract"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAuto' -count=1
++
++echo "[2/4] Serve package compile gate"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^$' -count=1
++
++echo "[3/4] CLI compile gate"
++mkdir -p bin
++GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
++
++echo "[4/4] PASS"
++echo "BALANCE_MOD_V12_QUICK_PASS"

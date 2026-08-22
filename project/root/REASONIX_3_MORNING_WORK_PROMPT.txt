@@ -1,0 +1,994 @@
+REASONIX / BALANCE MOD / REASONIX MOBILE
+MORNING WORK — REASONIX 3.0 SWARM COMPLETION PROMPT
+2026-08-21
+
+YOU ARE THE PRINCIPAL ENGINEER CONTINUING THE EXISTING DEEPSEEK-REASONIX PROJECT.
+
+THIS IS MORNING WORK.
+
+DO NOT START FROM SCRATCH.
+DO NOT CREATE A REPLACEMENT PROJECT.
+DO NOT REBUILD THE NIGHT WORK JUST BECAUSE YOU CAN.
+DO NOT MODIFY OPENCODE ITSELF.
+DO NOT SPAWN OPENCODE SUBAGENTS DURING THIS PASS.
+DO NOT TURN THE PROJECT INTO AUTOMATION FOR AUTOMATION'S SAKE.
+
+THE PRODUCT IS THE EXISTING DEEPSEEK-REASONIX PROJECT.
+
+Your task now is to take the REAL CURRENT repository state produced by the overnight run,
+audit it deeply, complete the missing real-provider/device-independent gates, fix every
+proven defect systematically, and drive Reasonix to the strongest evidence-backed
+Reasonix 3.0 Swarm state possible during this session.
+
+The target is NOT "make the report look green".
+
+The target is:
+
+REAL REASONIX 3.0
+→ correct architecture
+→ real swarm runtime
+→ real provider execution
+→ real multi-worker execution
+→ real tools / approvals / routing / budgets
+→ recovery / cancellation / persistence
+→ mobile/backend integration
+→ regression protection
+→ one evidence-backed replacement release
+
+============================================================
+0. CURRENT KNOWN MORNING STARTING POINT
+============================================================
+
+Treat the following as KNOWN_FROM_PREVIOUS_RUN until re-verified locally:
+
+- Overnight run completed around 2026-08-21 01:48 local time.
+- Repository was main-v2 around HEAD 9e68643 at the beginning of the run.
+- Working tree was already dirty before the overnight work.
+- Overnight OpenCode/DeepSeek Flash implemented a new Reasonix 3.0 swarm core.
+- The run reported:
+  - go test ./... => 124/124 packages OK
+  - BALANCE_MOD_V20_PREFLIGHT_PASS
+  - BALANCE_MOD_SWARM_GATE_PASS
+  - deterministic/local/mock swarm tests passed
+  - process-level swarm gate passed with 2 parallel mock workers
+  - real provider tests were TESTING_BLOCKED
+  - real swarm tests were TESTING_BLOCKED
+  - Kimi runtime was TESTING_BLOCKED
+  - APK was reportedly unchanged
+  - bin/reasonix was rebuilt
+  - final report exists at docs/REASONIX_3_FINAL_REPORT.md
+- The real-provider gates were blocked because the explicit real-API approval environment was not set.
+- A DeepSeek API key is available to this environment through DEEPSEEK_API_KEY.
+- NEVER print, echo, log, serialize, commit, expose, or copy the value of DEEPSEEK_API_KEY anywhere.
+- You may inspect whether the variable is set, but only by boolean presence, never by printing its value.
+
+These are NOT automatically VERIFIED for the morning session.
+Re-verify them from the current repository and runtime before relying on them.
+
+============================================================
+1. FACT-ONLY ENGINEERING
+============================================================
+
+Every important claim must be classified internally as one of:
+
+OBSERVED
+VERIFIED
+KNOWN_FROM_REPOSITORY
+KNOWN_FROM_PREVIOUS_RUN
+INFERENCE
+NOT_VERIFIED
+TESTING_BLOCKED
+
+Never claim more than the evidence proves.
+
+ready=true != real provider call PASS
+HTTP 200 != end-to-end feature PASS
+configured=true / enabled=true != real routing PASS
+compile PASS != runtime PASS
+mock swarm PASS != real provider swarm PASS
+real one-worker PASS != real multi-worker PASS
+APK built != APK installs
+APK installs != feature works
+
+Never write "all fixed", "production ready", "perfect", "PASS", or "complete"
+without matching evidence.
+
+============================================================
+2. MORNING RULE — DO NOT REPEAT THE NIGHT BLINDLY
+============================================================
+
+Before making changes:
+
+1. Read docs/REASONIX_3_FINAL_REPORT.md.
+2. Inspect git status and full diff.
+3. Identify exactly which files were changed overnight.
+4. Separate:
+   - pre-existing dirty files
+   - overnight Reasonix 2.0 fixes
+   - overnight Reasonix 3.0 swarm files
+   - generated artifacts
+   - unrelated changes
+5. Re-run only the minimum gates needed to validate the morning baseline.
+
+Do NOT redo the entire project merely because this prompt is large.
+Do NOT rewrite a working swarm implementation from scratch unless direct evidence proves
+its architecture is fundamentally broken.
+
+============================================================
+3. MORNING BASELINE AUDIT
+============================================================
+
+Before new modifications, inspect and record:
+
+GIT
+- repo root
+- branch
+- HEAD
+- status
+- diff
+- untracked files
+- changed files grouped by subsystem
+- any overnight commits if present
+
+TOOLCHAIN
+- Go binary/version/PATH/GOTOOLCHAIN
+- Java/JDK
+- aapt/aapt2
+- d8
+- zipalign
+- apksigner
+
+REASONIX CORE
+- binary
+- source/binary relation
+- Controller
+- Agent
+- event transport
+- tool registry
+- approvals
+- Skills
+- MCP
+- projects
+- recovery
+- cancellation
+- budgets
+- progress guard
+
+BALANCE MOD
+- version
+- v0.20 Fixed12 state
+- strict pre-call budget
+- pricing
+- real gate
+- usage reconciliation
+- Execution Router
+
+SWARM
+- internal/swarm package
+- task graph
+- orchestrator
+- workers
+- provider resolver
+- budgets
+- cancellation
+- persistence/recovery
+- conflict/mutation ownership
+- verification
+- failure taxonomy
+- event integration
+- HTTP/API integration
+- tests
+- mock provider gates
+
+MOBILE BACKEND
+- actual version
+- bridge port
+- upstream Serve port
+- auth
+- swarm routes
+- model routes
+- approval routes
+- Skills/Tools/MCP routes
+- projects
+- integration audit
+
+APK / UI
+- current source
+- package
+- signing lineage
+- native host
+- WebView
+- current UI contract
+- whether overnight run actually changed APK/backend source
+
+PROVIDERS
+- every current config layer
+- canonical DeepSeek refs
+- canonical Flash/Pro refs
+- duplicate/dead refs
+- Kimi/Moonshot config if present
+- environment variable NAMES only
+- never print secret values
+
+============================================================
+4. ROOT-CAUSE PIPELINE
+============================================================
+
+For every defect:
+
+SYMPTOM
+→ REPRODUCE
+→ EVIDENCE
+→ RESPONSIBLE LAYER
+→ ROOT CAUSE
+→ INVARIANT
+→ MINIMAL SYSTEMIC FIX
+→ POSITIVE TEST
+→ NEGATIVE TEST
+→ REGRESSION TEST
+→ RELEASE GATE
+
+If root cause is not proven:
+ROOT_CAUSE: NOT_VERIFIED
+
+Every real bug should produce:
+1. invariant
+2. regression test
+3. release gate
+4. documented failure mode
+
+============================================================
+5. COST CONTROL
+============================================================
+
+Real provider tests are REQUIRED when credentials and explicit gates permit them.
+
+Use this order:
+
+source inspection
+→ grep
+→ static validation
+→ compile
+→ unit tests
+→ integration tests
+→ mock swarm
+→ real single-turn provider test
+→ real tool test
+→ real approval test
+→ real routing test
+→ minimal real swarm test
+→ heterogeneous swarm test if configured
+
+Do not recursively review unchanged code.
+Do not repeat paid tests without a code/config change.
+Do not start large real swarms before minimal tests pass.
+
+============================================================
+6. DEEPSEEK REAL API ENABLEMENT
+============================================================
+
+A DeepSeek API key is available through DEEPSEEK_API_KEY.
+
+Do not print its value.
+
+Before any paid call:
+
+- confirm DEEPSEEK_API_KEY is SET using presence-only logic
+- inspect current real-gate code
+- inspect exact required approval env
+- inspect exact FX/budget requirements
+- inspect current pricing freshness gate
+- inspect current maximum budget rules
+
+Do NOT guess required values from old documentation if current source differs.
+
+If CURRENT source still requires:
+BALANCE_V20_REAL_API_APPROVED
+BALANCE_V20_USD_KZT
+BALANCE_V20_BUDGET_KZT
+
+then set them only after confirming the current contract.
+
+Use a deliberately small test budget for initial gates.
+Do not raise budget merely because a test failed.
+
+============================================================
+7. FIRST MORNING REAL PROVIDER TEST
+============================================================
+
+After local gates are green, run one normal-user real turn through the REAL Reasonix path.
+
+Use a tiny prompt equivalent to:
+"Привет. Коротко ответь: Reasonix работает."
+
+Do not inject fake PASS markers.
+
+Prove:
+- request accepted
+- TurnStarted
+- actual provider/model selected
+- real provider request performed
+- real response received
+- final assistant message delivered
+- usage captured
+- budget ledger updated
+- no fake reasoning classification
+- no hidden retry beyond policy
+
+If this fails:
+STOP real escalation.
+Find root cause.
+Fix locally.
+Retry only after meaningful change.
+
+============================================================
+8. REAL TOOL TEST
+============================================================
+
+After real basic chat passes:
+
+Use a temporary workspace.
+
+Run one tiny real-agent task requiring a harmless read/search operation.
+
+Prove:
+user
+→ Agent
+→ ToolDispatch
+→ ToolResult
+→ continuation
+→ final response
+
+Verify provider/model and usage.
+
+============================================================
+9. REAL APPROVAL TEST
+============================================================
+
+Use a temporary file/workspace.
+
+Required invariant:
+mutation
+→ ApprovalRequest
+→ WAIT
+→ allow/deny
+→ continuation
+
+Pending approval is NOT:
+- failure
+- retry
+- no-progress signal
+
+Before approval:
+there must be NO repeated write/edit mutation.
+
+Then approve once.
+
+Prove:
+approval accepted
+→ continuation
+→ actual mutation
+→ read-back
+→ final response
+
+============================================================
+10. EXECUTION ROUTER REAL TEST
+============================================================
+
+Read CURRENT ExecutionConfig source and JSON behavior.
+Do not guess field names.
+
+Verify separately:
+
+CONFIG VERIFIED
+- configured=true
+- enabled=true
+
+MODEL READINESS VERIFIED
+- canonical required refs exist
+- ready=true
+
+REAL ROUTING VERIFIED
+- runtime evidence proves which model/provider was actually selected
+
+If current architecture supports Flash/Pro automatic routing:
+run the smallest controlled test that can legitimately exercise the route.
+
+Do not force Pro merely to obtain a green label if routing policy should choose Flash.
+
+============================================================
+11. REASONIX 3.0 SWARM DEEP AUDIT
+============================================================
+
+Audit the overnight swarm critically.
+
+A. ORCHESTRATOR
+- global goal ownership
+- decomposition
+- dependencies
+- scheduling
+- stop conditions
+- verification
+- merge/integration
+- lifecycle transitions
+
+B. TASK GRAPH
+- deterministic state
+- dependencies
+- transitions
+- failure propagation
+- completion rules
+- persisted representation
+
+C. WORKERS
+- canonical Agent primitive
+- bounded objectives
+- context isolation
+- tool/Skill scoping
+- provider/model selection
+- budget
+- timeout
+- structured result contract
+
+D. PARALLELISM
+- real concurrency
+- bounded concurrency
+- race safety
+- Android/ARM64 resource behavior
+- deterministic tests
+
+E. MUTATION OWNERSHIP
+- concurrent edit prevention
+- patch/merge policy
+- file ownership
+- conflict detection
+- no blind simultaneous mutations
+
+F. SHARED STATE
+- findings
+- decisions
+- artifacts
+- evidence
+- errors
+- references
+- no giant transcript fan-out
+
+G. BUDGET
+- total swarm budget
+- per-worker budget
+- request/token caps
+- provider restrictions
+- deterministic budget stop
+- no runaway worker recursion
+
+H. FAILURE TAXONOMY
+At least equivalent handling for:
+temporary
+permanent
+approval_wait
+tool_missing
+schema_error
+provider_error
+budget_stop
+timeout
+no_progress
+dependency_failure
+merge_conflict
+cancelled
+
+I. CANCELLATION
+- worker/task/swarm
+- persistent state remains valid
+
+J. RECOVERY
+- process restart
+- backend restart
+- provider failure
+- interrupted worker
+- completed expensive work not repeated unnecessarily
+
+K. EVENTS
+- canonical Reasonix event architecture
+- ordering
+- correlation
+- no fake reasoning
+- no duplicate bus without proof
+
+L. API
+- start
+- current
+- get by ID
+- history
+- cancel
+- persistence after completion
+- authentication
+- invalid IDs
+- concurrent calls
+- restart behavior
+
+M. VERIFICATION
+Worker "done" is not evidence.
+
+N. INTEGRATION
+Conflicting worker results must be resolved/surfaced.
+Do not concatenate prose.
+
+============================================================
+12. REAL SWARM TEST — MINIMAL FIRST
+============================================================
+
+Only after deep audit and local swarm tests are green.
+
+Use:
+1 orchestrator
++
+2 workers MAXIMUM
+
+Use a small task that genuinely benefits from two independent workers.
+
+This test MUST use the REAL configured provider path.
+
+Prove:
+- SwarmStarted
+- task graph created
+- 2 workers assigned
+- both workers execute real agent turns
+- actual provider/model per worker
+- bounded parallel execution
+- outputs returned
+- evidence captured
+- integration occurs
+- verification occurs
+- final swarm state persisted
+- final result returned
+- usage/budget captured
+- completed swarm remains readable after background run ends
+
+If it fails:
+stop escalation and fix root cause.
+
+============================================================
+13. REAL SWARM RECOVERY TEST
+============================================================
+
+After minimal real swarm passes:
+
+Run a controlled recovery scenario using mock or real provider as cost-appropriate.
+
+Prove persisted state survives a controlled Reasonix/backend restart.
+
+Do not intentionally crash Android/PRoot.
+
+Verify completed work is not re-paid/re-run without reason.
+
+============================================================
+14. REAL CANCELLATION TEST
+============================================================
+
+Prove:
+- cancel supported scope
+- cancellation observable
+- no corrupted persistent state
+- independent state remains intact
+- no uncontrolled provider work continues afterward
+
+============================================================
+15. KIMI / MOONSHOT
+============================================================
+
+Kimi support must remain provider-agnostic.
+
+Inspect whether Kimi/Moonshot is actually configured.
+
+If credential/config exists:
+- run minimal readiness test
+- then one minimal heterogeneous swarm:
+  one DeepSeek worker
+  one Kimi worker
+  orchestrator integrates both
+
+Prove runtime provider/model per worker.
+
+If no Kimi credentials/config:
+KIMI_RUNTIME: TESTING_BLOCKED
+
+Do not block generic Reasonix 3.0 completion.
+
+============================================================
+16. TOOLS / SKILLS / MCP INSIDE SWARM
+============================================================
+
+Swarm workers must use real Reasonix primitives.
+
+Verify:
+- core tools
+- Skills
+- MCP
+- approvals
+- worker restrictions
+
+No fake registry.
+No approval bypass for swarm workers.
+
+============================================================
+17. ANTI-LOOP / PROGRESS
+============================================================
+
+Existing Reasonix progress-aware core guard remains primary.
+
+1–2 repeated actions:
+NO BREAK solely for repetition
+
+3 no-progress repetitions:
+analyze result / change strategy
+
+4th blind retry:
+prevent blind repeat
+
+5 generic no-progress failures:
+abort bounded current work, not persistent project
+
+Early objective stop may occur for:
+- repeated tool_not_found
+- repeated schema-invalid request
+- permanent failure ignored
+- mutation retry while approval pending
+- false success after known failure
+
+============================================================
+18. REASONIX MOBILE 3.0 SWARM UX
+============================================================
+
+Do not rebuild UI if core/API changes do not require it.
+
+If UI/backend must change, preserve:
+
+ChatGPT-like minimalism
++
+DeepSeek-like expandable Thinking
++
+Codex-like Agent Activity/approvals
++
+Reasonix functionality
+
+Palette:
+black
+dark gray
+gray
+white
+
+No neon.
+No decorative blue/purple gradients.
+No dashboard clutter.
+
+Main new chat:
+clean / nearly empty.
+
+Composer:
++ | message | mic | send
+
+Sidebar:
+New Chat
+Search
+Projects
+history
+
+Secondary functions mainly behind "+".
+
+Collapsed swarm UI example:
+
+Working…
+Architect ✓
+Research ×2 ✓
+Coder ×2 …
+Tests …
+Verify …
+
+Tap to expand.
+
+Thinking != Activity.
+Final assistant message != reasoning.
+Raw JSON only Developer/Details.
+
+============================================================
+19. DEAD UI / CONTROL AUDIT
+============================================================
+
+If frontend is touched, audit:
+- TODO
+- FIXME
+- empty handlers
+- href="#"
+- fake onclick
+- hardcoded success
+- silent errors
+- mock production state
+- fake loading
+- decorative controls
+- unreachable dialogs
+- swallowed exceptions
+
+Visible control invariant:
+
+UI
+→ handler
+→ backend/API
+→ real Reasonix primitive
+→ real result
+→ read-back/UI update
+
+============================================================
+20. VOICE
+============================================================
+
+If voice code is touched:
+
+WebView
+↔ normal Java/Kotlin JS bridge
+↔ Android SpeechRecognizer
+↔ composer
+
+No handwritten DEX.
+No bytecode hacking.
+No NativeActivity regression.
+
+Physical microphone behavior:
+READY_FOR_DEVICE_TEST unless actually observed on device.
+
+============================================================
+21. APK / BUILD
+============================================================
+
+Only rebuild APK if APK/mobile source actually changed.
+
+Preserve:
+- package lineage
+- signing lineage
+- ordinary Activity + WebView architecture
+
+Use normal Android toolchain.
+
+Verify:
+- zip integrity
+- manifest/package
+- version
+- classes.dex
+- resources.arsc
+- alignment
+- signatures
+- certificate
+- launchable Activity
+
+APK build != device PASS.
+
+============================================================
+22. MORNING ARCHITECTURAL FREEDOM
+============================================================
+
+You may refactor overnight swarm implementation if evidence proves weak architecture.
+
+Every major refactor requires:
+
+CURRENT LIMITATION
+→ EVIDENCE
+→ NEW INVARIANT
+→ MIGRATION
+→ REGRESSION TESTS
+
+Do not rewrite working code merely for style.
+
+============================================================
+23. ANTI-AUTOMATION-FOR-AUTOMATION
+============================================================
+
+Every subsystem must justify itself by at least one:
+
+- increases capability
+- increases reliability
+- reduces cost
+- reduces latency
+- improves recovery
+- improves observability
+- reduces user work
+
+If none apply:
+do not build it.
+
+============================================================
+24. MORNING EXECUTION PLAN
+============================================================
+
+Proceed autonomously:
+
+M0  Re-verify current state and read overnight report.
+M1  Audit overnight diff and isolate real 3.0 implementation.
+M2  Re-run targeted local gates.
+M3  Fix local regressions/root causes.
+M4  Enable REAL DeepSeek gate using CURRENT source contract.
+M5  Run REAL normal chat test.
+M6  Run REAL tool test.
+M7  Run REAL approval test.
+M8  Verify/enable Execution Router as appropriate and test real routing evidence.
+M9  Deep-audit swarm architecture.
+M10 Fix swarm design/runtime defects.
+M11 Run deterministic local/mock swarm regression suite.
+M12 Run minimal REAL 1-orchestrator + 2-worker swarm.
+M13 Run controlled cancellation/recovery tests.
+M14 Run Kimi heterogeneous test only if configured.
+M15 Audit backend/mobile/API contracts.
+M16 Update APK/backend only if required.
+M17 Run final local release gates.
+M18 Prepare one final morning replacement artifact set.
+M19 Write final evidence report.
+
+Do not ask routine questions answerable from repository/runtime evidence.
+
+============================================================
+25. WHEN TO STOP ESCALATION
+============================================================
+
+Stop paid/runtime escalation and diagnose if:
+- provider call repeatedly fails
+- usage/accounting inconsistent
+- budget guard does not fail closed
+- tool event lifecycle broken
+- approval mutation repeats before approval
+- swarm worker count escapes bound
+- worker recursively spawns uncontrolled workers
+- cancellation fails
+- persistence corrupts
+- swarm API returns stale/wrong state
+- real test contradicts mock/local behavior
+
+============================================================
+26. OPENCODE SUBAGENTS
+============================================================
+
+For this morning pass:
+DO NOT use OpenCode subagents.
+
+Keep one principal DeepSeek engineering agent.
+
+The swarm under test is Reasonix's swarm.
+
+Do not enable OpenCode task/subagent fan-out during this run.
+
+============================================================
+27. RELEASE MATRIX
+============================================================
+
+Produce:
+
+FEATURE | TEST | RESULT | EVIDENCE
+
+Minimum:
+- core build
+- full unit suite
+- Balance v0.20 preflight
+- normal real DeepSeek chat
+- real tool use
+- real approval flow
+- write_file mutation
+- Skills
+- Tools
+- MCP
+- project persistence
+- reasoning separation
+- activity events
+- model readiness
+- Execution Router config
+- real routing
+- swarm planner
+- swarm worker runtime
+- bounded parallelism
+- shared state
+- verification
+- cancellation
+- recovery
+- persistence
+- swarm API
+- completed swarm read-back
+- budget enforcement
+- usage accounting
+- real 2-worker swarm
+- Kimi readiness
+- heterogeneous swarm if configured
+- backend bridge
+- APK build if changed
+- APK install/update if physically tested
+- APK launch if physically tested
+- voice if physically tested
+
+============================================================
+28. FINAL REPORT FORMAT
+============================================================
+
+Write/update:
+
+docs/REASONIX_3_MORNING_FINAL_REPORT.md
+
+Format:
+
+MORNING_BASELINE_VERIFIED:
+OVERNIGHT_WORK_AUDITED:
+ROOT_CAUSES_FOUND:
+FILES_CHANGED_THIS_MORNING:
+PREEXISTING_DIRTY_STATE_PRESERVED:
+CONTRACTS_CHANGED:
+INVARIANTS_ADDED:
+REASONIX_2_STATE:
+REASONIX_3_ARCHITECTURE:
+SWARM_CORE:
+SWARM_PARALLELISM:
+SWARM_PERSISTENCE:
+SWARM_RECOVERY:
+SWARM_CANCELLATION:
+SWARM_BUDGET:
+SWARM_VERIFICATION:
+DEEPSEEK_RUNTIME:
+REAL_CHAT_TEST:
+REAL_TOOL_TEST:
+REAL_APPROVAL_TEST:
+EXECUTION_ROUTER:
+REAL_ROUTING:
+REAL_SWARM_TEST:
+KIMI_RUNTIME:
+HETEROGENEOUS_SWARM:
+BACKEND:
+APK:
+LOCAL_TESTS:
+REGRESSION_TESTS:
+REAL_PROVIDER_TESTS:
+BUDGET_USAGE:
+PASS:
+NOT_VERIFIED:
+TESTING_BLOCKED:
+READY_FOR_DEVICE_TEST:
+ARTIFACTS:
+SHA256:
+ROLLBACK:
+NEXT_SINGLE_ACTION:
+
+Never place unverified work under PASS.
+
+============================================================
+29. FINAL DIRECTIVE
+============================================================
+
+This is the MORNING COMPLETION AND REAL-VALIDATION RUN.
+
+The overnight run already built the first Reasonix 3.0 Swarm implementation.
+
+Your job now is to:
+
+AUDIT IT
+→ FIX IT
+→ RUN REAL DEEPSEEK
+→ PROVE REAL TOOLS
+→ PROVE REAL APPROVAL
+→ PROVE REAL ROUTING WHERE POSSIBLE
+→ PROVE REAL SWARM
+→ FIX ALL PROVEN FAILURES
+→ RUN REGRESSIONS
+→ PRODUCE ONE EVIDENCE-BACKED REASONIX 3.0 RESULT
+
+Do not stop at "mock tests green".
+Do not stop at "code compiles".
+Do not stop at "provider ready=true".
+Do not stop at "swarm configured".
+
+Critical morning gate:
+
+REAL USER INPUT
+→ REAL REASONIX
+→ REAL PROVIDER
+→ REAL AGENT
+→ REAL TOOLS/APPROVALS
+→ REAL 2-WORKER REASONIX SWARM
+→ REAL INTEGRATION
+→ REAL FINAL RESULT
+→ REAL USAGE/BUDGET EVIDENCE
+
+If only a physical Android action remains, mark it READY_FOR_DEVICE_TEST.
+
+BEGIN NOW WITH M0.

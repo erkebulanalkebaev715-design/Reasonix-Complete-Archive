@@ -1,0 +1,16 @@
+DATE=2026-08-21T16:25:23+00:00
+=== REASONIX ANDROID TOOLCHAIN ===
+JAVA         OK  /usr/bin/java
+JAVAC        OK  /usr/bin/javac
+KEYTOOL      OK  /usr/bin/keytool
+AAPT2        OK  /usr/bin/aapt2
+AAPT         OK  /usr/bin/aapt
+APKSIGNER    OK  /usr/bin/apksigner
+ZIPALIGN     OK  /usr/bin/zipalign
+D8           OK  /data/data/com.termux/files/usr/bin/d8
+R8_JAR       MISSING
+ADB          OK  /usr/bin/adb
+GO           OK  /usr/local/go/bin/go
+go version go1.26.4 linux/arm64
+OPENCODE     OK  /root/.opencode/bin/opencode
+ADB is optional for this APK build pass.

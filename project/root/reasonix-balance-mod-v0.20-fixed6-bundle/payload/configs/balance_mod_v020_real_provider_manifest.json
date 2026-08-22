@@ -1,0 +1,78 @@
+{
+  "schema": "balance-real-provider-gate-v1",
+  "modVersion": "balance-mod-v0.20",
+  "baseline": "balance-mod-v0.19",
+  "state": "locked-until-explicit-user-approval",
+  "provider": {
+    "name": "deepseek-v20",
+    "kind": "openai",
+    "baseUrl": "https://api.deepseek.com",
+    "model": "deepseek-v4-flash",
+    "apiKeyEnv": "DEEPSEEK_API_KEY",
+    "apiKeyEmbedded": false,
+    "installerReadsApiKey": false,
+    "proAllowed": false
+  },
+  "hardGate": {
+    "approvalEnv": "BALANCE_V20_REAL_API_APPROVED",
+    "approvalValue": "YES_I_EXPLICITLY_APPROVE_DEEPSEEK_API",
+    "fxEnv": "BALANCE_V20_USD_KZT",
+    "budgetEnv": "BALANCE_V20_BUDGET_KZT",
+    "defaultBudgetKzt": 10.0,
+    "maximumBudgetKzt": 25.0,
+    "reservePercent": 20,
+    "proMaxPercent": 0,
+    "hardStop": true,
+    "maxOutputTokens": 64,
+    "failClosedOnMissingFX": true,
+    "failClosedOnMissingApproval": true,
+    "failClosedOnStalePricingSnapshot": true,
+    "retryPolicy": "strict-single-nonstream-paid-attempt-v0.20-fixed6",
+    "providerTimeoutSeconds": 45
+  },
+  "pricingSnapshot": {
+    "source": "DeepSeek official Models & Pricing",
+    "asOf": "2026-08-18",
+    "currency": "USD",
+    "unitTokens": 1000000,
+    "deepseek-v4-flash": {
+      "cacheHit": 0.0028,
+      "input": 0.14,
+      "output": 0.28
+    },
+    "maxAgeDays": 1
+  },
+  "reconciliation": {
+    "providerReportedUsageRequired": true,
+    "cacheHitMissAware": true,
+    "backendSpentDeltaRequired": true,
+    "absoluteToleranceKzt": 0.05,
+    "relativeTolerance": 0.05,
+    "note": "Flat official USD rate-card snapshot. Backend delta is checked from provider-reported usage; this is a rate-card estimate, not a wallet invoice.",
+    "ledgerPricingPolicy": "official-flat-rate"
+  },
+  "requiredOfflineGates": [
+    "v0.19-full-regression",
+    "hard-precall-native-regression",
+    "real-gate-default-locked",
+    "no-secret-in-bundle",
+    "pricing-reconciler-self-test",
+    "real-config-build-preflight"
+  ],
+  "requiredRealGates": [
+    "explicit-user-approval",
+    "fresh-pricing-snapshot",
+    "positive-explicit-usd-kzt-fx",
+    "loopback-token-auth",
+    "known-provider-pricing-before-stream",
+    "hard-kzt-precall-gate",
+    "strict-one-paid-attempt-policy",
+    "flash-only-single-agent",
+    "strict-single-nonstream-transport",
+    "provider-call-timeout-45s",
+    "single-tiny-real-task",
+    "provider-reported-usage",
+    "actual-vs-ratecard-reconciliation",
+    "spent-below-hard-budget"
+  ]
+}

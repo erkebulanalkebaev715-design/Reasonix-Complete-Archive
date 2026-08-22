@@ -1,0 +1,1 @@
+{"schemaVersion":3,"turn":1,"time":"2026-08-21T18:13:27.727265115Z","prompt":"HISTORY_B_9421","msgIndex":3,"files":[],"coverage":"none","coverageGaps":[{"reason":"bash_side_effect","detail":"bash side effects are not path-tracked","tool":"bash"}]}

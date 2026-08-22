@@ -1,0 +1,1253 @@
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+index 9547b0c..fa6bbb8 100644
+--- a/docs/BALANCE_MOD.md
++++ b/docs/BALANCE_MOD.md
+@@ -1,158 +1,113 @@
+ # Balance Mod
+ 
+ Goal: maximize verified coding result per unit of model spend, token budget,
+-wall time, and Android device resources. The mod must prefer deterministic local
+-work and DeepSeek Flash, and escalate only when host-observed evidence proves the
+-cheaper path is not progressing.
++wall time, and Android device resources. The mod prefers deterministic local
++work and DeepSeek Flash, and escalates only when host-observed evidence proves
++the cheaper path is not progressing.
+ 
+ ## Non-negotiable development rule
+ 
+-No real provider key is needed during mod development. The first real DeepSeek
++No real provider key is used during mod development. The first real DeepSeek
+ call happens only after the offline prototype and its mock scenarios pass.
+ 
+-## What upstream Reasonix already owns
++## Reused Reasonix foundations
+ 
+-Do not duplicate these systems:
++Balance Mod extends existing Reasonix seams instead of duplicating them:
+ 
+-- `control.Controller`: one orchestration layer behind CLI, HTTP/SSE and desktop.
+-- `recovery.Gate`: repeated-operation / episode failure budgets and recovery.
+-- `evidence`: progress signatures, delivery evidence, readiness/finalization gates.
+-- `checkpoint`: snapshots, rewind and recovery primitives.
++- `control.Controller`: orchestration behind CLI, HTTP/SSE and desktop.
++- native loop/progress guards and final-readiness completion gate.
++- `checkpoint`: snapshot/rewind transaction engine.
+ - Context Engine: cache-stable prefix, compaction and bounded tool output.
+-- billing: fixed-point money and host-generated `CostQuote`.
+-- task budget: post-round cost/time/token ceilings.
+-- CodeGraph / project analysis used by the existing agent.
++- `billing`: fixed-point money and host-generated `CostQuote`.
++- task budgets and project analysis/CodeGraph.
+ 
+-Balance Mod extends these seams rather than implementing parallel copies.
++## Implemented layers
+ 
+-## Mod sections
++### v0.1 / v0.1.1 — APK bridge, KZT budget, local resource telemetry
+ 
+-### 1. APK control and telemetry bridge — v0.1 in progress
++`/mod/*` is a machine-readable surface for the future Android APK. The APK
++consumes JSON/SSE and never parses terminal text.
+ 
+-Namespace: `/mod/*` on existing `reasonix serve`.
++Budget policy supports total KZT budget, final-verification reserve, Pro share,
++hard stop and explicit FX rates. No hard-coded exchange rate is trusted.
+ 
+-- `GET /mod/status`
+-- `GET /mod/budget`
+-- `POST /mod/budget`
+-- `POST /mod/budget/reset`
+-- `GET /mod/resources`
+-- `GET /mod/events` (typed SSE, content-free)
+-
+-The Android UI must consume JSON/SSE state, never parse terminal output.
+-
+-### 2. KZT Money Governor — v0.1 foundation
+-
+-APK policy:
+-
+-- total task/session budget in KZT
+-- reserve percentage for final verification/repair
+-- maximum Pro share
+-- hard-stop toggle
+-- explicit FX conversion map (no hard-coded exchange rate)
+-
+-Accounting reuses `billing.Amount` fixed-point arithmetic. Usage is observed from
+-host-generated `CostQuote`; the mod does not reprice provider tokens itself.
+-The existing Reasonix task-cost budget is reused as a second post-round stop
+-when the active billing currency can be converted from the configured KZT cap.
+-
+-A strict pre-call admission gate is intentionally not claimed in v0.1; it needs
+-to live at provider-call/router admission, where a conservative next-call cost
+-can be bounded before network spend occurs.
+-
+-### 3. Power / model router — next
+-
+-Target state machine:
++### v0.2 — host quality telemetry
+ 
+-`Flash A -> verify -> Flash B (different strategy) -> verify -> Pro diagnosis -> Flash repair`
++The mod mirrors native Reasonix anti-loop/progress/final-readiness evidence into
++typed APK events. A model cannot make itself `DONE` by saying it is done.
+ 
+-Pro is a bounded diagnostician, not the default executor. Escalation is based on
+-host-observed failures/progress, not on a model requesting a stronger model.
++### v0.3 — efficiency decision modules
+ 
+-### 4. Anti-loop extension — next
++- objective router: `Flash A -> Flash B -> Pro diagnosis -> Flash repair`
++- verified-only failure cache with append-only CRC journal
++- build-log reducer; complete raw log remains local
++- patch governor based on `git diff --numstat`
+ 
+-Reuse `recovery.Gate`, evidence progress signatures and existing repeat-failure
+-state. Add strategy diversity / state fingerprinting only where upstream does
+-not already distinguish genuine progress.
++The router is deterministic. It does not let model prose request Pro.
+ 
+-### 5. Verification extension — next
++### v0.4 — unified repair/recovery cycle
+ 
+-Reuse evidence/readiness/completion receipts. Add deterministic build/test/lint
+-policies and APK-visible verifier status. `DONE` remains a host decision backed
+-by evidence, never a model assertion.
++`RepairCycle` now joins the v0.3 pieces:
+ 
+-### 6. Context-cost extensions — next
++1. receive host verification receipt
++2. reject model-only completion (zero required checks never passes)
++3. check patch scope
++4. reduce build log for the next model call
++5. consult proven-failure cache as a hint only
++6. route cheap/expensive work through the objective ladder
++7. rollback measurable regression or oversized repair through a host adapter
++8. persist a failure fix only after external checks pass
++9. finalize only after the verification receipt passes
+ 
+-- compiler/build log root-cause reducer; full logs remain local
+-- diff/relevant-line projection
+-- impact-test selection using existing graph/project information
++Rollback does not implement a second backup system. The `reasonix serve` adapter
++calls native `control.Rewind(..., RewindCode)`, so Reasonix's existing conflict,
++coverage and transaction protections remain authoritative.
+ 
+-### 7. Repair / recovery extensions — next
++## v0.4 APK endpoints
+ 
+-- dynamic patch governor
+-- deterministic-fix whitelist with checkpoint-before-mutation
+-- automatic rollback on measurable regression
+-- persistent proven-failure cache keyed by environment + error + affected state
++Existing:
+ 
+-### 8. Mobile resource governor — v0.1 telemetry foundation
+-
+-Linux/PRoot reads only available host facts:
+-
+-- `/proc/meminfo`
+-- `/proc/loadavg`
+-- accessible `/sys/class/thermal/*`
+-- filesystem free/total space
+-
+-If Android/PRoot hides thermal sensors, temperature remains absent instead of
+-being guessed. Later policy will serialize heavy local builds/tests when memory,
+-load, storage or available thermal data says the phone is under pressure.
+-
+-## APK contract
+-
+-Example budget request:
+-
+-```json
+-{
+-  "budgetKzt": 1000,
+-  "reservePercent": 15,
+-  "proMaxPercent": 25,
+-  "hardStop": true,
+-  "fxKztPerUnit": {"USD": 500}
+-}
+-```
++- `GET /mod/status`
++- `GET /mod/budget`
++- `POST /mod/budget`
++- `POST /mod/budget/reset`
++- `GET /mod/resources`
++- `GET /mod/quality`
++- `GET /mod/router`
++- `POST /mod/router/reset`
++- `GET /mod/events`
+ 
+-The FX value above is only an example/test fixture. Production must use an
+-explicit current rate supplied by the user/UI or a later trusted rate source.
++Added:
+ 
+-Typed mod events include:
++- `GET /mod/cycle`
++- `POST /mod/cycle/reset`
++- `GET /mod/recovery`
++- `POST /mod/recovery/rollback-last`
+ 
+-- `budget.configured`
+-- `budget.updated`
+-- `budget.reserve_entered`
+-- `budget.pro_limit_reached`
+-- `budget.exhausted`
+-- `budget.reset`
+-- `resource.snapshot`
++The recovery endpoint is fail-closed: active turn, no checkpoint, unsafe
++coverage/conflict, or any native rewind refusal means no rollback is claimed.
+ 
+-Future phases add `loop.detected`, `strategy.changed`, `model.escalated`,
+-`verifier.*`, `rollback.*` and `task.done` without changing the APK transport.
++APK-visible cycle state contains counters, route decisions, fingerprints and
++verification counts only. Raw build logs, source code and cached fix hints are
++not copied onto the Balance Mod SSE stream.
+ 
+ ## Offline mock provider
+ 
+-The CLI binary registers `kind = "mock"`. It performs no network access and
+-needs no API key. A project can temporarily select it for offline validation:
++`kind = "mock"` performs no provider network call and needs no API key.
++Scenarios:
++
++- `smoke`: real tool loop (`read_file -> use_capability/grep -> PASS`)
++- `repeat-failure`: repeats a missing read until Reasonix's native loop guard
++  redirects it
++- `repair-cycle`: deterministic four-step sequence used to drive the v0.4
++  `Flash -> Flash -> Pro diagnosis -> Flash PASS` policy test
+ 
+-```toml
+-default_model = "balance-mock"
++The smoke script must end with `BALANCE_MOD_V04_SMOKE_PASS` before any later
++phase is accepted.
+ 
+-[[providers]]
+-name = "balance-mock"
+-kind = "mock"
+-model = "smoke"
+-base_url = "http://127.0.0.1"
+-context_window = 1000000
+-price = { cache_hit = 0, input = 0, output = 0, currency = "KZT" }
+-```
++## Still intentionally disconnected
+ 
+-`smoke` deterministically asks Reasonix to `read_file`, then `grep`, then emits
+-`OFFLINE_MOCK_PASS`. `repeat-failure` repeatedly requests a missing read so the
+-existing recovery/anti-loop path can be tested without spending tokens.
++v0.4 does **not** yet spend real DeepSeek tokens and does not automatically
++switch a live provider session. The next phase can wire provider/model execution
++into the already-tested host decision cycle; budget admission and the cycle
++must remain authoritative when that happens.
+diff --git a/internal/efficiency/repair_cycle.go b/internal/efficiency/repair_cycle.go
+new file mode 100644
+index 0000000..f15e629
+--- /dev/null
++++ b/internal/efficiency/repair_cycle.go
+@@ -0,0 +1,292 @@
++package efficiency
++
++import (
++	"fmt"
++	"strings"
++	"sync"
++	"time"
++)
++
++// VerificationReceipt is host-owned evidence for one repair attempt. A model's
++// prose is never a pass condition: at least one required check must have run,
++// every required check must have passed, and an observed build must exit 0.
++type VerificationReceipt struct {
++	RequiredChecks int  `json:"requiredChecks"`
++	ChecksPassed   int  `json:"checksPassed"`
++	ChecksFailed   int  `json:"checksFailed"`
++	BuildObserved  bool `json:"buildObserved"`
++	BuildExitCode  int  `json:"buildExitCode"`
++}
++
++func (v VerificationReceipt) Passed() bool {
++	if v.RequiredChecks <= 0 || v.ChecksFailed > 0 || v.ChecksPassed < v.RequiredChecks {
++		return false
++	}
++	return !v.BuildObserved || v.BuildExitCode == 0
++}
++
++// RepairAttempt is the objective result of one executor strategy. Fields that
++// may contain source/log content (FixHint, BuildLog) are consumed internally and
++// are deliberately absent from RepairCycleSnapshot, which is APK-safe.
++type RepairAttempt struct {
++	StrategyID          string              `json:"strategyId"`
++	FailureFingerprint  string              `json:"failureFingerprint,omitempty"`
++	ResolvedFingerprint string              `json:"resolvedFingerprint,omitempty"`
++	Environment         string              `json:"environment,omitempty"`
++	Files               []string            `json:"files,omitempty"`
++	FixHint             string              `json:"fixHint,omitempty"`
++	PatchNumstat        string              `json:"patchNumstat,omitempty"`
++	Regression          bool                `json:"regression,omitempty"`
++	BuildLog            string              `json:"buildLog,omitempty"`
++	Verification        VerificationReceipt `json:"verification"`
++	EstimatedFlashKZT   float64             `json:"estimatedFlashKzt,omitempty"`
++	EstimatedProKZT     float64             `json:"estimatedProKzt,omitempty"`
++	Finalization        bool                `json:"finalization,omitempty"`
++}
++
++// RecoveryStatus is content-free rollback telemetry. Rollback is supplied by a
++// host adapter so the core never reimplements Reasonix's checkpoint engine.
++type RecoveryStatus struct {
++	Requested bool   `json:"requested"`
++	Succeeded bool   `json:"succeeded"`
++	Reason    string `json:"reason,omitempty"`
++	Error     string `json:"error,omitempty"`
++}
++
++// RepairCycleSnapshot is safe to expose through /mod/*. It contains decisions,
++// counters and fingerprints only; never prompts, code, raw logs, or fix hints.
++type RepairCycleSnapshot struct {
++	State                  string              `json:"state"`
++	Attempts               int                 `json:"attempts"`
++	LastRoute              RouteDecision       `json:"lastRoute"`
++	LastFailureFingerprint string              `json:"lastFailureFingerprint,omitempty"`
++	LastStrategyID         string              `json:"lastStrategyId,omitempty"`
++	Verification           VerificationReceipt `json:"verification"`
++	Patch                  PatchReport         `json:"patch"`
++	CacheHit               bool                `json:"cacheHit"`
++	CacheScore             float64             `json:"cacheScore,omitempty"`
++	Cache                  FailureCacheStats   `json:"cache"`
++	Recovery               RecoveryStatus      `json:"recovery"`
++	Rollbacks              int                 `json:"rollbacks"`
++	RollbackFailures       int                 `json:"rollbackFailures"`
++	UpdatedAtUnixMS        int64               `json:"updatedAtUnixMs"`
++}
++
++// RepairCycleResult is the host-internal decision. CachedHint and LogSummary may
++// contain task content and therefore must not be forwarded to the APK event bus.
++type RepairCycleResult struct {
++	Snapshot   RepairCycleSnapshot
++	CachedHint string
++	LogSummary LogSummary
++}
++
++type RollbackFunc func(reason string) error
++
++// RepairCycle joins the v0.3 policy modules into one host-owned loop. It still
++// does not call providers itself: provider transport/model switching remains a
++// controller concern. This layer decides what class of work is allowed next and
++// guarantees that completion/failure-memory require external verification.
++type RepairCycle struct {
++	mu sync.Mutex
++
++	router      *Escalator
++	budget      *Governor
++	cache       *FailureCache
++	patchPolicy PatchPolicy
++	logConfig   LogReduceConfig
++	rollback    RollbackFunc
++	snap        RepairCycleSnapshot
++	lastFailure string
++}
++
++func NewRepairCycle(router *Escalator, budget *Governor, cache *FailureCache) *RepairCycle {
++	if router == nil {
++		router = NewEscalator()
++	}
++	return &RepairCycle{
++		router:      router,
++		budget:      budget,
++		cache:       cache,
++		patchPolicy: DefaultPatchPolicy(),
++		logConfig:   DefaultLogReduceConfig(),
++		snap: RepairCycleSnapshot{
++			State:     "idle",
++			LastRoute: router.Snapshot(),
++		},
++	}
++}
++
++func (c *RepairCycle) SetRollback(fn RollbackFunc) {
++	if c == nil {
++		return
++	}
++	c.mu.Lock()
++	c.rollback = fn
++	c.mu.Unlock()
++}
++
++func (c *RepairCycle) SetPatchPolicy(p PatchPolicy) {
++	if c == nil {
++		return
++	}
++	c.mu.Lock()
++	c.patchPolicy = p
++	c.mu.Unlock()
++}
++
++func (c *RepairCycle) Snapshot() RepairCycleSnapshot {
++	if c == nil {
++		return RepairCycleSnapshot{}
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	out := c.snap
++	if c.cache != nil {
++		out.Cache = c.cache.Stats()
++	}
++	return out
++}
++
++func (c *RepairCycle) Reset() RepairCycleSnapshot {
++	if c == nil {
++		return RepairCycleSnapshot{}
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.lastFailure = ""
++	c.snap = RepairCycleSnapshot{State: "idle"}
++	c.snap.LastRoute = c.router.Reset()
++	if c.cache != nil {
++		c.snap.Cache = c.cache.Stats()
++	}
++	c.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++	return c.snap
++}
++
++func (c *RepairCycle) Report(a RepairAttempt) (RepairCycleResult, error) {
++	if c == nil {
++		return RepairCycleResult{}, fmt.Errorf("repair cycle is nil")
++	}
++	if err := ValidateRouteInput(RouteInput{EstimatedFlashKZT: a.EstimatedFlashKZT, EstimatedProKZT: a.EstimatedProKZT}); err != nil {
++		return RepairCycleResult{}, err
++	}
++
++	c.mu.Lock()
++	defer c.mu.Unlock()
++
++	c.snap.Attempts++
++	c.snap.State = "verifying"
++	c.snap.LastStrategyID = strings.TrimSpace(a.StrategyID)
++	c.snap.Verification = a.Verification
++	c.snap.CacheHit = false
++	c.snap.CacheScore = 0
++	c.snap.Recovery = RecoveryStatus{}
++
++	patch := PatchReport{Allowed: true}
++	if strings.TrimSpace(a.PatchNumstat) != "" {
++		var err error
++		patch, err = CheckNumstat(a.PatchNumstat, c.patchPolicy)
++		if err != nil {
++			return RepairCycleResult{}, err
++		}
++	}
++	c.snap.Patch = patch
++	logSummary := ReduceBuildLog(a.BuildLog, c.logConfig)
++
++	failure := strings.TrimSpace(a.FailureFingerprint)
++	if failure != "" {
++		c.lastFailure = failure
++		c.snap.LastFailureFingerprint = failure
++	}
++
++	needRollback := a.Regression || !patch.Allowed
++	if needRollback {
++		reason := "verification regression"
++		if !patch.Allowed {
++			reason = patch.Reason
++		}
++		c.snap.Recovery = RecoveryStatus{Requested: true, Reason: reason}
++		if c.rollback == nil {
++			c.snap.Recovery.Error = "rollback adapter unavailable"
++			c.snap.RollbackFailures++
++		} else if err := c.rollback(reason); err != nil {
++			c.snap.Recovery.Error = err.Error()
++			c.snap.RollbackFailures++
++		} else {
++			c.snap.Recovery.Succeeded = true
++			c.snap.Rollbacks++
++		}
++	}
++
++	verified := a.Verification.Passed() && patch.Allowed && !a.Regression
++	if verified {
++		resolved := strings.TrimSpace(a.ResolvedFingerprint)
++		if resolved == "" {
++			resolved = c.lastFailure
++		}
++		if resolved != "" && strings.TrimSpace(a.FixHint) != "" && c.cache != nil {
++			if err := c.cache.PutVerified(FailureRecord{
++				Fingerprint: resolved,
++				Environment: strings.TrimSpace(a.Environment),
++				Files:       a.Files,
++				FixHint:     a.FixHint,
++				Verified:    true,
++			}); err != nil {
++				return RepairCycleResult{}, err
++			}
++		}
++		c.snap.LastRoute = c.router.Decide(RouteInput{Passed: true, Finalization: a.Finalization}, c.budget)
++		c.snap.State = "done"
++		c.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++		if c.cache != nil {
++			c.snap.Cache = c.cache.Stats()
++		}
++		return RepairCycleResult{Snapshot: c.snap, LogSummary: logSummary}, nil
++	}
++
++	cachedHint := ""
++	if failure != "" && c.cache != nil {
++		if rec, score, ok := c.cache.Lookup(failure, a.Environment, a.Files); ok {
++			c.snap.CacheHit = true
++			c.snap.CacheScore = score
++			cachedHint = rec.FixHint
++		}
++	}
++
++	c.snap.LastRoute = c.router.Decide(RouteInput{
++		Passed:             false,
++		FailureFingerprint: failure,
++		StrategyID:         a.StrategyID,
++		EstimatedFlashKZT:  a.EstimatedFlashKZT,
++		EstimatedProKZT:    a.EstimatedProKZT,
++		Finalization:       a.Finalization,
++	}, c.budget)
++	c.snap.State = stateForRoute(c.snap.LastRoute.Action)
++	if c.snap.Recovery.Requested && !c.snap.Recovery.Succeeded {
++		c.snap.State = "rollback_blocked"
++	}
++	c.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++	if c.cache != nil {
++		c.snap.Cache = c.cache.Stats()
++	}
++	return RepairCycleResult{Snapshot: c.snap, CachedHint: cachedHint, LogSummary: logSummary}, nil
++}
++
++func stateForRoute(a RouteAction) string {
++	switch a {
++	case RouteRetryFlash:
++		return "retrying_flash"
++	case RouteDiagnosePro:
++		return "diagnosing_pro"
++	case RouteExecuteFlash:
++		return "executing_flash"
++	case RouteStopBudget:
++		return "budget_blocked"
++	case RouteStopNoProgress:
++		return "stalled"
++	case RouteFinalize:
++		return "done"
++	default:
++		return "working"
++	}
++}
+diff --git a/internal/efficiency/repair_cycle_mock_test.go b/internal/efficiency/repair_cycle_mock_test.go
+new file mode 100644
+index 0000000..3705e89
+--- /dev/null
++++ b/internal/efficiency/repair_cycle_mock_test.go
+@@ -0,0 +1,70 @@
++package efficiency
++
++import (
++	"context"
++	"testing"
++
++	"reasonix/internal/provider"
++	mockprovider "reasonix/internal/provider/mock"
++)
++
++func mockRepairMarker(t *testing.T, p provider.Provider) string {
++	t.Helper()
++	ch, err := p.Stream(context.Background(), provider.Request{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	for c := range ch {
++		if c.Type == provider.ChunkText {
++			return c.Text
++		}
++	}
++	t.Fatal("mock repair scenario emitted no marker")
++	return ""
++}
++
++func TestRepairCycleDrivenByOfflineMockProvider(t *testing.T) {
++	p, err := mockprovider.New(provider.Config{Name: "balance-mock-repair", Extra: map[string]any{"scenario": "repair-cycle"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	cycle := NewRepairCycle(NewEscalator(), nil, nil)
++	failed := VerificationReceipt{RequiredChecks: 2, ChecksPassed: 1, ChecksFailed: 1, BuildObserved: true, BuildExitCode: 1}
++	passed := VerificationReceipt{RequiredChecks: 2, ChecksPassed: 2, BuildObserved: true, BuildExitCode: 0}
++
++	marker := mockRepairMarker(t, p)
++	if marker != "MOCK_REPAIR_FAIL_A" {
++		t.Fatal(marker)
++	}
++	r, err := cycle.Report(RepairAttempt{StrategyID: "A", FailureFingerprint: "E1", PatchNumstat: "1\t0\ta.go", Verification: failed})
++	if err != nil || r.Snapshot.LastRoute.Action != RouteRetryFlash {
++		t.Fatalf("step A=%+v err=%v", r.Snapshot, err)
++	}
++
++	marker = mockRepairMarker(t, p)
++	if marker != "MOCK_REPAIR_FAIL_B" {
++		t.Fatal(marker)
++	}
++	r, err = cycle.Report(RepairAttempt{StrategyID: "B", FailureFingerprint: "E1", PatchNumstat: "1\t0\ta.go", Verification: failed})
++	if err != nil || r.Snapshot.LastRoute.Action != RouteDiagnosePro {
++		t.Fatalf("step B=%+v err=%v", r.Snapshot, err)
++	}
++
++	marker = mockRepairMarker(t, p)
++	if marker != "MOCK_PRO_DIAGNOSIS" {
++		t.Fatal(marker)
++	}
++	r, err = cycle.Report(RepairAttempt{StrategyID: "pro-diagnosis", FailureFingerprint: "E1", Verification: failed})
++	if err != nil || r.Snapshot.LastRoute.Action != RouteExecuteFlash {
++		t.Fatalf("step Pro=%+v err=%v", r.Snapshot, err)
++	}
++
++	marker = mockRepairMarker(t, p)
++	if marker != "MOCK_REPAIR_PASS" {
++		t.Fatal(marker)
++	}
++	r, err = cycle.Report(RepairAttempt{StrategyID: "C", ResolvedFingerprint: "E1", PatchNumstat: "1\t0\ta.go", Verification: passed, Finalization: true})
++	if err != nil || r.Snapshot.LastRoute.Action != RouteFinalize || r.Snapshot.State != "done" {
++		t.Fatalf("step pass=%+v err=%v", r.Snapshot, err)
++	}
++}
+diff --git a/internal/efficiency/repair_cycle_test.go b/internal/efficiency/repair_cycle_test.go
+new file mode 100644
+index 0000000..09627e2
+--- /dev/null
++++ b/internal/efficiency/repair_cycle_test.go
+@@ -0,0 +1,123 @@
++package efficiency
++
++import (
++	"errors"
++	"path/filepath"
++	"testing"
++)
++
++func failedReceipt() VerificationReceipt {
++	return VerificationReceipt{RequiredChecks: 2, ChecksPassed: 1, ChecksFailed: 1, BuildObserved: true, BuildExitCode: 1}
++}
++
++func passedReceipt() VerificationReceipt {
++	return VerificationReceipt{RequiredChecks: 2, ChecksPassed: 2, BuildObserved: true, BuildExitCode: 0}
++}
++
++func TestVerificationReceiptRequiresHostEvidence(t *testing.T) {
++	if (VerificationReceipt{}).Passed() {
++		t.Fatal("empty/model-only completion must not pass")
++	}
++	if (VerificationReceipt{RequiredChecks: 1, ChecksPassed: 1, BuildObserved: true, BuildExitCode: 1}).Passed() {
++		t.Fatal("failed observed build must not pass")
++	}
++	if !passedReceipt().Passed() {
++		t.Fatal("complete host evidence should pass")
++	}
++}
++
++func TestRepairCycleFlashFlashProFlashAndVerifiedCache(t *testing.T) {
++	cache, err := OpenFailureCache(filepath.Join(t.TempDir(), "failures.jsonl"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	g := NewGovernor()
++	g.Configure(BudgetConfig{BudgetKZT: 1000, ReservePercent: 15, ProMaxPercent: 25, HardStop: true, FXKZTPerUnit: map[string]float64{"KZT": 1}})
++	cycle := NewRepairCycle(NewEscalator(), g, cache)
++
++	a, err := cycle.Report(RepairAttempt{
++		StrategyID: "A", FailureFingerprint: "E1", Environment: "go1.26/linux-arm64",
++		Files: []string{"main.go"}, PatchNumstat: "2\t1\tmain.go", Verification: failedReceipt(), EstimatedFlashKZT: 1, EstimatedProKZT: 5,
++		BuildLog: "compile\nmain.go:4: error: bad symbol\nFAILED build",
++	})
++	if err != nil || a.Snapshot.LastRoute.Action != RouteRetryFlash {
++		t.Fatalf("A=%+v err=%v", a.Snapshot, err)
++	}
++	if a.LogSummary.SelectedLines == 0 || len(a.LogSummary.Text) == 0 {
++		t.Fatal("failed build log was not reduced for the next model call")
++	}
++
++	b, err := cycle.Report(RepairAttempt{
++		StrategyID: "B", FailureFingerprint: "E1", Environment: "go1.26/linux-arm64",
++		Files: []string{"main.go"}, PatchNumstat: "1\t1\tmain.go", Verification: failedReceipt(), EstimatedFlashKZT: 1, EstimatedProKZT: 5,
++	})
++	if err != nil || b.Snapshot.LastRoute.Action != RouteDiagnosePro {
++		t.Fatalf("B=%+v err=%v", b.Snapshot, err)
++	}
++
++	p, err := cycle.Report(RepairAttempt{
++		StrategyID: "pro-diagnosis", FailureFingerprint: "E1", Verification: failedReceipt(), EstimatedFlashKZT: 1,
++	})
++	if err != nil || p.Snapshot.LastRoute.Action != RouteExecuteFlash {
++		t.Fatalf("pro=%+v err=%v", p.Snapshot, err)
++	}
++
++	pass, err := cycle.Report(RepairAttempt{
++		StrategyID: "C", ResolvedFingerprint: "E1", Environment: "go1.26/linux-arm64", Files: []string{"main.go"},
++		FixHint: "repair the symbol import", PatchNumstat: "1\t0\tmain.go", Verification: passedReceipt(), Finalization: true,
++	})
++	if err != nil || pass.Snapshot.LastRoute.Action != RouteFinalize || pass.Snapshot.State != "done" {
++		t.Fatalf("pass=%+v err=%v", pass.Snapshot, err)
++	}
++	if pass.Snapshot.Cache.Records != 1 {
++		t.Fatalf("cache stats=%+v", pass.Snapshot.Cache)
++	}
++	got, score, ok := cache.Lookup("E1", "go1.26/linux-arm64", []string{"main.go"})
++	if !ok || got.FixHint == "" || score < .99 {
++		t.Fatalf("verified fix missing: got=%+v score=%v ok=%v", got, score, ok)
++	}
++}
++
++func TestRepairCycleRollbackOnRegressionAndOversizedPatch(t *testing.T) {
++	cycle := NewRepairCycle(NewEscalator(), nil, nil)
++	rollbacks := 0
++	cycle.SetRollback(func(string) error { rollbacks++; return nil })
++
++	res, err := cycle.Report(RepairAttempt{
++		StrategyID: "A", FailureFingerprint: "E", Regression: true,
++		Verification: failedReceipt(), PatchNumstat: "1\t0\ta.go",
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if rollbacks != 1 || !res.Snapshot.Recovery.Succeeded || res.Snapshot.Rollbacks != 1 {
++		t.Fatalf("regression recovery=%+v rollbacks=%d", res.Snapshot.Recovery, rollbacks)
++	}
++
++	cycle.SetPatchPolicy(PatchPolicy{MaxFiles: 1, MaxChangedLines: 2, MaxSingleFileLines: 2})
++	res, err = cycle.Report(RepairAttempt{
++		StrategyID: "B", FailureFingerprint: "E", Verification: failedReceipt(),
++		PatchNumstat: "5\t0\ta.go",
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if rollbacks != 2 || res.Snapshot.Patch.Allowed || !res.Snapshot.Recovery.Succeeded {
++		t.Fatalf("oversize recovery=%+v patch=%+v rollbacks=%d", res.Snapshot.Recovery, res.Snapshot.Patch, rollbacks)
++	}
++}
++
++func TestRepairCycleRollbackFailureBlocksState(t *testing.T) {
++	cycle := NewRepairCycle(NewEscalator(), nil, nil)
++	cycle.SetRollback(func(string) error { return errors.New("checkpoint conflict") })
++	res, err := cycle.Report(RepairAttempt{
++		StrategyID: "A", FailureFingerprint: "E", Regression: true,
++		Verification: failedReceipt(), PatchNumstat: "1\t0\ta.go",
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if res.Snapshot.State != "rollback_blocked" || res.Snapshot.RollbackFailures != 1 || res.Snapshot.Recovery.Error == "" {
++		t.Fatalf("snapshot=%+v", res.Snapshot)
++	}
++}
+diff --git a/internal/provider/mock/mock.go b/internal/provider/mock/mock.go
+index ffa74e9..72633e3 100644
+--- a/internal/provider/mock/mock.go
++++ b/internal/provider/mock/mock.go
+@@ -6,6 +6,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"strings"
++	"sync"
+ 
+ 	"reasonix/internal/provider"
+ )
+@@ -16,6 +17,8 @@ type mockProvider struct {
+ 	name     string
+ 	scenario string
+ 	path     string
++	mu       sync.Mutex
++	step     int
+ }
+ 
+ func init() {
+@@ -24,21 +27,21 @@ func init() {
+ 
+ // New builds an offline mock provider. Supported Extra fields:
+ //
+-//	scenario: smoke (default) | repeat-failure | text
++//	scenario: smoke (default) | repeat-failure | repair-cycle | text
+ //	path: file used by smoke/repeat-failure (default hello.py)
+ func New(cfg provider.Config) (provider.Provider, error) {
+ 	scenario := extraString(cfg.Extra, "scenario")
+ 	if scenario == "" {
+ 		candidate := strings.ToLower(strings.TrimSpace(cfg.Model))
+ 		switch candidate {
+-		case "smoke", "repeat-failure", "text":
++		case "smoke", "repeat-failure", "repair-cycle", "text":
+ 			scenario = candidate
+ 		default:
+ 			scenario = "smoke"
+ 		}
+ 	}
+ 	switch scenario {
+-	case "smoke", "repeat-failure", "text":
++	case "smoke", "repeat-failure", "repair-cycle", "text":
+ 	default:
+ 		return nil, fmt.Errorf("mock provider: unknown scenario %q", scenario)
+ 	}
+@@ -78,6 +81,23 @@ func (p *mockProvider) Stream(ctx context.Context, req provider.Request) (<-chan
+ 		toolResults := countToolResults(req.Messages)
+ 		calledTool := false
+ 		switch p.scenario {
++		case "repair-cycle":
++			p.mu.Lock()
++			p.step++
++			step := p.step
++			p.mu.Unlock()
++			text := "MOCK_REPAIR_PASS"
++			switch step {
++			case 1:
++				text = "MOCK_REPAIR_FAIL_A"
++			case 2:
++				text = "MOCK_REPAIR_FAIL_B"
++			case 3:
++				text = "MOCK_PRO_DIAGNOSIS"
++			}
++			if !emit(provider.Chunk{Type: provider.ChunkText, Text: text}) {
++				return
++			}
+ 		case "repeat-failure":
+ 			// Keep repeating the same failing read until Reasonix's native loop
+ 			// guard injects a change-approach instruction. The mock then stops,
+diff --git a/internal/provider/mock/mock_test.go b/internal/provider/mock/mock_test.go
+index eef4d10..b8e5f98 100644
+--- a/internal/provider/mock/mock_test.go
++++ b/internal/provider/mock/mock_test.go
+@@ -68,3 +68,17 @@ func TestRepeatFailureStopsAfterLoopGuardInstruction(t *testing.T) {
+ 		t.Fatalf("chunks = %#v", chunks)
+ 	}
+ }
++
++func TestRepairCycleScenarioSequence(t *testing.T) {
++	p, err := New(provider.Config{Name: "mock", Extra: map[string]any{"scenario": "repair-cycle"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := []string{"MOCK_REPAIR_FAIL_A", "MOCK_REPAIR_FAIL_B", "MOCK_PRO_DIAGNOSIS", "MOCK_REPAIR_PASS"}
++	for i, expected := range want {
++		chunks := collect(t, p, provider.Request{})
++		if len(chunks) == 0 || chunks[0].Type != provider.ChunkText || chunks[0].Text != expected {
++			t.Fatalf("step %d = %#v, want %s", i+1, chunks, expected)
++		}
++	}
++}
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index 01ad690..f11db96 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -10,11 +10,12 @@ import (
+ 
+ 	"reasonix/internal/billing"
+ 	"reasonix/internal/config"
++	"reasonix/internal/control"
+ 	"reasonix/internal/efficiency"
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.3"
++const balanceModVersion = "balance-mod-v0.4"
+ 
+ // modEvent is a small, content-free machine event intended for the future
+ // Android client. Human logs stay on the ordinary Reasonix event stream; the
+@@ -96,15 +97,16 @@ type modTaskCostGateStatus struct {
+ }
+ 
+ type modStatusPayload struct {
+-	ModVersion string                      `json:"modVersion"`
+-	Running    bool                        `json:"running"`
+-	ModelRef   string                      `json:"modelRef,omitempty"`
+-	Budget     efficiency.BudgetSnapshot   `json:"budget"`
+-	TaskGate   modTaskCostGateStatus       `json:"taskCostGate"`
+-	Resources  efficiency.ResourceSnapshot `json:"resources"`
+-	Quality    efficiency.QualitySnapshot  `json:"quality"`
+-	Router     efficiency.RouteDecision    `json:"router"`
+-	Features   map[string]string           `json:"features"`
++	ModVersion string                         `json:"modVersion"`
++	Running    bool                           `json:"running"`
++	ModelRef   string                         `json:"modelRef,omitempty"`
++	Budget     efficiency.BudgetSnapshot      `json:"budget"`
++	TaskGate   modTaskCostGateStatus          `json:"taskCostGate"`
++	Resources  efficiency.ResourceSnapshot    `json:"resources"`
++	Quality    efficiency.QualitySnapshot     `json:"quality"`
++	Router     efficiency.RouteDecision       `json:"router"`
++	Cycle      efficiency.RepairCycleSnapshot `json:"cycle"`
++	Features   map[string]string              `json:"features"`
+ }
+ 
+ type taskCostBudgetSetter interface {
+@@ -145,6 +147,7 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 		Resources:  efficiency.ReadResources(s.modWorkspacePath()),
+ 		Quality:    s.modQuality.Snapshot(),
+ 		Router:     s.modRouter.Snapshot(),
++		Cycle:      s.modCycle.Snapshot(),
+ 		Features: map[string]string{
+ 			"budget":         "post-round-gate-v0.1",
+ 			"apkBridge":      "http+sse-v0.2",
+@@ -157,6 +160,8 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 			"failureCache":   "verified-journal-crc-v0.3",
+ 			"logReducer":     "root-cause-window-v0.3",
+ 			"patchGovernor":  "git-numstat-v0.3",
++			"repairCycle":    "router+verifier+cache+rollback-v0.4",
++			"nativeRollback": "reasonix-checkpoint-transaction-v0.4",
+ 		},
+ 	})
+ }
+@@ -219,11 +224,118 @@ func (s *Server) modRouterReset(w http.ResponseWriter, _ *http.Request) {
+ 		http.Error(w, "cannot reset router while a turn is running", http.StatusConflict)
+ 		return
+ 	}
+-	snap := s.modRouter.Reset()
++	cycle := s.modCycle.Reset()
++	snap := cycle.LastRoute
+ 	s.modHub.Emit("router.reset", snap)
++	s.modHub.Emit("repair.reset", cycle)
+ 	writeJSON(w, snap)
+ }
+ 
++func (s *Server) modCycleGet(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, s.modCycle.Snapshot())
++}
++
++func (s *Server) modCycleReset(w http.ResponseWriter, _ *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot reset repair cycle while a turn is running", http.StatusConflict)
++		return
++	}
++	snap := s.modCycle.Reset()
++	s.modHub.Emit("repair.reset", snap)
++	writeJSON(w, snap)
++}
++
++type modRecoveryStatus struct {
++	Available       bool   `json:"available"`
++	CheckpointCount int    `json:"checkpointCount"`
++	LatestTurn      int    `json:"latestTurn,omitempty"`
++	Files           int    `json:"files,omitempty"`
++	Coverage        string `json:"coverage,omitempty"`
++	CoverageGaps    int    `json:"coverageGaps,omitempty"`
++}
++
++func (s *Server) modRecoverySnapshot() modRecoveryStatus {
++	cps := s.ctl().Checkpoints()
++	out := modRecoveryStatus{CheckpointCount: len(cps)}
++	if len(cps) == 0 {
++		return out
++	}
++	latest := cps[0]
++	for _, cp := range cps[1:] {
++		if cp.Turn > latest.Turn {
++			latest = cp
++		}
++	}
++	out.Available = true
++	out.LatestTurn = latest.Turn
++	out.Files = len(latest.Paths)
++	out.Coverage = string(latest.Coverage)
++	out.CoverageGaps = len(latest.CoverageGaps)
++	return out
++}
++
++func (s *Server) modRecoveryGet(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, s.modRecoverySnapshot())
++}
++
++// modRollbackLatestCode deliberately delegates to the native Reasonix rewind
++// transaction instead of implementing another file backup mechanism. Rewind
++// itself refuses active turns, conflicts and partial-coverage restores that
++// require explicit confirmation.
++func (s *Server) modRollbackLatestCode(_ string) error {
++	ctl := s.ctl()
++	if ctl.Running() {
++		return fmt.Errorf("cannot rollback while a turn is running")
++	}
++	cps := ctl.Checkpoints()
++	if len(cps) == 0 {
++		return fmt.Errorf("no checkpoint available")
++	}
++	latest := cps[0].Turn
++	for _, cp := range cps[1:] {
++		if cp.Turn > latest {
++			latest = cp.Turn
++		}
++	}
++	return ctl.Rewind(latest, control.RewindCode)
++}
++
++func (s *Server) modRecoveryRollbackLast(w http.ResponseWriter, _ *http.Request) {
++	before := s.modRecoverySnapshot()
++	if err := s.modRollbackLatestCode("APK requested rollback"); err != nil {
++		s.modHub.Emit("rollback.failed", map[string]any{"reason": err.Error()})
++		http.Error(w, err.Error(), http.StatusConflict)
++		return
++	}
++	after := s.modRecoverySnapshot()
++	s.modHub.Emit("rollback.completed", map[string]any{"turn": before.LatestTurn})
++	writeJSON(w, map[string]any{"ok": true, "before": before, "after": after})
++}
++
++// observeRepairAttempt is the single future wiring point for controller-side
++// repair attempts. It keeps content-bearing hints/log summaries inside the host
++// and publishes only the content-free cycle snapshot to the APK.
++func (s *Server) observeRepairAttempt(a efficiency.RepairAttempt) (efficiency.RepairCycleResult, error) {
++	res, err := s.modCycle.Report(a)
++	if err != nil {
++		s.modHub.Emit("repair.error", map[string]any{"reason": err.Error()})
++		return res, err
++	}
++	s.modHub.Emit("repair.updated", res.Snapshot)
++	s.modHub.Emit("router.decision", res.Snapshot.LastRoute)
++	if res.Snapshot.Recovery.Requested {
++		kind := "rollback.failed"
++		if res.Snapshot.Recovery.Succeeded {
++			kind = "rollback.completed"
++		}
++		s.modHub.Emit(kind, res.Snapshot.Recovery)
++	}
++	if res.Snapshot.State == "done" {
++		s.modHub.Emit("repair.completed", map[string]any{"attempts": res.Snapshot.Attempts})
++	}
++	return res, nil
++}
++
+ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ 	flusher, ok := w.(http.Flusher)
+ 	if !ok {
+@@ -242,6 +354,8 @@ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ 		"quality":   s.modQuality.Snapshot(),
+ 		"resources": efficiency.ReadResources(s.modWorkspacePath()),
+ 		"router":    s.modRouter.Snapshot(),
++		"cycle":     s.modCycle.Snapshot(),
++		"recovery":  s.modRecoverySnapshot(),
+ 	})
+ 	if len(initial) > 0 {
+ 		fmt.Fprintf(w, "data: %s\n\n", initial)
+diff --git a/internal/serve/mod_bridge_test.go b/internal/serve/mod_bridge_test.go
+index 6bb9654..2be66bc 100644
+--- a/internal/serve/mod_bridge_test.go
++++ b/internal/serve/mod_bridge_test.go
+@@ -11,6 +11,7 @@ import (
+ 	"reasonix/internal/billing"
+ 	"reasonix/internal/config"
+ 	"reasonix/internal/control"
++	"reasonix/internal/efficiency"
+ 	"reasonix/internal/event"
+ 	"reasonix/internal/provider"
+ )
+@@ -119,6 +120,9 @@ func TestModStatusExposesTypedAPKSurface(t *testing.T) {
+ 	if _, ok := body["router"]; !ok {
+ 		t.Fatal("status missing router")
+ 	}
++	if _, ok := body["cycle"]; !ok {
++		t.Fatal("status missing repair cycle")
++	}
+ }
+ 
+ func TestModQualityAPITracksLoopAndReadiness(t *testing.T) {
+@@ -191,3 +195,80 @@ func TestModRouterAPIIsAPKVisibleAndResettable(t *testing.T) {
+ 		t.Fatalf("POST /mod/router/reset = %d: %s", reset.StatusCode, body)
+ 	}
+ }
++
++func TestModCycleAPIAndHostRepairWiring(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, SessionDir: t.TempDir()})
++	s := New(ctrl, bc, config.ServeConfig{})
++	ts := httptest.NewServer(s.Handler())
++	defer ts.Close()
++
++	failed := efficiency.VerificationReceipt{RequiredChecks: 2, ChecksPassed: 1, ChecksFailed: 1, BuildObserved: true, BuildExitCode: 1}
++	passed := efficiency.VerificationReceipt{RequiredChecks: 2, ChecksPassed: 2, BuildObserved: true, BuildExitCode: 0}
++
++	steps := []efficiency.RepairAttempt{
++		{StrategyID: "A", FailureFingerprint: "E1", PatchNumstat: "1\t0\ta.go", Verification: failed, EstimatedFlashKZT: 1, EstimatedProKZT: 5},
++		{StrategyID: "B", FailureFingerprint: "E1", PatchNumstat: "1\t0\ta.go", Verification: failed, EstimatedFlashKZT: 1, EstimatedProKZT: 5},
++		{StrategyID: "pro-diagnosis", FailureFingerprint: "E1", Verification: failed, EstimatedFlashKZT: 1},
++		{StrategyID: "C", ResolvedFingerprint: "E1", FixHint: "verified repair", PatchNumstat: "1\t0\ta.go", Verification: passed, Finalization: true},
++	}
++	for _, step := range steps {
++		if _, err := s.observeRepairAttempt(step); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	resp, err := http.Get(ts.URL + "/mod/cycle")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	var snap efficiency.RepairCycleSnapshot
++	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
++		t.Fatal(err)
++	}
++	if snap.State != "done" || snap.LastRoute.Action != efficiency.RouteFinalize || snap.Attempts != 4 {
++		t.Fatalf("cycle=%+v", snap)
++	}
++
++	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mod/cycle/reset", strings.NewReader(`{}`))
++	reset, err := http.DefaultClient.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer reset.Body.Close()
++	if reset.StatusCode != http.StatusOK {
++		body, _ := io.ReadAll(reset.Body)
++		t.Fatalf("reset=%d: %s", reset.StatusCode, body)
++	}
++}
++
++func TestModRecoveryAPIIsFailClosedWithoutCheckpoint(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, SessionDir: t.TempDir()})
++	ts := httptest.NewServer(New(ctrl, bc, config.ServeConfig{}).Handler())
++	defer ts.Close()
++
++	resp, err := http.Get(ts.URL + "/mod/recovery")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	var status modRecoveryStatus
++	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
++		t.Fatal(err)
++	}
++	if status.Available || status.CheckpointCount != 0 {
++		t.Fatalf("recovery=%+v", status)
++	}
++
++	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mod/recovery/rollback-last", nil)
++	rollback, err := http.DefaultClient.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer rollback.Body.Close()
++	if rollback.StatusCode != http.StatusConflict {
++		t.Fatalf("rollback status=%d, want 409", rollback.StatusCode)
++	}
++}
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index f621eaa..8d6e1a0 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -61,6 +61,7 @@ type Server struct {
+ 	modGov      *efficiency.Governor
+ 	modQuality  *efficiency.QualityMonitor
+ 	modRouter   *efficiency.Escalator
++	modCycle    *efficiency.RepairCycle
+ 	modHub      *modBroadcaster
+ 	modMu       sync.RWMutex
+ 	modTaskGate modTaskCostGateStatus
+@@ -103,6 +104,19 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 		titles:     newTitleCache(ctrl.SessionDir()),
+ 		auth:       newAuthGate(serveCfg),
+ 	}
++	// v0.4 wires the previously independent policy pieces into one repair cycle.
++	// The cache lives beside session state (not in the project tree), while
++	// rollback delegates to Reasonix's native checkpoint transaction engine.
++	cachePath := ""
++	if dir := strings.TrimSpace(ctrl.SessionDir()); dir != "" {
++		cachePath = filepath.Join(dir, "balance", "failure-cache.jsonl")
++	}
++	cache, err := efficiency.OpenFailureCache(cachePath)
++	if err != nil {
++		cache, _ = efficiency.OpenFailureCache("")
++	}
++	s.modCycle = efficiency.NewRepairCycle(s.modRouter, s.modGov, cache)
++	s.modCycle.SetRollback(func(reason string) error { return s.modRollbackLatestCode(reason) })
+ 	bc.SetEventObserver(s.observeCoreEvent)
+ 	if cfg, err := config.Load(); err == nil {
+ 		bc.SetDisplayCurrency(cfg.ExplicitDisplayCurrency())
+@@ -537,6 +551,10 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("GET /mod/quality", s.modQualityGet)
+ 	mux.HandleFunc("GET /mod/router", s.modRouterGet)
+ 	mux.HandleFunc("POST /mod/router/reset", s.modRouterReset)
++	mux.HandleFunc("GET /mod/cycle", s.modCycleGet)
++	mux.HandleFunc("POST /mod/cycle/reset", s.modCycleReset)
++	mux.HandleFunc("GET /mod/recovery", s.modRecoveryGet)
++	mux.HandleFunc("POST /mod/recovery/rollback-last", s.modRecoveryRollbackLast)
+ 	mux.HandleFunc("GET /mod/events", s.modEvents)
+ 	mux.HandleFunc("GET /sessions", s.sessions)
+ 	mux.HandleFunc("GET /skills", s.skills)
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index f22b982..4f7dbe5 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,22 +5,34 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/10] Unit tests: Balance Mod core + APK bridge"
++echo "[1/13] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/10] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++echo "[2/13] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
+ 
+-echo "[3/10] Failure cache: verified-only persistence + corruption recovery"
++echo "[3/13] Failure cache: verified-only persistence + corruption recovery"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
+ 
+-echo "[4/10] Context/patch economy: log reducer + patch governor"
++echo "[4/13] Context/patch economy: log reducer + patch governor"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
+ 
+-echo "[5/10] Native Reasonix completion gate regression test"
++echo "[5/13] Unified repair cycle: verifier -> router -> cache"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestVerificationReceiptRequiresHostEvidence|TestRepairCycleFlashFlashProFlashAndVerifiedCache)$' -count=1
++
++echo "[6/13] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleDrivenByOfflineMockProvider$' -count=1
++
++echo "[7/13] Recovery policy: regression/oversize rollback + fail-closed conflict"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleRollback' -count=1
++
++echo "[8/13] APK cycle/recovery API integration"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModCycleAPIAndHostRepairWiring|TestModRecoveryAPIIsFailClosedWithoutCheckpoint)$' -count=1
++
++echo "[9/13] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[6/10] Build CLI only (skip example plugin)"
++echo "[10/13] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -46,7 +58,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[7/10] Offline normal tool-loop"
++echo "[11/13] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+@@ -73,7 +85,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[8/10] Offline anti-loop intervention"
++echo "[12/13] Offline anti-loop intervention"
+ LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+@@ -81,13 +93,9 @@ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+   exit 1
+ fi
+ 
+-echo "[9/10] v0.3 efficiency layer passed"
+-echo "  - objective router: PASS"
+-echo "  - verified failure cache: PASS"
+-echo "  - log reducer: PASS"
+-echo "  - patch governor: PASS"
+-echo "  - APK router surface: PASS"
+-echo "  - native anti-loop/completion gate: PASS"
+-
+-echo "[10/10] PASS — no provider API key/network was used"
+-echo "BALANCE_MOD_V03_SMOKE_PASS"
++echo "[13/13] PASS — no provider API key/network was used"
++echo "  - v0.1 KZT budget/resource telemetry: PASS"
++echo "  - v0.2 native anti-loop/completion telemetry: PASS"
++echo "  - v0.3 router/cache/log/patch modules: PASS"
++echo "  - v0.4 unified repair cycle + native rollback adapter: PASS"
++echo "BALANCE_MOD_V04_SMOKE_PASS"

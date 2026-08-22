@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "revision": 2,
+  "revision_known": true,
+  "content_digest": "6a481353fa52479f73dfd39aa211592584337feef56d8924f1e943225a9f2f0f",
+  "transcript_size": 20269,
+  "message_count": 5,
+  "authored_turns": 2,
+  "entries": [
+    {
+      "index": 0,
+      "offset": 0,
+      "length": 19027,
+      "role": "system",
+      "authored_turn": 0
+    },
+    {
+      "index": 1,
+      "offset": 19027,
+      "length": 798,
+      "role": "user",
+      "authored_turn": 1,
+      "starts_turn": true
+    },
+    {
+      "index": 2,
+      "offset": 19825,
+      "length": 166,
+      "role": "tool",
+      "authored_turn": 1,
+      "local_only": true,
+      "tool_result": true
+    },
+    {
+      "index": 3,
+      "offset": 19991,
+      "length": 112,
+      "role": "user",
+      "authored_turn": 2,
+      "starts_turn": true
+    },
+    {
+      "index": 4,
+      "offset": 20103,
+      "length": 166,
+      "role": "tool",
+      "authored_turn": 2,
+      "local_only": true,
+      "tool_result": true
+    }
+  ],
+  "updated_at": "2026-08-18T14:41:09.546664048Z"
+}

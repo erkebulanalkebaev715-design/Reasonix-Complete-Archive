@@ -1,0 +1,1608 @@
+diff --git a/cmd/reasonix/main.go b/cmd/reasonix/main.go
+index 14ee0fe..343cb0e 100644
+--- a/cmd/reasonix/main.go
++++ b/cmd/reasonix/main.go
+@@ -11,6 +11,7 @@ import (
+ 
+ 	// Blank imports wire compile-time built-ins into their registries.
+ 	_ "reasonix/internal/provider/anthropic"
++	_ "reasonix/internal/provider/mock"
+ 	_ "reasonix/internal/provider/openai"
+ 	_ "reasonix/internal/provider/responses"
+ 	_ "reasonix/internal/tool/builtin"
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+new file mode 100644
+index 0000000..9547b0c
+--- /dev/null
++++ b/docs/BALANCE_MOD.md
+@@ -0,0 +1,158 @@
++# Balance Mod
++
++Goal: maximize verified coding result per unit of model spend, token budget,
++wall time, and Android device resources. The mod must prefer deterministic local
++work and DeepSeek Flash, and escalate only when host-observed evidence proves the
++cheaper path is not progressing.
++
++## Non-negotiable development rule
++
++No real provider key is needed during mod development. The first real DeepSeek
++call happens only after the offline prototype and its mock scenarios pass.
++
++## What upstream Reasonix already owns
++
++Do not duplicate these systems:
++
++- `control.Controller`: one orchestration layer behind CLI, HTTP/SSE and desktop.
++- `recovery.Gate`: repeated-operation / episode failure budgets and recovery.
++- `evidence`: progress signatures, delivery evidence, readiness/finalization gates.
++- `checkpoint`: snapshots, rewind and recovery primitives.
++- Context Engine: cache-stable prefix, compaction and bounded tool output.
++- billing: fixed-point money and host-generated `CostQuote`.
++- task budget: post-round cost/time/token ceilings.
++- CodeGraph / project analysis used by the existing agent.
++
++Balance Mod extends these seams rather than implementing parallel copies.
++
++## Mod sections
++
++### 1. APK control and telemetry bridge — v0.1 in progress
++
++Namespace: `/mod/*` on existing `reasonix serve`.
++
++- `GET /mod/status`
++- `GET /mod/budget`
++- `POST /mod/budget`
++- `POST /mod/budget/reset`
++- `GET /mod/resources`
++- `GET /mod/events` (typed SSE, content-free)
++
++The Android UI must consume JSON/SSE state, never parse terminal output.
++
++### 2. KZT Money Governor — v0.1 foundation
++
++APK policy:
++
++- total task/session budget in KZT
++- reserve percentage for final verification/repair
++- maximum Pro share
++- hard-stop toggle
++- explicit FX conversion map (no hard-coded exchange rate)
++
++Accounting reuses `billing.Amount` fixed-point arithmetic. Usage is observed from
++host-generated `CostQuote`; the mod does not reprice provider tokens itself.
++The existing Reasonix task-cost budget is reused as a second post-round stop
++when the active billing currency can be converted from the configured KZT cap.
++
++A strict pre-call admission gate is intentionally not claimed in v0.1; it needs
++to live at provider-call/router admission, where a conservative next-call cost
++can be bounded before network spend occurs.
++
++### 3. Power / model router — next
++
++Target state machine:
++
++`Flash A -> verify -> Flash B (different strategy) -> verify -> Pro diagnosis -> Flash repair`
++
++Pro is a bounded diagnostician, not the default executor. Escalation is based on
++host-observed failures/progress, not on a model requesting a stronger model.
++
++### 4. Anti-loop extension — next
++
++Reuse `recovery.Gate`, evidence progress signatures and existing repeat-failure
++state. Add strategy diversity / state fingerprinting only where upstream does
++not already distinguish genuine progress.
++
++### 5. Verification extension — next
++
++Reuse evidence/readiness/completion receipts. Add deterministic build/test/lint
++policies and APK-visible verifier status. `DONE` remains a host decision backed
++by evidence, never a model assertion.
++
++### 6. Context-cost extensions — next
++
++- compiler/build log root-cause reducer; full logs remain local
++- diff/relevant-line projection
++- impact-test selection using existing graph/project information
++
++### 7. Repair / recovery extensions — next
++
++- dynamic patch governor
++- deterministic-fix whitelist with checkpoint-before-mutation
++- automatic rollback on measurable regression
++- persistent proven-failure cache keyed by environment + error + affected state
++
++### 8. Mobile resource governor — v0.1 telemetry foundation
++
++Linux/PRoot reads only available host facts:
++
++- `/proc/meminfo`
++- `/proc/loadavg`
++- accessible `/sys/class/thermal/*`
++- filesystem free/total space
++
++If Android/PRoot hides thermal sensors, temperature remains absent instead of
++being guessed. Later policy will serialize heavy local builds/tests when memory,
++load, storage or available thermal data says the phone is under pressure.
++
++## APK contract
++
++Example budget request:
++
++```json
++{
++  "budgetKzt": 1000,
++  "reservePercent": 15,
++  "proMaxPercent": 25,
++  "hardStop": true,
++  "fxKztPerUnit": {"USD": 500}
++}
++```
++
++The FX value above is only an example/test fixture. Production must use an
++explicit current rate supplied by the user/UI or a later trusted rate source.
++
++Typed mod events include:
++
++- `budget.configured`
++- `budget.updated`
++- `budget.reserve_entered`
++- `budget.pro_limit_reached`
++- `budget.exhausted`
++- `budget.reset`
++- `resource.snapshot`
++
++Future phases add `loop.detected`, `strategy.changed`, `model.escalated`,
++`verifier.*`, `rollback.*` and `task.done` without changing the APK transport.
++
++## Offline mock provider
++
++The CLI binary registers `kind = "mock"`. It performs no network access and
++needs no API key. A project can temporarily select it for offline validation:
++
++```toml
++default_model = "balance-mock"
++
++[[providers]]
++name = "balance-mock"
++kind = "mock"
++model = "smoke"
++base_url = "http://127.0.0.1"
++context_window = 1000000
++price = { cache_hit = 0, input = 0, output = 0, currency = "KZT" }
++```
++
++`smoke` deterministically asks Reasonix to `read_file`, then `grep`, then emits
++`OFFLINE_MOCK_PASS`. `repeat-failure` repeatedly requests a missing read so the
++existing recovery/anti-loop path can be tested without spending tokens.
+diff --git a/internal/agent/run_budget.go b/internal/agent/run_budget.go
+index 48490ff..fc82457 100644
+--- a/internal/agent/run_budget.go
++++ b/internal/agent/run_budget.go
+@@ -167,3 +167,17 @@ func taskBudgetFromContext(ctx context.Context) (TaskBudget, bool) {
+ 	b, ok := ctx.Value(taskBudgetContextKey{}).(TaskBudget)
+ 	return b, ok
+ }
++
++// SetTaskCostBudget updates the configured cost ceiling for subsequent Runs.
++// The host must call it only while this Agent is idle; Controller enforces that
++// boundary for HTTP/APK callers. Existing task usage is preserved so lowering a
++// budget never erases already-spent cost.
++func (a *Agent) SetTaskCostBudget(cost float64) {
++	if a == nil {
++		return
++	}
++	if cost < 0 {
++		cost = 0
++	}
++	a.task.budget.limit.Cost = cost
++}
+diff --git a/internal/control/task_budget_setter.go b/internal/control/task_budget_setter.go
+new file mode 100644
+index 0000000..f160927
+--- /dev/null
++++ b/internal/control/task_budget_setter.go
+@@ -0,0 +1,28 @@
++package control
++
++import "fmt"
++
++// SetTaskCostBudget updates the cost ceiling used by subsequent turns. It is
++// intentionally not part of SessionAPI: the Balance mod reaches it through an
++// optional capability so other frontends/fakes stay source-compatible.
++//
++// The update is idle-only. This prevents a UI slider from moving the spend
++// boundary under an in-flight provider request.
++func (c *Controller) SetTaskCostBudget(cost float64) error {
++	if c == nil {
++		return fmt.Errorf("controller is nil")
++	}
++	if cost < 0 {
++		cost = 0
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.running || c.finishing {
++		return ErrTurnRunning
++	}
++	c.taskBudget.Cost = cost
++	if c.executor != nil {
++		c.executor.SetTaskCostBudget(cost)
++	}
++	return nil
++}
+diff --git a/internal/efficiency/budget.go b/internal/efficiency/budget.go
+new file mode 100644
+index 0000000..0c78589
+--- /dev/null
++++ b/internal/efficiency/budget.go
+@@ -0,0 +1,300 @@
++package efficiency
++
++import (
++	"fmt"
++	"math"
++	"strings"
++	"sync"
++
++	"reasonix/internal/billing"
++)
++
++// BudgetConfig is the APK-facing budget policy. BudgetKZT is the user's hard
++// task/session envelope in tenge. FXKZTPerUnit maps a provider billing currency
++// (USD, CNY, ...) to KZT per one unit of that currency.
++type BudgetConfig struct {
++	BudgetKZT      float64            `json:"budgetKzt"`
++	ReservePercent int                `json:"reservePercent"`
++	ProMaxPercent  int                `json:"proMaxPercent"`
++	HardStop       bool               `json:"hardStop"`
++	FXKZTPerUnit   map[string]float64 `json:"fxKztPerUnit,omitempty"`
++}
++
++// BudgetSnapshot is content-free runtime telemetry suitable for the APK.
++type BudgetSnapshot struct {
++	Enabled         bool               `json:"enabled"`
++	BudgetKZT       float64            `json:"budgetKzt"`
++	SpentKZT        float64            `json:"spentKzt"`
++	RemainingKZT    float64            `json:"remainingKzt"`
++	ReserveKZT      float64            `json:"reserveKzt"`
++	RegularLimitKZT float64            `json:"regularLimitKzt"`
++	ProSpentKZT     float64            `json:"proSpentKzt"`
++	ProLimitKZT     float64            `json:"proLimitKzt"`
++	ReservePercent  int                `json:"reservePercent"`
++	ProMaxPercent   int                `json:"proMaxPercent"`
++	HardStop        bool               `json:"hardStop"`
++	Exhausted       bool               `json:"exhausted"`
++	ProLimitReached bool               `json:"proLimitReached"`
++	UnpricedCalls   int                `json:"unpricedCalls"`
++	FXKZTPerUnit    map[string]float64 `json:"fxKztPerUnit,omitempty"`
++	Enforcement     string             `json:"enforcement"`
++}
++
++// Governor owns the user-visible KZT budget. It intentionally does not own
++// model routing: routing consults Snapshot/CanSpend so the budget remains the
++// single source of truth while the router stays replaceable.
++type Governor struct {
++	mu sync.Mutex
++
++	cfg BudgetConfig
++
++	spent    billing.Amount // KZT
++	proSpent billing.Amount // KZT
++	unpriced int
++}
++
++// DefaultBudgetConfig returns the APK policy defaults. Decode JSON on top of
++// this value when omitted fields should keep the defaults.
++func DefaultBudgetConfig() BudgetConfig {
++	return BudgetConfig{ReservePercent: 15, ProMaxPercent: 25, HardStop: true}
++}
++
++func NewGovernor() *Governor {
++	g := &Governor{}
++	g.cfg = normalizeConfig(DefaultBudgetConfig())
++	return g
++}
++
++func normalizeConfig(c BudgetConfig) BudgetConfig {
++	if math.IsNaN(c.BudgetKZT) || math.IsInf(c.BudgetKZT, 0) || c.BudgetKZT < 0 {
++		c.BudgetKZT = 0
++	}
++	if c.ReservePercent < 0 {
++		c.ReservePercent = 0
++	}
++	if c.ReservePercent > 80 {
++		c.ReservePercent = 80
++	}
++	if c.ProMaxPercent < 0 {
++		c.ProMaxPercent = 0
++	}
++	if c.ProMaxPercent > 100 {
++		c.ProMaxPercent = 100
++	}
++	clean := make(map[string]float64, len(c.FXKZTPerUnit))
++	for cur, rate := range c.FXKZTPerUnit {
++		cur = billing.NormalizeCurrency(cur)
++		if cur == "KZT" {
++			clean[cur] = 1
++			continue
++		}
++		if cur == "" || rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
++			continue
++		}
++		clean[cur] = rate
++	}
++	if c.BudgetKZT > 0 && clean["KZT"] == 0 {
++		clean["KZT"] = 1
++	}
++	c.FXKZTPerUnit = clean
++	return c
++}
++
++// Configure replaces policy and starts a fresh budget ledger. The HTTP layer
++// only calls this while the controller is idle, so a budget cannot move under
++// an in-flight model request.
++func (g *Governor) Configure(c BudgetConfig) BudgetSnapshot {
++	if g == nil {
++		return BudgetSnapshot{}
++	}
++	c = normalizeConfig(c)
++	g.mu.Lock()
++	g.cfg = c
++	g.spent = billing.Zero
++	g.proSpent = billing.Zero
++	g.unpriced = 0
++	snap := g.snapshotLocked()
++	g.mu.Unlock()
++	return snap
++}
++
++// ResetSpend preserves policy and clears only runtime usage.
++func (g *Governor) ResetSpend() BudgetSnapshot {
++	if g == nil {
++		return BudgetSnapshot{}
++	}
++	g.mu.Lock()
++	g.spent = billing.Zero
++	g.proSpent = billing.Zero
++	g.unpriced = 0
++	snap := g.snapshotLocked()
++	g.mu.Unlock()
++	return snap
++}
++
++// ObserveQuote accounts one host-generated usage quote. Individual Usage
++// events are consumed exactly once by the serve broadcaster, so this is an
++// additive ledger rather than a sample/max accumulator.
++func (g *Governor) ObserveQuote(q *billing.CostQuote, modelRef string) BudgetSnapshot {
++	if g == nil {
++		return BudgetSnapshot{}
++	}
++	g.mu.Lock()
++	defer g.mu.Unlock()
++	if q == nil || !q.CostComplete {
++		g.unpriced++
++		return g.snapshotLocked()
++	}
++	money := q.Original
++	cur := billing.NormalizeCurrency(money.Currency)
++	rate := g.cfg.FXKZTPerUnit[cur]
++	if cur == "KZT" && rate == 0 {
++		rate = 1
++	}
++	if rate <= 0 {
++		g.unpriced++
++		return g.snapshotLocked()
++	}
++	amount := money.AmountValue()
++	kzt := amount.MulRate(rate)
++	if kzt < 0 {
++		kzt = 0
++	}
++	g.spent = g.spent.Add(kzt)
++	if isProModel(modelRef, q.ModelRef) {
++		g.proSpent = g.proSpent.Add(kzt)
++	}
++	return g.snapshotLocked()
++}
++
++func isProModel(refs ...string) bool {
++	for _, ref := range refs {
++		ref = strings.ToLower(strings.TrimSpace(ref))
++		if strings.Contains(ref, "deepseek-pro") || strings.Contains(ref, "v4-pro") || strings.HasSuffix(ref, "/pro") {
++			return true
++		}
++	}
++	return false
++}
++
++// CanSpend is the future pre-call gate used by the Flash/Pro router. estimatedKZT
++// is a conservative upper estimate for the next provider call. finalization may
++// spend the reserved tail; ordinary work may not.
++func (g *Governor) CanSpend(modelClass string, estimatedKZT float64, finalization bool) (bool, string) {
++	if g == nil {
++		return true, ""
++	}
++	g.mu.Lock()
++	defer g.mu.Unlock()
++	if g.cfg.BudgetKZT <= 0 || !g.cfg.HardStop {
++		return true, ""
++	}
++	if estimatedKZT < 0 || math.IsNaN(estimatedKZT) || math.IsInf(estimatedKZT, 0) {
++		estimatedKZT = 0
++	}
++	total := billing.NewAmountFromFloat(g.cfg.BudgetKZT)
++	reserve := total.MulRate(float64(g.cfg.ReservePercent) / 100)
++	ceiling := total
++	if !finalization {
++		ceiling = total.Add(-reserve)
++	}
++	next := g.spent.Add(billing.NewAmountFromFloat(estimatedKZT))
++	if next > ceiling {
++		if finalization {
++			return false, "task budget would be exceeded"
++		}
++		return false, "regular budget is exhausted; reserved budget is kept for final verification/fix"
++	}
++	if strings.EqualFold(strings.TrimSpace(modelClass), "pro") && g.cfg.ProMaxPercent > 0 {
++		proLimit := total.MulRate(float64(g.cfg.ProMaxPercent) / 100)
++		if g.proSpent.Add(billing.NewAmountFromFloat(estimatedKZT)) > proLimit {
++			return false, "Pro budget cap would be exceeded"
++		}
++	}
++	return true, ""
++}
++
++func (g *Governor) Snapshot() BudgetSnapshot {
++	if g == nil {
++		return BudgetSnapshot{}
++	}
++	g.mu.Lock()
++	snap := g.snapshotLocked()
++	g.mu.Unlock()
++	return snap
++}
++
++func (g *Governor) snapshotLocked() BudgetSnapshot {
++	total := billing.NewAmountFromFloat(g.cfg.BudgetKZT)
++	reserve := total.MulRate(float64(g.cfg.ReservePercent) / 100)
++	regular := total.Add(-reserve)
++	proLimit := total.MulRate(float64(g.cfg.ProMaxPercent) / 100)
++	remaining := total.Add(-g.spent)
++	if remaining < 0 {
++		remaining = 0
++	}
++	enabled := g.cfg.BudgetKZT > 0
++	fx := make(map[string]float64, len(g.cfg.FXKZTPerUnit))
++	for k, v := range g.cfg.FXKZTPerUnit {
++		fx[k] = v
++	}
++	return BudgetSnapshot{
++		Enabled:         enabled,
++		BudgetKZT:       total.Float64(),
++		SpentKZT:        g.spent.Float64(),
++		RemainingKZT:    remaining.Float64(),
++		ReserveKZT:      reserve.Float64(),
++		RegularLimitKZT: regular.Float64(),
++		ProSpentKZT:     g.proSpent.Float64(),
++		ProLimitKZT:     proLimit.Float64(),
++		ReservePercent:  g.cfg.ReservePercent,
++		ProMaxPercent:   g.cfg.ProMaxPercent,
++		HardStop:        g.cfg.HardStop,
++		Exhausted:       enabled && g.spent >= total,
++		ProLimitReached: enabled && g.cfg.ProMaxPercent > 0 && g.proSpent >= proLimit,
++		UnpricedCalls:   g.unpriced,
++		FXKZTPerUnit:    fx,
++		Enforcement:     "post-round-v0.1",
++	}
++}
++
++// ProviderBudget converts a KZT hard ceiling to the active provider price-book
++// currency so Reasonix's existing TaskCostBudget can act as a second stop layer.
++// It returns ok=false when the conversion is unknown.
++func (g *Governor) ProviderBudget(currency string) (value float64, ok bool) {
++	if g == nil {
++		return 0, false
++	}
++	g.mu.Lock()
++	defer g.mu.Unlock()
++	if g.cfg.BudgetKZT <= 0 {
++		return 0, true
++	}
++	cur := billing.NormalizeCurrency(currency)
++	rate := g.cfg.FXKZTPerUnit[cur]
++	if cur == "KZT" && rate == 0 {
++		rate = 1
++	}
++	if rate <= 0 {
++		return 0, false
++	}
++	return g.cfg.BudgetKZT / rate, true
++}
++
++func ValidateConfig(c BudgetConfig) error {
++	if c.BudgetKZT < 0 || math.IsNaN(c.BudgetKZT) || math.IsInf(c.BudgetKZT, 0) {
++		return fmt.Errorf("budgetKzt must be a finite non-negative number")
++	}
++	if c.ReservePercent < 0 || c.ReservePercent > 80 {
++		return fmt.Errorf("reservePercent must be between 0 and 80")
++	}
++	if c.ProMaxPercent < 0 || c.ProMaxPercent > 100 {
++		return fmt.Errorf("proMaxPercent must be between 0 and 100")
++	}
++	for cur, rate := range c.FXKZTPerUnit {
++		if strings.TrimSpace(cur) == "" || rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
++			return fmt.Errorf("fxKztPerUnit contains an invalid rate for %q", cur)
++		}
++	}
++	return nil
++}
+diff --git a/internal/efficiency/budget_test.go b/internal/efficiency/budget_test.go
+new file mode 100644
+index 0000000..fca3095
+--- /dev/null
++++ b/internal/efficiency/budget_test.go
+@@ -0,0 +1,61 @@
++package efficiency
++
++import (
++	"testing"
++
++	"reasonix/internal/billing"
++)
++
++func quote(amount, currency, model string) *billing.CostQuote {
++	return &billing.CostQuote{
++		Original:     billing.Money{Amount: amount, Currency: currency},
++		CostComplete: true,
++		ModelRef:     model,
++	}
++}
++
++func TestBudgetGovernorAccountsKZTAndPro(t *testing.T) {
++	g := NewGovernor()
++	g.Configure(BudgetConfig{
++		BudgetKZT: 1000, ReservePercent: 15, ProMaxPercent: 25, HardStop: true,
++		FXKZTPerUnit: map[string]float64{"USD": 500},
++	})
++	g.ObserveQuote(quote("0.10", "USD", "deepseek-flash/deepseek-v4-flash"), "")
++	g.ObserveQuote(quote("0.20", "USD", "deepseek-pro/deepseek-v4-pro"), "")
++	got := g.Snapshot()
++	if got.SpentKZT != 150 || got.ProSpentKZT != 100 || got.RemainingKZT != 850 {
++		t.Fatalf("snapshot = %+v", got)
++	}
++	if got.ReserveKZT != 150 || got.RegularLimitKZT != 850 || got.ProLimitKZT != 250 {
++		t.Fatalf("limits = %+v", got)
++	}
++}
++
++func TestBudgetGovernorReserveAndProGate(t *testing.T) {
++	g := NewGovernor()
++	g.Configure(BudgetConfig{
++		BudgetKZT: 1000, ReservePercent: 15, ProMaxPercent: 25, HardStop: true,
++		FXKZTPerUnit: map[string]float64{"USD": 500},
++	})
++	g.ObserveQuote(quote("1.60", "USD", "deepseek-flash/deepseek-v4-flash"), "") // 800 KZT
++	if ok, _ := g.CanSpend("flash", 60, false); ok {
++		t.Fatal("ordinary work crossed the 850 KZT regular ceiling")
++	}
++	if ok, _ := g.CanSpend("flash", 60, true); !ok {
++		t.Fatal("finalization should be allowed to use reserve")
++	}
++	g.ResetSpend()
++	g.ObserveQuote(quote("0.48", "USD", "deepseek-pro/deepseek-v4-pro"), "") // 240 KZT
++	if ok, _ := g.CanSpend("pro", 20, false); ok {
++		t.Fatal("Pro cap should reject 240+20 > 250 KZT")
++	}
++}
++
++func TestProviderBudgetConversion(t *testing.T) {
++	g := NewGovernor()
++	g.Configure(BudgetConfig{BudgetKZT: 1000, FXKZTPerUnit: map[string]float64{"USD": 500}})
++	got, ok := g.ProviderBudget("USD")
++	if !ok || got != 2 {
++		t.Fatalf("provider budget = %v ok=%v, want 2 USD", got, ok)
++	}
++}
+diff --git a/internal/efficiency/resource_linux.go b/internal/efficiency/resource_linux.go
+new file mode 100644
+index 0000000..4fc54b1
+--- /dev/null
++++ b/internal/efficiency/resource_linux.go
+@@ -0,0 +1,90 @@
++//go:build linux
++
++package efficiency
++
++import (
++	"bufio"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"syscall"
++)
++
++type ResourceSnapshot struct {
++	MemoryTotalBytes     uint64   `json:"memoryTotalBytes"`
++	MemoryAvailableBytes uint64   `json:"memoryAvailableBytes"`
++	Load1                float64  `json:"load1"`
++	ThermalC             *float64 `json:"thermalC,omitempty"`
++	StorageFreeBytes     uint64   `json:"storageFreeBytes"`
++	StorageTotalBytes    uint64   `json:"storageTotalBytes"`
++}
++
++func ReadResources(path string) ResourceSnapshot {
++	var out ResourceSnapshot
++	if f, err := os.Open("/proc/meminfo"); err == nil {
++		scanner := bufio.NewScanner(f)
++		for scanner.Scan() {
++			fields := strings.Fields(scanner.Text())
++			if len(fields) < 2 {
++				continue
++			}
++			kb, _ := strconv.ParseUint(fields[1], 10, 64)
++			switch strings.TrimSuffix(fields[0], ":") {
++			case "MemTotal":
++				out.MemoryTotalBytes = kb * 1024
++			case "MemAvailable":
++				out.MemoryAvailableBytes = kb * 1024
++			}
++		}
++		_ = f.Close()
++	}
++	if b, err := os.ReadFile("/proc/loadavg"); err == nil {
++		fields := strings.Fields(string(b))
++		if len(fields) > 0 {
++			out.Load1, _ = strconv.ParseFloat(fields[0], 64)
++		}
++	}
++	if matches, _ := filepath.Glob("/sys/class/thermal/thermal_zone*/temp"); len(matches) > 0 {
++		var maxC float64
++		found := false
++		for _, p := range matches {
++			b, err := os.ReadFile(p)
++			if err != nil {
++				continue
++			}
++			raw, err := strconv.ParseFloat(strings.TrimSpace(string(b)), 64)
++			if err != nil {
++				continue
++			}
++			c := raw
++			if raw > 1000 {
++				c = raw / 1000
++			}
++			if c > -50 && c < 200 && (!found || c > maxC) {
++				maxC = c
++				found = true
++			}
++		}
++		if found {
++			out.ThermalC = &maxC
++		}
++	}
++	if strings.TrimSpace(path) == "" {
++		path = "."
++	}
++	var st syscall.Statfs_t
++	if err := syscall.Statfs(path, &st); err == nil {
++		out.StorageTotalBytes = st.Blocks * uint64(st.Bsize)
++		out.StorageFreeBytes = st.Bavail * uint64(st.Bsize)
++	}
++	return out
++}
++
++func (r ResourceSnapshot) Validate() error {
++	if r.MemoryTotalBytes > 0 && r.MemoryAvailableBytes > r.MemoryTotalBytes {
++		return fmt.Errorf("available memory exceeds total memory")
++	}
++	return nil
++}
+diff --git a/internal/efficiency/resource_other.go b/internal/efficiency/resource_other.go
+new file mode 100644
+index 0000000..6e4a4dd
+--- /dev/null
++++ b/internal/efficiency/resource_other.go
+@@ -0,0 +1,15 @@
++//go:build !linux
++
++package efficiency
++
++type ResourceSnapshot struct {
++	MemoryTotalBytes     uint64   `json:"memoryTotalBytes"`
++	MemoryAvailableBytes uint64   `json:"memoryAvailableBytes"`
++	Load1                float64  `json:"load1"`
++	ThermalC             *float64 `json:"thermalC,omitempty"`
++	StorageFreeBytes     uint64   `json:"storageFreeBytes"`
++	StorageTotalBytes    uint64   `json:"storageTotalBytes"`
++}
++
++func ReadResources(string) ResourceSnapshot { return ResourceSnapshot{} }
++func (ResourceSnapshot) Validate() error    { return nil }
+diff --git a/internal/provider/mock/mock.go b/internal/provider/mock/mock.go
+new file mode 100644
+index 0000000..b61fc59
+--- /dev/null
++++ b/internal/provider/mock/mock.go
+@@ -0,0 +1,183 @@
++// Package mock provides a deterministic, offline provider used to validate the
++// Balance Mod and Reasonix's tool loop without an API key or network access.
++package mock
++
++import (
++	"context"
++	"fmt"
++	"strings"
++
++	"reasonix/internal/provider"
++)
++
++const Kind = "mock"
++
++type mockProvider struct {
++	name     string
++	scenario string
++	path     string
++}
++
++func init() {
++	provider.Register(Kind, New)
++}
++
++// New builds an offline mock provider. Supported Extra fields:
++//
++//	scenario: smoke (default) | repeat-failure | text
++//	path: file used by smoke/repeat-failure (default hello.py)
++func New(cfg provider.Config) (provider.Provider, error) {
++	scenario := extraString(cfg.Extra, "scenario")
++	if scenario == "" {
++		candidate := strings.ToLower(strings.TrimSpace(cfg.Model))
++		switch candidate {
++		case "smoke", "repeat-failure", "text":
++			scenario = candidate
++		default:
++			scenario = "smoke"
++		}
++	}
++	switch scenario {
++	case "smoke", "repeat-failure", "text":
++	default:
++		return nil, fmt.Errorf("mock provider: unknown scenario %q", scenario)
++	}
++	path := extraString(cfg.Extra, "path")
++	if path == "" {
++		if body, ok := cfg.Extra["extra_body"].(map[string]any); ok {
++			if v, ok := body["mock_path"].(string); ok {
++				path = strings.TrimSpace(v)
++			}
++		}
++	}
++	if path == "" {
++		path = "hello.py"
++	}
++	name := strings.TrimSpace(cfg.Name)
++	if name == "" {
++		name = "balance-mock"
++	}
++	return &mockProvider{name: name, scenario: scenario, path: path}, nil
++}
++
++func (p *mockProvider) Name() string { return p.name }
++
++func (p *mockProvider) Stream(ctx context.Context, req provider.Request) (<-chan provider.Chunk, error) {
++	ch := make(chan provider.Chunk, 4)
++	go func() {
++		defer close(ch)
++		emit := func(c provider.Chunk) bool {
++			select {
++			case ch <- c:
++				return true
++			case <-ctx.Done():
++				return false
++			}
++		}
++
++		toolResults := countToolResults(req.Messages)
++		calledTool := false
++		switch p.scenario {
++		case "repeat-failure":
++			path := p.path
++			if path == "hello.py" {
++				path = "__balance_mod_missing__.txt"
++			}
++			if hasTool(req.Tools, "read_file") {
++				if !emit(provider.Chunk{Type: provider.ChunkToolCall, ToolCall: &provider.ToolCall{
++					ID:        fmt.Sprintf("mock-read-fail-%d", toolResults+1),
++					Name:      "read_file",
++					Arguments: fmt.Sprintf(`{"path":%q}`, path),
++				}}) {
++					return
++				}
++				calledTool = true
++			} else {
++				if !emit(provider.Chunk{Type: provider.ChunkText, Text: "MOCK_NO_READ_FILE_TOOL"}) {
++					return
++				}
++			}
++		case "text":
++			if !emit(provider.Chunk{Type: provider.ChunkText, Text: "OFFLINE_MOCK_TEXT_PASS"}) {
++				return
++			}
++		default: // smoke
++			switch toolResults {
++			case 0:
++				if hasTool(req.Tools, "read_file") {
++					if !emit(provider.Chunk{Type: provider.ChunkToolCall, ToolCall: &provider.ToolCall{
++						ID:        "mock-read-1",
++						Name:      "read_file",
++						Arguments: fmt.Sprintf(`{"path":%q}`, p.path),
++					}}) {
++						return
++					}
++					calledTool = true
++				} else if !emit(provider.Chunk{Type: provider.ChunkText, Text: "MOCK_NO_READ_FILE_TOOL"}) {
++					return
++				}
++			case 1:
++				if hasTool(req.Tools, "grep") {
++					if !emit(provider.Chunk{Type: provider.ChunkToolCall, ToolCall: &provider.ToolCall{
++						ID:        "mock-grep-2",
++						Name:      "grep",
++						Arguments: fmt.Sprintf(`{"pattern":"TEST OK","path":%q}`, p.path),
++					}}) {
++						return
++					}
++					calledTool = true
++				} else if !emit(provider.Chunk{Type: provider.ChunkText, Text: "MOCK_NO_GREP_TOOL"}) {
++					return
++				}
++			default:
++				if !emit(provider.Chunk{Type: provider.ChunkText, Text: "OFFLINE_MOCK_PASS"}) {
++					return
++				}
++			}
++		}
++
++		finishReason := "stop"
++		if calledTool {
++			finishReason = "tool_calls"
++		}
++		if !emit(provider.Chunk{Type: provider.ChunkUsage, Usage: &provider.Usage{
++			PromptTokens:     16,
++			CompletionTokens: 4,
++			TotalTokens:      20,
++			CacheMissTokens:  16,
++			FinishReason:     finishReason,
++			RequestCount:     1,
++		}}) {
++			return
++		}
++		emit(provider.Chunk{Type: provider.ChunkDone})
++	}()
++	return ch, nil
++}
++
++func countToolResults(messages []provider.Message) int {
++	n := 0
++	for _, m := range messages {
++		if m.Role == provider.RoleTool {
++			n++
++		}
++	}
++	return n
++}
++
++func hasTool(tools []provider.ToolSchema, name string) bool {
++	for _, t := range tools {
++		if t.Name == name {
++			return true
++		}
++	}
++	return false
++}
++
++func extraString(extra map[string]any, key string) string {
++	if extra == nil {
++		return ""
++	}
++	v, _ := extra[key].(string)
++	return strings.TrimSpace(v)
++}
+diff --git a/internal/provider/mock/mock_test.go b/internal/provider/mock/mock_test.go
+new file mode 100644
+index 0000000..19c5da8
+--- /dev/null
++++ b/internal/provider/mock/mock_test.go
+@@ -0,0 +1,52 @@
++package mock
++
++import (
++	"context"
++	"testing"
++
++	"reasonix/internal/provider"
++)
++
++func collect(t *testing.T, p provider.Provider, req provider.Request) []provider.Chunk {
++	t.Helper()
++	ch, err := p.Stream(context.Background(), req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var out []provider.Chunk
++	for c := range ch {
++		out = append(out, c)
++	}
++	return out
++}
++
++func TestSmokeScenarioAdvancesByToolResults(t *testing.T) {
++	p, err := New(provider.Config{Name: "mock", Extra: map[string]any{"scenario": "smoke", "path": "hello.py"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	tools := []provider.ToolSchema{{Name: "read_file"}, {Name: "grep"}}
++	first := collect(t, p, provider.Request{Tools: tools})
++	if len(first) == 0 || first[0].Type != provider.ChunkToolCall || first[0].ToolCall.Name != "read_file" {
++		t.Fatalf("first = %#v", first)
++	}
++	second := collect(t, p, provider.Request{Tools: tools, Messages: []provider.Message{{Role: provider.RoleTool}}})
++	if len(second) == 0 || second[0].Type != provider.ChunkToolCall || second[0].ToolCall.Name != "grep" {
++		t.Fatalf("second = %#v", second)
++	}
++	third := collect(t, p, provider.Request{Tools: tools, Messages: []provider.Message{{Role: provider.RoleTool}, {Role: provider.RoleTool}}})
++	if len(third) == 0 || third[0].Type != provider.ChunkText || third[0].Text != "OFFLINE_MOCK_PASS" {
++		t.Fatalf("third = %#v", third)
++	}
++}
++
++func TestRepeatFailureAlwaysRequestsMissingRead(t *testing.T) {
++	p, err := New(provider.Config{Name: "mock", Extra: map[string]any{"scenario": "repeat-failure"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	chunks := collect(t, p, provider.Request{Tools: []provider.ToolSchema{{Name: "read_file"}}, Messages: []provider.Message{{Role: provider.RoleTool}}})
++	if len(chunks) == 0 || chunks[0].ToolCall == nil || chunks[0].ToolCall.Name != "read_file" {
++		t.Fatalf("chunks = %#v", chunks)
++	}
++}
+diff --git a/internal/serve/broadcaster.go b/internal/serve/broadcaster.go
+index 3312673..dfada7b 100644
+--- a/internal/serve/broadcaster.go
++++ b/internal/serve/broadcaster.go
+@@ -20,6 +20,9 @@ type Broadcaster struct {
+ 	subs            map[chan []byte]struct{}
+ 	ledger          *billing.Ledger
+ 	displayCurrency string
++
++	observerMu sync.RWMutex
++	observer   func(event.Event)
+ }
+ 
+ // NewBroadcaster returns an empty Broadcaster ready to accept subscribers.
+@@ -39,6 +42,29 @@ func (b *Broadcaster) SetDisplayCurrency(currency string) {
+ 	b.mu.Unlock()
+ }
+ 
++// SetEventObserver installs one content-agnostic observer invoked after an
++// event has been accounted/fanned out. The observer is separate from SSE
++// subscribers so APK-side accounting can watch Usage without changing the core
++// event schema or feeding anything back into the agent.
++func (b *Broadcaster) SetEventObserver(fn func(event.Event)) {
++	if b == nil {
++		return
++	}
++	b.observerMu.Lock()
++	b.observer = fn
++	b.observerMu.Unlock()
++}
++
++func (b *Broadcaster) eventObserver() func(event.Event) {
++	if b == nil {
++		return nil
++	}
++	b.observerMu.RLock()
++	fn := b.observer
++	b.observerMu.RUnlock()
++	return fn
++}
++
+ // ResetSession clears the usage ledger for /new, /resume and /fork.
+ func (b *Broadcaster) ResetSession() {
+ 	if b == nil {
+@@ -71,7 +97,6 @@ func (b *Broadcaster) Emit(e event.Event) {
+ 		return
+ 	}
+ 	b.mu.Lock()
+-	defer b.mu.Unlock()
+ 	if e.Kind == event.Usage && e.Usage != nil && e.CostQuote != nil {
+ 		if b.ledger == nil {
+ 			b.ledger = billing.NewLedger()
+@@ -89,6 +114,13 @@ func (b *Broadcaster) Emit(e event.Event) {
+ 		default: // subscriber is behind; drop this frame for it
+ 		}
+ 	}
++	b.mu.Unlock()
++
++	// Run observers outside the broadcaster lock: observers may publish to a
++	// different stream or read session state and must never stall core SSE fanout.
++	if observe := b.eventObserver(); observe != nil {
++		observe(e)
++	}
+ }
+ 
+ // EmitTo delivers an event only to the supplied subscriber. It is used for
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+new file mode 100644
+index 0000000..b5ed5d9
+--- /dev/null
++++ b/internal/serve/mod_bridge.go
+@@ -0,0 +1,337 @@
++package serve
++
++import (
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"strings"
++	"sync"
++	"time"
++
++	"reasonix/internal/billing"
++	"reasonix/internal/config"
++	"reasonix/internal/efficiency"
++	"reasonix/internal/event"
++)
++
++const balanceModVersion = "balance-mod-v0.1"
++
++// modEvent is a small, content-free machine event intended for the future
++// Android client. Human logs stay on the ordinary Reasonix event stream; the
++// APK never needs to parse terminal text.
++type modEvent struct {
++	Type       string `json:"type"`
++	AtUnixMS   int64  `json:"atUnixMs"`
++	Sequence   uint64 `json:"sequence"`
++	Data       any    `json:"data,omitempty"`
++	ModVersion string `json:"modVersion"`
++}
++
++type modBroadcaster struct {
++	mu   sync.Mutex
++	subs map[chan []byte]struct{}
++	seq  uint64
++}
++
++func newModBroadcaster() *modBroadcaster {
++	return &modBroadcaster{subs: make(map[chan []byte]struct{})}
++}
++
++func (b *modBroadcaster) encode(kind string, data any) []byte {
++	if b == nil {
++		return nil
++	}
++	b.mu.Lock()
++	b.seq++
++	seq := b.seq
++	b.mu.Unlock()
++	payload, err := json.Marshal(modEvent{
++		Type:       kind,
++		AtUnixMS:   time.Now().UnixMilli(),
++		Sequence:   seq,
++		Data:       data,
++		ModVersion: balanceModVersion,
++	})
++	if err != nil {
++		return nil
++	}
++	return payload
++}
++
++func (b *modBroadcaster) Emit(kind string, data any) {
++	payload := b.encode(kind, data)
++	if len(payload) == 0 {
++		return
++	}
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	for ch := range b.subs {
++		select {
++		case ch <- payload:
++		default:
++		}
++	}
++}
++
++func (b *modBroadcaster) Subscribe() (<-chan []byte, func()) {
++	ch := make(chan []byte, 32)
++	b.mu.Lock()
++	b.subs[ch] = struct{}{}
++	b.mu.Unlock()
++	return ch, func() {
++		b.mu.Lock()
++		if _, ok := b.subs[ch]; ok {
++			delete(b.subs, ch)
++			close(ch)
++		}
++		b.mu.Unlock()
++	}
++}
++
++type modTaskCostGateStatus struct {
++	Applied       bool    `json:"applied"`
++	Currency      string  `json:"currency,omitempty"`
++	ProviderLimit float64 `json:"providerLimit,omitempty"`
++	Reason        string  `json:"reason,omitempty"`
++}
++
++type modStatusPayload struct {
++	ModVersion string                      `json:"modVersion"`
++	Running    bool                        `json:"running"`
++	ModelRef   string                      `json:"modelRef,omitempty"`
++	Budget     efficiency.BudgetSnapshot   `json:"budget"`
++	TaskGate   modTaskCostGateStatus       `json:"taskCostGate"`
++	Resources  efficiency.ResourceSnapshot `json:"resources"`
++	Features   map[string]string           `json:"features"`
++}
++
++type taskCostBudgetSetter interface {
++	SetTaskCostBudget(cost float64) error
++}
++
++func (s *Server) modWorkspacePath() string {
++	ctl := s.ctl()
++	if root := strings.TrimSpace(ctl.WorkspaceRoot()); root != "" {
++		return root
++	}
++	if dir := strings.TrimSpace(ctl.SessionDir()); dir != "" {
++		return dir
++	}
++	return "."
++}
++
++func (s *Server) modTaskGateSnapshot() modTaskCostGateStatus {
++	s.modMu.RLock()
++	defer s.modMu.RUnlock()
++	return s.modTaskGate
++}
++
++func (s *Server) setModTaskGate(v modTaskCostGateStatus) {
++	s.modMu.Lock()
++	s.modTaskGate = v
++	s.modMu.Unlock()
++}
++
++func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
++	ctl := s.ctl()
++	writeJSON(w, modStatusPayload{
++		ModVersion: balanceModVersion,
++		Running:    ctl.Running(),
++		ModelRef:   ctl.ModelRef(),
++		Budget:     s.modGov.Snapshot(),
++		TaskGate:   s.modTaskGateSnapshot(),
++		Resources:  efficiency.ReadResources(s.modWorkspacePath()),
++		Features: map[string]string{
++			"budget":        "post-round-gate-v0.1",
++			"apkBridge":     "http+sse-v0.1",
++			"resources":     "local-linux-v0.1",
++			"offlineApiKey": "not-required",
++		},
++	})
++}
++
++func (s *Server) modBudgetGet(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, map[string]any{
++		"budget":       s.modGov.Snapshot(),
++		"taskCostGate": s.modTaskGateSnapshot(),
++	})
++}
++
++func (s *Server) modBudgetSet(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot change budget while a turn is running", http.StatusConflict)
++		return
++	}
++	cfg := efficiency.DefaultBudgetConfig()
++	dec := json.NewDecoder(r.Body)
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&cfg); err != nil {
++		http.Error(w, "invalid budget config: "+err.Error(), http.StatusBadRequest)
++		return
++	}
++	if err := efficiency.ValidateConfig(cfg); err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++
++	snap := s.modGov.Configure(cfg)
++	gate := s.applyModTaskCostBudget()
++	s.modHub.Emit("budget.configured", map[string]any{"budget": snap, "taskCostGate": gate})
++	writeJSON(w, map[string]any{"budget": snap, "taskCostGate": gate})
++}
++
++func (s *Server) modBudgetReset(w http.ResponseWriter, _ *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot reset budget while a turn is running", http.StatusConflict)
++		return
++	}
++	snap := s.modGov.ResetSpend()
++	s.modHub.Emit("budget.reset", snap)
++	writeJSON(w, snap)
++}
++
++func (s *Server) modResources(w http.ResponseWriter, _ *http.Request) {
++	snap := efficiency.ReadResources(s.modWorkspacePath())
++	writeJSON(w, snap)
++}
++
++func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
++	flusher, ok := w.(http.Flusher)
++	if !ok {
++		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
++		return
++	}
++	w.Header().Set("Content-Type", "text/event-stream")
++	w.Header().Set("Cache-Control", "no-cache")
++	w.Header().Set("Connection", "keep-alive")
++
++	ch, unsubscribe := s.modHub.Subscribe()
++	defer unsubscribe()
++
++	initial := s.modHub.encode("mod.connected", map[string]any{
++		"budget":    s.modGov.Snapshot(),
++		"resources": efficiency.ReadResources(s.modWorkspacePath()),
++	})
++	if len(initial) > 0 {
++		fmt.Fprintf(w, "data: %s\n\n", initial)
++	}
++	flusher.Flush()
++
++	keepalive := time.NewTicker(sseKeepaliveInterval)
++	defer keepalive.Stop()
++	resources := time.NewTicker(5 * time.Second)
++	defer resources.Stop()
++
++	for {
++		select {
++		case data, ok := <-ch:
++			if !ok {
++				return
++			}
++			fmt.Fprintf(w, "data: %s\n\n", data)
++			flusher.Flush()
++		case <-resources.C:
++			data := s.modHub.encode("resource.snapshot", efficiency.ReadResources(s.modWorkspacePath()))
++			if len(data) > 0 {
++				fmt.Fprintf(w, "data: %s\n\n", data)
++				flusher.Flush()
++			}
++		case <-keepalive.C:
++			fmt.Fprint(w, ": ping\n\n")
++			flusher.Flush()
++		case <-r.Context().Done():
++			return
++		}
++	}
++}
++
++// observeCoreEvent mirrors only content-free accounting/state signals into the
++// APK stream. It never forwards prompts, tool arguments, file contents, or
++// reasoning.
++func (s *Server) observeCoreEvent(e event.Event) {
++	if e.Kind != event.Usage || e.Usage == nil {
++		return
++	}
++	before := s.modGov.Snapshot()
++	after := s.modGov.ObserveQuote(e.CostQuote, e.ModelRef)
++	s.modHub.Emit("budget.updated", after)
++	if !before.Exhausted && after.Exhausted {
++		s.modHub.Emit("budget.exhausted", after)
++	}
++	if before.SpentKZT < before.RegularLimitKZT && after.SpentKZT >= after.RegularLimitKZT && after.Enabled {
++		s.modHub.Emit("budget.reserve_entered", after)
++	}
++	if !before.ProLimitReached && after.ProLimitReached {
++		s.modHub.Emit("budget.pro_limit_reached", after)
++	}
++}
++
++// applyModTaskCostBudget reuses Reasonix's existing task cost budget as a
++// second, provider-currency stop layer. It is deliberately best-effort in v0.1:
++// if a model has no pricing currency or the APK did not supply an FX rate, the
++// KZT ledger still works but the status exposes that the provider gate is not
++// active. A true pre-call admission gate is a later router integration.
++func (s *Server) applyModTaskCostBudget() modTaskCostGateStatus {
++	snap := s.modGov.Snapshot()
++	setter, ok := s.ctl().(taskCostBudgetSetter)
++	if !ok {
++		status := modTaskCostGateStatus{Reason: "controller does not expose task-cost budget setter"}
++		s.setModTaskGate(status)
++		return status
++	}
++	if !snap.Enabled || !snap.HardStop {
++		if err := setter.SetTaskCostBudget(0); err != nil {
++			status := modTaskCostGateStatus{Reason: err.Error()}
++			s.setModTaskGate(status)
++			return status
++		}
++		status := modTaskCostGateStatus{Applied: false, Reason: "hard budget disabled"}
++		s.setModTaskGate(status)
++		return status
++	}
++
++	currency, reason := s.activeProviderBillingCurrency()
++	if currency == "" {
++		status := modTaskCostGateStatus{Reason: reason}
++		s.setModTaskGate(status)
++		return status
++	}
++	providerLimit, ok := s.modGov.ProviderBudget(currency)
++	if !ok {
++		status := modTaskCostGateStatus{Currency: currency, Reason: "missing KZT FX rate for " + currency}
++		s.setModTaskGate(status)
++		return status
++	}
++	if err := setter.SetTaskCostBudget(providerLimit); err != nil {
++		status := modTaskCostGateStatus{Currency: currency, ProviderLimit: providerLimit, Reason: err.Error()}
++		s.setModTaskGate(status)
++		return status
++	}
++	status := modTaskCostGateStatus{Applied: true, Currency: currency, ProviderLimit: providerLimit}
++	s.setModTaskGate(status)
++	return status
++}
++
++func (s *Server) activeProviderBillingCurrency() (string, string) {
++	cfg, err := config.Load()
++	if err != nil {
++		return "", "cannot load provider config"
++	}
++	ref := strings.TrimSpace(s.ctl().ModelRef())
++	if ref == "" {
++		ref = strings.TrimSpace(cfg.DefaultModel)
++	}
++	entry, ok := cfg.ResolveModel(ref)
++	if !ok || entry == nil {
++		return "", "active model pricing is unavailable"
++	}
++	if cur := billing.NormalizeCurrency(entry.BillingCurrency); cur != "" {
++		return cur, ""
++	}
++	if entry.Price != nil {
++		if cur := billing.NormalizeCurrency(entry.Price.Currency); cur != "" {
++			return cur, ""
++		}
++	}
++	return "", "active model has no billing currency"
++}
+diff --git a/internal/serve/mod_bridge_test.go b/internal/serve/mod_bridge_test.go
+new file mode 100644
+index 0000000..ef180d9
+--- /dev/null
++++ b/internal/serve/mod_bridge_test.go
+@@ -0,0 +1,116 @@
++package serve
++
++import (
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"reasonix/internal/billing"
++	"reasonix/internal/config"
++	"reasonix/internal/control"
++	"reasonix/internal/event"
++	"reasonix/internal/provider"
++)
++
++func TestModBudgetAPIAndUsageAccounting(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc})
++	s := New(ctrl, bc, config.ServeConfig{})
++	ts := httptest.NewServer(s.Handler())
++	defer ts.Close()
++
++	// hardStop=false makes this test independent of whichever provider config is
++	// present on the machine while still exercising the APK-facing KZT ledger.
++	resp, err := http.Post(ts.URL+"/mod/budget", "application/json", strings.NewReader(`{
++		"budgetKzt":1000,
++		"reservePercent":15,
++		"proMaxPercent":25,
++		"hardStop":false,
++		"fxKztPerUnit":{"USD":500}
++	}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		body, _ := io.ReadAll(resp.Body)
++		t.Fatalf("POST /mod/budget = %d: %s", resp.StatusCode, body)
++	}
++
++	bc.Emit(event.Event{
++		Kind:     event.Usage,
++		ModelRef: "deepseek-pro/deepseek-v4-pro",
++		Usage:    &provider.Usage{PromptTokens: 1, CompletionTokens: 1},
++		CostQuote: &billing.CostQuote{
++			Original:     billing.Money{Amount: "0.20", Currency: "USD"},
++			CostComplete: true,
++			ModelRef:     "deepseek-pro/deepseek-v4-pro",
++		},
++	})
++
++	got, err := http.Get(ts.URL + "/mod/budget")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer got.Body.Close()
++	var body struct {
++		Budget struct {
++			SpentKZT    float64 `json:"spentKzt"`
++			ProSpentKZT float64 `json:"proSpentKzt"`
++			Remaining   float64 `json:"remainingKzt"`
++		} `json:"budget"`
++	}
++	if err := json.NewDecoder(got.Body).Decode(&body); err != nil {
++		t.Fatal(err)
++	}
++	if body.Budget.SpentKZT != 100 || body.Budget.ProSpentKZT != 100 || body.Budget.Remaining != 900 {
++		t.Fatalf("budget after usage = %+v", body.Budget)
++	}
++}
++
++func TestModBudgetRejectsUnknownFields(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc})
++	ts := httptest.NewServer(New(ctrl, bc, config.ServeConfig{}).Handler())
++	defer ts.Close()
++	resp, err := http.Post(ts.URL+"/mod/budget", "application/json", strings.NewReader(`{"budgetKzt":100,"wat":1}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusBadRequest {
++		t.Fatalf("status = %d, want 400", resp.StatusCode)
++	}
++}
++
++func TestModStatusExposesTypedAPKSurface(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, ModelRef: "mock/flash"})
++	ts := httptest.NewServer(New(ctrl, bc, config.ServeConfig{}).Handler())
++	defer ts.Close()
++
++	resp, err := http.Get(ts.URL + "/mod/status")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("status = %d", resp.StatusCode)
++	}
++	var body map[string]any
++	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
++		t.Fatal(err)
++	}
++	if body["modVersion"] != balanceModVersion || body["modelRef"] != "mock/flash" {
++		t.Fatalf("status body = %#v", body)
++	}
++	if _, ok := body["budget"]; !ok {
++		t.Fatal("status missing budget")
++	}
++	if _, ok := body["resources"]; !ok {
++		t.Fatal("status missing resources")
++	}
++}
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index 73b1199..92768ef 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -25,6 +25,7 @@ import (
+ 	"reasonix/internal/boot"
+ 	"reasonix/internal/config"
+ 	"reasonix/internal/control"
++	"reasonix/internal/efficiency"
+ 	"reasonix/internal/event"
+ 	"reasonix/internal/jobs"
+ 	"reasonix/internal/nilutil"
+@@ -54,6 +55,13 @@ type Server struct {
+ 	bindMu sync.Mutex
+ 	ctrl   control.SessionAPI
+ 	bc     *Broadcaster
++
++	// Balance mod v0.1: APK-facing economy/control telemetry. These are kept
++	// outside SessionAPI so upstream frontend contracts stay source-compatible.
++	modGov      *efficiency.Governor
++	modHub      *modBroadcaster
++	modMu       sync.RWMutex
++	modTaskGate modTaskCostGateStatus
+ 	// buildController builds the replacement controller during a model switch.
+ 	// Nil in production (switchModel falls back to boot.Build); tests inject a
+ 	// fake so switchModel can be exercised without real provider IO.
+@@ -86,9 +94,12 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 	s := &Server{
+ 		ctrl:   ctrl,
+ 		bc:     bc,
++		modGov: efficiency.NewGovernor(),
++		modHub: newModBroadcaster(),
+ 		titles: newTitleCache(ctrl.SessionDir()),
+ 		auth:   newAuthGate(serveCfg),
+ 	}
++	bc.SetEventObserver(s.observeCoreEvent)
+ 	if cfg, err := config.Load(); err == nil {
+ 		bc.SetDisplayCurrency(cfg.ExplicitDisplayCurrency())
+ 	}
+@@ -511,6 +522,15 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("GET /models", s.models)
+ 	mux.HandleFunc("POST /extensions/reload", s.reloadExtensionsHTTP)
+ 	mux.HandleFunc("GET /status", s.status)
++	// Balance mod API is intentionally namespaced so upstream Reasonix web
++	// clients remain untouched while the future Android APK gets a stable,
++	// machine-readable surface.
++	mux.HandleFunc("GET /mod/status", s.modStatus)
++	mux.HandleFunc("GET /mod/budget", s.modBudgetGet)
++	mux.HandleFunc("POST /mod/budget", s.modBudgetSet)
++	mux.HandleFunc("POST /mod/budget/reset", s.modBudgetReset)
++	mux.HandleFunc("GET /mod/resources", s.modResources)
++	mux.HandleFunc("GET /mod/events", s.modEvents)
+ 	mux.HandleFunc("GET /sessions", s.sessions)
+ 	mux.HandleFunc("GET /skills", s.skills)
+ 	mux.HandleFunc("GET /todos", s.todos)
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+new file mode 100755
+index 0000000..65aa383
+--- /dev/null
++++ b/scripts/balance_mod_smoke.sh
+@@ -0,0 +1,47 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++GO_BIN="${GO_BIN:-go}"
++
++cd "$ROOT"
++echo "[1/4] Unit tests: Balance Mod core"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock
++
++echo "[2/4] Build CLI only (skip example plugin)"
++mkdir -p bin
++GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
++
++TMP="$(mktemp -d)"
++cleanup() { rm -rf "$TMP"; }
++trap cleanup EXIT
++printf 'print("TEST OK")\n' > "$TMP/hello.py"
++cat > "$TMP/reasonix.toml" <<'TOML'
++default_model = "balance-mock"
++
++[[providers]]
++name = "balance-mock"
++kind = "mock"
++model = "smoke"
++base_url = "http://127.0.0.1"
++context_window = 1000000
++price = { cache_hit = 0, input = 0, output = 0, currency = "KZT" }
++
++[environment]
++offline = true
++
++[sandbox]
++bash = "off"
++TOML
++
++echo "[3/4] Offline mock tool-loop"
++cd "$TMP"
++OUT="$($ROOT/bin/reasonix run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
++printf '%s\n' "$OUT"
++if ! grep -q 'OFFLINE_MOCK_PASS' <<<"$OUT"; then
++  echo "BALANCE_MOD_SMOKE_FAIL: mock provider did not reach final pass" >&2
++  exit 1
++fi
++
++echo "[4/4] PASS — no provider API key/network was used"
++echo "BALANCE_MOD_SMOKE_PASS"

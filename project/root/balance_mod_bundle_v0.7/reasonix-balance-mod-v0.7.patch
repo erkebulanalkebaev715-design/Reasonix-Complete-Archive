@@ -1,0 +1,1587 @@
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+index 4af1758..cc075ce 100644
+--- a/docs/BALANCE_MOD.md
++++ b/docs/BALANCE_MOD.md
+@@ -137,8 +137,8 @@ Scenarios:
+ - `repair-cycle`: deterministic four-step sequence used to drive the v0.4
+   `Flash -> Flash -> Pro diagnosis -> Flash PASS` policy test
+ 
+-The smoke script must end with `BALANCE_MOD_V05_SMOKE_PASS` before any later
+-phase is accepted.
++Each release advances the offline gate; the current v0.7 smoke script must end
++with `BALANCE_MOD_V07_SMOKE_PASS` before any real provider test is accepted.
+ 
+ ## Still intentionally disconnected
+ 
+@@ -188,3 +188,103 @@ is needed by the v0.6 smoke tests.
+ APK uses it after changing skills or when it wants edited standing instructions
+ folded into a fresh cache-stable prefix immediately; runtime tool overrides are
+ re-applied to the replacement controller automatically.
++
++## v0.7 — Capability Registry, environment/project profile, APK live protocol
++
++v0.7 makes the v0.6 universal-control surface easier to extend without moving
++agent logic into Android UI code.
++
++### Capability Registry and Tool Packs
++
++`GET /mod/capabilities` exposes the native Reasonix tool contract plus derived
++APK packs (`basic`, `files`, `verify`, `vcs`, `shell`, `developer`). Packs are
++only a UI/policy projection over the existing native registry; they do not
++create wrapper tools or a second executor.
++
++The effective tool policy has three layers:
++
++1. native Reasonix/config policy (authoritative; an existing deny cannot be
++   weakened),
++2. APK manual `allow|ask|deny` overrides from v0.6,
++3. v0.7 project-mode/tool-pack restrictions.
++
++`chat` mode hides mutating tools from the provider schema while keeping the same
++controller, conversation and model session. `agent` mode restores the selected
++pack/manual policy. `use_capability` may remain visible in chat/read packs, but
++resolved targets still pass through the same native per-tool permission gate;
++a denied writer cannot be reached through the proxy.
++
++### Native Reasonix environment projection
++
++`GET /mod/environment` does **not** introduce a second environment detector.
++It reuses upstream `internal/environment` — the same native probe list,
++overrides, deny-root checks, in-memory cache and persisted snapshot path that
++`boot.Build` uses to create the model-facing cache-stable `## Environment`
++section. This keeps APK state and the agent's actual environment knowledge on
++one source of truth instead of letting two probe systems drift.
++
++The APK projection adds only cheap workspace/project-marker metadata (`go.mod`,
++Gradle/Android files, `package.json`, Python/Rust markers, `.git`). An explicit
++`GET /mod/environment` refreshes through the native cached probe path; ordinary
++`/mod/status` reads the server's cached projection and therefore does not launch
++version commands on every UI refresh. No model/provider call is involved.
++
++### Project profile
++
++`GET/POST /mod/project` manages a provider-agnostic APK/session profile:
++
++- display name,
++- `chat|agent` mode,
++- selected Tool Packs,
++- live-detail level (`metadata|project`).
++
++The profile is intentionally APK-owned/replayable in v0.7 rather than silently
++writing another project config format. Workspace switching remains a supervisor
++restart operation from v0.6. Budget, model routing, skills and standing
++instructions remain their existing independent Reasonix/Balance Mod systems.
++
++### Typed live project protocol
++
++`GET /mod/events` remains the streaming SSE transport. v0.7 adds typed `live.*`
++events derived from Reasonix's native event stream and `GET /mod/live/history`
++for a bounded recent action history.
++
++The APK can render:
++
++- visible assistant chat text,
++- turn/phase state,
++- tool start/finish/progress,
++- redacted/capped tool argument and result previews when `liveDetail=project`,
++- file diff previews and +/- counts,
++- approval requests,
++- workspace mutations,
++- retry state,
++- verification/completion summaries.
++
++High-frequency text/tool-progress deltas are streamed but not retained in the
++bounded history ring; completed visible chat messages and action/result events
++are retained. This prevents one long response from evicting the useful project
++audit trail.
++
++**Hidden model reasoning is deliberately excluded.** `event.Reasoning` and the
++`Message.Reasoning` chain are never mirrored to the APK protocol. The UI gets
++observable plans/phases/actions/results and visible answer text instead.
++Credential-like strings crossing the APK live-detail boundary are defensively
++redacted and previews are bounded.
++
++### v0.7 APK endpoints
++
++Added:
++
++- `GET /mod/capabilities`
++- `GET /mod/environment`
++- `GET /mod/project`
++- `POST /mod/project`
++- `GET /mod/live/history`
++
++The normal Reasonix `POST /submit` remains the chat/agent input endpoint. The
++project mode controls available capabilities; it does not create a second chat
++model or duplicate session state.
++
++The v0.7 offline gate must end with `BALANCE_MOD_V07_SMOKE_PASS`. No real
++provider key is required or used by these tests.
+diff --git a/internal/efficiency/project_profile.go b/internal/efficiency/project_profile.go
+new file mode 100644
+index 0000000..13c7d9b
+--- /dev/null
++++ b/internal/efficiency/project_profile.go
+@@ -0,0 +1,119 @@
++package efficiency
++
++import (
++	"fmt"
++	"sort"
++	"strings"
++	"sync"
++)
++
++// AgentMode controls how much execution authority the APK grants to the same
++// Reasonix agent. Chat mode keeps the conversation/model/session intact but
++// hides mutating tools from the provider surface; Agent mode restores the
++// configured tool-pack/manual policy.
++type AgentMode string
++
++const (
++	AgentModeChat  AgentMode = "chat"
++	AgentModeAgent AgentMode = "agent"
++)
++
++const (
++	LiveDetailMetadata = "metadata"
++	LiveDetailProject  = "project"
++)
++
++// ProjectProfile is intentionally provider-agnostic. The APK can persist this
++// object and re-apply it after restarting reasonix serve in another workspace.
++type ProjectProfile struct {
++	Name       string    `json:"name,omitempty"`
++	Mode       AgentMode `json:"mode"`
++	ToolPacks  []string  `json:"toolPacks,omitempty"`
++	LiveDetail string    `json:"liveDetail"`
++}
++
++// ProjectProfileManager owns only APK/session policy. It does not duplicate
++// Reasonix memory, model routing, budget or workspace state.
++type ProjectProfileManager struct {
++	mu      sync.RWMutex
++	profile ProjectProfile
++}
++
++func DefaultProjectProfile() ProjectProfile {
++	return ProjectProfile{Mode: AgentModeAgent, LiveDetail: LiveDetailProject}
++}
++
++func NewProjectProfileManager() *ProjectProfileManager {
++	return &ProjectProfileManager{profile: DefaultProjectProfile()}
++}
++
++func normalizePackNames(in []string) []string {
++	seen := map[string]struct{}{}
++	out := make([]string, 0, len(in))
++	for _, raw := range in {
++		v := strings.ToLower(strings.TrimSpace(raw))
++		if v == "" {
++			continue
++		}
++		if _, ok := seen[v]; ok {
++			continue
++		}
++		seen[v] = struct{}{}
++		out = append(out, v)
++	}
++	sort.Strings(out)
++	return out
++}
++
++func ValidateProjectProfile(p ProjectProfile) error {
++	switch p.Mode {
++	case AgentModeChat, AgentModeAgent:
++	default:
++		return fmt.Errorf("mode must be chat or agent")
++	}
++	switch strings.ToLower(strings.TrimSpace(p.LiveDetail)) {
++	case LiveDetailMetadata, LiveDetailProject:
++	default:
++		return fmt.Errorf("liveDetail must be metadata or project")
++	}
++	if len(p.Name) > 120 {
++		return fmt.Errorf("project name is too long")
++	}
++	if len(p.ToolPacks) > 32 {
++		return fmt.Errorf("too many tool packs")
++	}
++	return nil
++}
++
++func (m *ProjectProfileManager) Configure(p ProjectProfile) (ProjectProfile, error) {
++	if m == nil {
++		return ProjectProfile{}, fmt.Errorf("project profile manager is nil")
++	}
++	p.Name = strings.TrimSpace(p.Name)
++	p.LiveDetail = strings.ToLower(strings.TrimSpace(p.LiveDetail))
++	if p.LiveDetail == "" {
++		p.LiveDetail = LiveDetailProject
++	}
++	if p.Mode == "" {
++		p.Mode = AgentModeAgent
++	}
++	p.ToolPacks = normalizePackNames(p.ToolPacks)
++	if err := ValidateProjectProfile(p); err != nil {
++		return ProjectProfile{}, err
++	}
++	m.mu.Lock()
++	m.profile = p
++	m.mu.Unlock()
++	return m.Snapshot(), nil
++}
++
++func (m *ProjectProfileManager) Snapshot() ProjectProfile {
++	if m == nil {
++		return DefaultProjectProfile()
++	}
++	m.mu.RLock()
++	defer m.mu.RUnlock()
++	out := m.profile
++	out.ToolPacks = append([]string(nil), m.profile.ToolPacks...)
++	return out
++}
+diff --git a/internal/efficiency/project_profile_test.go b/internal/efficiency/project_profile_test.go
+new file mode 100644
+index 0000000..61ef56e
+--- /dev/null
++++ b/internal/efficiency/project_profile_test.go
+@@ -0,0 +1,20 @@
++package efficiency
++
++import "testing"
++
++func TestProjectProfileNormalizesAndValidates(t *testing.T) {
++	m := NewProjectProfileManager()
++	got, err := m.Configure(ProjectProfile{Name: "  Space Game ", Mode: AgentModeChat, ToolPacks: []string{"Basic", "basic", "VERIFY"}, LiveDetail: LiveDetailMetadata})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got.Name != "Space Game" || got.Mode != AgentModeChat || got.LiveDetail != LiveDetailMetadata {
++		t.Fatalf("profile=%+v", got)
++	}
++	if len(got.ToolPacks) != 2 || got.ToolPacks[0] != "basic" || got.ToolPacks[1] != "verify" {
++		t.Fatalf("packs=%v", got.ToolPacks)
++	}
++	if _, err := m.Configure(ProjectProfile{Mode: "root", LiveDetail: LiveDetailProject}); err == nil {
++		t.Fatal("invalid mode accepted")
++	}
++}
+diff --git a/internal/serve/mod_agent_control.go b/internal/serve/mod_agent_control.go
+index 29b4094..3795a3f 100644
+--- a/internal/serve/mod_agent_control.go
++++ b/internal/serve/mod_agent_control.go
+@@ -1,6 +1,7 @@
+ package serve
+ 
+ import (
++	"context"
+ 	"encoding/json"
+ 	"fmt"
+ 	"io"
+@@ -57,12 +58,38 @@ func (s *Server) setModToolDecisions(v map[string]string) {
+ 	}
+ }
+ 
++func (s *Server) canonicalModToolDecisions(in map[string]string) (map[string]string, error) {
++	ctl, ok := s.ctl().(modToolPolicyController)
++	if !ok {
++		return nil, fmt.Errorf("runtime tool policy unavailable")
++	}
++	known := map[string]string{}
++	for _, e := range ctl.AllToolContractEntries() {
++		known[strings.ToLower(strings.TrimSpace(e.Name))] = e.Name
++	}
++	out := make(map[string]string, len(in))
++	for raw, value := range in {
++		name, ok := known[strings.ToLower(strings.TrimSpace(raw))]
++		if !ok {
++			return nil, fmt.Errorf("unknown tool: %s", strings.TrimSpace(raw))
++		}
++		decision := strings.ToLower(strings.TrimSpace(value))
++		switch decision {
++		case "allow", "ask", "deny":
++		default:
++			return nil, fmt.Errorf("invalid decision for %s: use allow, ask, or deny", name)
++		}
++		out[name] = decision
++	}
++	return out, nil
++}
++
+ func (s *Server) applyModToolDecisionsToCurrentController() error {
+ 	ctl, ok := s.ctl().(modToolPolicyController)
+ 	if !ok {
+ 		return fmt.Errorf("controller does not expose runtime tool policy")
+ 	}
+-	return ctl.SetSessionToolDecisions(s.modToolDecisionsSnapshot())
++	return ctl.SetSessionToolDecisions(s.modEffectiveToolDecisions())
+ }
+ 
+ func (s *Server) modAgentReload(w http.ResponseWriter, r *http.Request) {
+@@ -88,7 +115,8 @@ func (s *Server) modAgentGet(w http.ResponseWriter, _ *http.Request) {
+ 	writeJSON(w, map[string]any{
+ 		"workspace": ctl.WorkspaceRoot(), "modelRef": ctl.ModelRef(), "running": ctl.Running(),
+ 		"toolApprovalMode": ctl.ToolApprovalMode(), "tools": s.modToolViews(), "skills": s.modSkillViews(),
+-		"instructions": s.modInstructionViews(false),
++		"instructions": s.modInstructionViews(false), "profile": s.modProfile.Snapshot(),
++		"environment": s.modEnvironmentSnapshot(context.Background(), false),
+ 	})
+ }
+ 
+@@ -101,10 +129,10 @@ func (s *Server) modToolViews() []modToolView {
+ 	for _, e := range ctl.ToolContractEntries() {
+ 		visible[e.Name] = true
+ 	}
+-	decisions := s.modToolDecisionsSnapshot()
++	effective := ctl.SessionToolDecisions()
+ 	out := []modToolView{}
+ 	for _, e := range ctl.AllToolContractEntries() {
+-		d := decisions[e.Name]
++		d := effective[e.Name]
+ 		if d == "" {
+ 			d = "inherit"
+ 		}
+@@ -141,16 +169,23 @@ func (s *Server) modAgentToolsSet(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "approvalMode must be ask, auto, or yolo", http.StatusBadRequest)
+ 		return
+ 	}
+-	ctl, ok := s.ctl().(modToolPolicyController)
+-	if !ok {
++	if _, ok := s.ctl().(modToolPolicyController); !ok {
+ 		http.Error(w, "runtime tool policy unavailable", http.StatusNotImplemented)
+ 		return
+ 	}
+-	if err := ctl.SetSessionToolDecisions(body.Decisions); err != nil {
++	canonical, err := s.canonicalModToolDecisions(body.Decisions)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	previous := s.modToolDecisionsSnapshot()
++	s.setModToolDecisions(canonical)
++	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
++		s.setModToolDecisions(previous)
++		_ = s.applyModToolDecisionsToCurrentController()
+ 		http.Error(w, err.Error(), http.StatusBadRequest)
+ 		return
+ 	}
+-	s.setModToolDecisions(ctl.SessionToolDecisions())
+ 	if mode != "" {
+ 		s.ctl().SetToolApprovalMode(mode)
+ 	}
+diff --git a/internal/serve/mod_agent_control_test.go b/internal/serve/mod_agent_control_test.go
+index aabd919..2f6e544 100644
+--- a/internal/serve/mod_agent_control_test.go
++++ b/internal/serve/mod_agent_control_test.go
+@@ -48,7 +48,7 @@ func newModAgentTestServer(t *testing.T) (*httptest.Server, string) {
+ func TestModAgentToolsAPIUsesNativeRuntimePolicy(t *testing.T) {
+ 	ts, _ := newModAgentTestServer(t)
+ 	defer ts.Close()
+-	resp, err := http.Post(ts.URL+"/mod/agent/tools", "application/json", strings.NewReader(`{"decisions":{"read_x":"deny","write_x":"allow"},"approvalMode":"ask"}`))
++	resp, err := http.Post(ts.URL+"/mod/agent/tools", "application/json", strings.NewReader(`{"decisions":{"READ_X":"DENY","write_x":"allow"},"approvalMode":"ask"}`))
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index a558aeb..f109317 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -16,11 +16,12 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.6"
++const balanceModVersion = "balance-mod-v0.7"
+ 
+-// modEvent is a small, content-free machine event intended for the future
+-// Android client. Human logs stay on the ordinary Reasonix event stream; the
+-// APK never needs to parse terminal text.
++// modEvent is a typed machine event for the Android client. Most Balance Mod
++// telemetry is content-free; v0.7 live.* events may additionally carry bounded,
++// credential-redacted project details when the project profile opts into them.
++// The APK never needs to parse terminal text.
+ type modEvent struct {
+ 	Type       string `json:"type"`
+ 	AtUnixMS   int64  `json:"atUnixMs"`
+@@ -30,9 +31,10 @@ type modEvent struct {
+ }
+ 
+ type modBroadcaster struct {
+-	mu   sync.Mutex
+-	subs map[chan []byte]struct{}
+-	seq  uint64
++	mu      sync.Mutex
++	subs    map[chan []byte]struct{}
++	seq     uint64
++	history [][]byte
+ }
+ 
+ func newModBroadcaster() *modBroadcaster {
+@@ -60,12 +62,18 @@ func (b *modBroadcaster) encode(kind string, data any) []byte {
+ 	return payload
+ }
+ 
+-func (b *modBroadcaster) Emit(kind string, data any) {
++func (b *modBroadcaster) emit(kind string, data any, retain bool) {
+ 	payload := b.encode(kind, data)
+ 	if len(payload) == 0 {
+ 		return
+ 	}
+ 	b.mu.Lock()
++	if retain {
++		b.history = append(b.history, append([]byte(nil), payload...))
++		if len(b.history) > 512 {
++			b.history = append([][]byte(nil), b.history[len(b.history)-512:]...)
++		}
++	}
+ 	defer b.mu.Unlock()
+ 	for ch := range b.subs {
+ 		select {
+@@ -75,6 +83,32 @@ func (b *modBroadcaster) Emit(kind string, data any) {
+ 	}
+ }
+ 
++func (b *modBroadcaster) Emit(kind string, data any) { b.emit(kind, data, true) }
++
++// EmitTransient streams high-frequency deltas without letting them evict
++// durable action/result events from the bounded APK history ring.
++func (b *modBroadcaster) EmitTransient(kind string, data any) { b.emit(kind, data, false) }
++
++func (b *modBroadcaster) History(limit int) [][]byte {
++	if b == nil {
++		return nil
++	}
++	if limit <= 0 || limit > 512 {
++		limit = 100
++	}
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	start := len(b.history) - limit
++	if start < 0 {
++		start = 0
++	}
++	out := make([][]byte, 0, len(b.history)-start)
++	for _, item := range b.history[start:] {
++		out = append(out, append([]byte(nil), item...))
++	}
++	return out
++}
++
+ func (b *modBroadcaster) Subscribe() (<-chan []byte, func()) {
+ 	ch := make(chan []byte, 32)
+ 	b.mu.Lock()
+@@ -98,17 +132,19 @@ type modTaskCostGateStatus struct {
+ }
+ 
+ type modStatusPayload struct {
+-	ModVersion string                         `json:"modVersion"`
+-	Running    bool                           `json:"running"`
+-	ModelRef   string                         `json:"modelRef,omitempty"`
+-	Budget     efficiency.BudgetSnapshot      `json:"budget"`
+-	TaskGate   modTaskCostGateStatus          `json:"taskCostGate"`
+-	Resources  efficiency.ResourceSnapshot    `json:"resources"`
+-	Quality    efficiency.QualitySnapshot     `json:"quality"`
+-	Router     efficiency.RouteDecision       `json:"router"`
+-	Cycle      efficiency.RepairCycleSnapshot `json:"cycle"`
+-	Execution  efficiency.ExecutionSnapshot   `json:"execution"`
+-	Features   map[string]string              `json:"features"`
++	ModVersion  string                         `json:"modVersion"`
++	Running     bool                           `json:"running"`
++	ModelRef    string                         `json:"modelRef,omitempty"`
++	Budget      efficiency.BudgetSnapshot      `json:"budget"`
++	TaskGate    modTaskCostGateStatus          `json:"taskCostGate"`
++	Resources   efficiency.ResourceSnapshot    `json:"resources"`
++	Quality     efficiency.QualitySnapshot     `json:"quality"`
++	Router      efficiency.RouteDecision       `json:"router"`
++	Cycle       efficiency.RepairCycleSnapshot `json:"cycle"`
++	Execution   efficiency.ExecutionSnapshot   `json:"execution"`
++	Profile     efficiency.ProjectProfile      `json:"profile"`
++	Environment modEnvironmentSnapshot         `json:"environment"`
++	Features    map[string]string              `json:"features"`
+ }
+ 
+ type taskCostBudgetSetter interface {
+@@ -141,35 +177,41 @@ func (s *Server) setModTaskGate(v modTaskCostGateStatus) {
+ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 	ctl := s.ctl()
+ 	writeJSON(w, modStatusPayload{
+-		ModVersion: balanceModVersion,
+-		Running:    ctl.Running(),
+-		ModelRef:   ctl.ModelRef(),
+-		Budget:     s.modGov.Snapshot(),
+-		TaskGate:   s.modTaskGateSnapshot(),
+-		Resources:  efficiency.ReadResources(s.modWorkspacePath()),
+-		Quality:    s.modQuality.Snapshot(),
+-		Router:     s.modRouter.Snapshot(),
+-		Cycle:      s.modCycle.Snapshot(),
+-		Execution:  s.modExec.Snapshot(),
++		ModVersion:  balanceModVersion,
++		Running:     ctl.Running(),
++		ModelRef:    ctl.ModelRef(),
++		Budget:      s.modGov.Snapshot(),
++		TaskGate:    s.modTaskGateSnapshot(),
++		Resources:   efficiency.ReadResources(s.modWorkspacePath()),
++		Quality:     s.modQuality.Snapshot(),
++		Router:      s.modRouter.Snapshot(),
++		Cycle:       s.modCycle.Snapshot(),
++		Execution:   s.modExec.Snapshot(),
++		Profile:     s.modProfile.Snapshot(),
++		Environment: s.modEnvironmentSnapshot(context.Background(), false),
+ 		Features: map[string]string{
+-			"budget":           "post-round-gate-v0.1",
+-			"apkBridge":        "http+sse-v0.2",
+-			"resources":        "local-linux-v0.1",
+-			"qualityMonitor":   "host-evidence-v0.2",
+-			"antiLoop":         "reasonix-native+apk-telemetry",
+-			"completionGate":   "reasonix-final-readiness",
+-			"offlineApiKey":    "not-required",
+-			"powerRouter":      "objective-flash-flash-pro-flash-v0.3",
+-			"failureCache":     "verified-journal-crc-v0.3",
+-			"logReducer":       "root-cause-window-v0.3",
+-			"patchGovernor":    "git-numstat-v0.3",
+-			"repairCycle":      "router+verifier+cache+rollback-v0.4",
+-			"nativeRollback":   "reasonix-checkpoint-transaction-v0.4",
+-			"executionRouter":  "native-model-switch+budget-admission-v0.5",
+-			"providerAgnostic": "apk-configured-model-refs-v0.5",
+-			"agentControl":     "workspace+tools+skills+instructions-v0.6",
+-			"toolPolicy":       "native-permission-gate+schema-trim-v0.6",
+-			"workspaceFiles":   "confined-read-preview-v0.6",
++			"budget":               "post-round-gate-v0.1",
++			"apkBridge":            "http+sse-v0.2",
++			"resources":            "local-linux-v0.1",
++			"qualityMonitor":       "host-evidence-v0.2",
++			"antiLoop":             "reasonix-native+apk-telemetry",
++			"completionGate":       "reasonix-final-readiness",
++			"offlineApiKey":        "not-required",
++			"powerRouter":          "objective-flash-flash-pro-flash-v0.3",
++			"failureCache":         "verified-journal-crc-v0.3",
++			"logReducer":           "root-cause-window-v0.3",
++			"patchGovernor":        "git-numstat-v0.3",
++			"repairCycle":          "router+verifier+cache+rollback-v0.4",
++			"nativeRollback":       "reasonix-checkpoint-transaction-v0.4",
++			"executionRouter":      "native-model-switch+budget-admission-v0.5",
++			"providerAgnostic":     "apk-configured-model-refs-v0.5",
++			"agentControl":         "workspace+tools+skills+instructions-v0.6",
++			"toolPolicy":           "native-permission-gate+schema-trim-v0.6",
++			"workspaceFiles":       "confined-read-preview-v0.6",
++			"capabilityRegistry":   "dynamic-tool-packs+native-policy-v0.7",
++			"environmentDiscovery": "reasonix-native-probes+apk-project-markers-v0.7",
++			"projectProfile":       "chat-agent-modes+tool-packs-v0.7",
++			"liveProtocol":         "typed-actions-diff-results-no-hidden-reasoning-v0.7",
+ 		},
+ 	})
+ }
+@@ -459,14 +501,16 @@ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ 	defer unsubscribe()
+ 
+ 	initial := s.modHub.encode("mod.connected", map[string]any{
+-		"budget":    s.modGov.Snapshot(),
+-		"quality":   s.modQuality.Snapshot(),
+-		"resources": efficiency.ReadResources(s.modWorkspacePath()),
+-		"router":    s.modRouter.Snapshot(),
+-		"cycle":     s.modCycle.Snapshot(),
+-		"execution": s.modExec.Snapshot(),
+-		"recovery":  s.modRecoverySnapshot(),
+-		"agent":     map[string]any{"workspace": s.ctl().WorkspaceRoot(), "toolOverrides": len(s.modToolDecisionsSnapshot()), "skills": len(s.modSkillViews())},
++		"budget":      s.modGov.Snapshot(),
++		"quality":     s.modQuality.Snapshot(),
++		"resources":   efficiency.ReadResources(s.modWorkspacePath()),
++		"router":      s.modRouter.Snapshot(),
++		"cycle":       s.modCycle.Snapshot(),
++		"execution":   s.modExec.Snapshot(),
++		"recovery":    s.modRecoverySnapshot(),
++		"profile":     s.modProfile.Snapshot(),
++		"environment": s.modEnvironmentSnapshot(context.Background(), false),
++		"agent":       map[string]any{"workspace": s.ctl().WorkspaceRoot(), "toolOverrides": len(s.modToolDecisionsSnapshot()), "skills": len(s.modSkillViews())},
+ 	})
+ 	if len(initial) > 0 {
+ 		fmt.Fprintf(w, "data: %s\n\n", initial)
+@@ -501,10 +545,11 @@ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ 	}
+ }
+ 
+-// observeCoreEvent mirrors only content-free accounting/state signals into the
+-// APK stream. It never forwards prompts, tool arguments, file contents, or
+-// reasoning.
++// observeCoreEvent is the single native-event tap. The quality/budget path below
++// remains content-free; observeLiveCoreEvent separately maps only the explicitly
++// allowed visible chat/action/result surface and never forwards hidden reasoning.
+ func (s *Server) observeCoreEvent(e event.Event) {
++	s.observeLiveCoreEvent(e)
+ 	quality, signals := s.modQuality.Observe(e)
+ 	for _, sig := range signals {
+ 		s.modHub.Emit(sig.Type, sig.Data)
+diff --git a/internal/serve/mod_capabilities.go b/internal/serve/mod_capabilities.go
+new file mode 100644
+index 0000000..e7abdb3
+--- /dev/null
++++ b/internal/serve/mod_capabilities.go
+@@ -0,0 +1,367 @@
++package serve
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"os"
++	"path/filepath"
++	"runtime"
++	"sort"
++	"strings"
++	"time"
++
++	"reasonix/internal/config"
++	"reasonix/internal/efficiency"
++	"reasonix/internal/environment"
++	"reasonix/internal/tool"
++)
++
++type modCapabilityView struct {
++	Name            string          `json:"name"`
++	Description     string          `json:"description,omitempty"`
++	ReadOnly        bool            `json:"readOnly"`
++	ProviderVisible bool            `json:"providerVisible"`
++	Decision        string          `json:"decision"`
++	ManualDecision  string          `json:"manualDecision"`
++	Packs           []string        `json:"packs"`
++	Schema          json.RawMessage `json:"schema,omitempty"`
++}
++
++type modToolPackView struct {
++	Name        string   `json:"name"`
++	Description string   `json:"description"`
++	Tools       []string `json:"tools"`
++}
++
++func toolPackNamesFor(e tool.ContractEntry) []string {
++	name := strings.ToLower(strings.TrimSpace(e.Name))
++	desc := strings.ToLower(e.Description)
++	text := name + " " + desc
++	packs := map[string]bool{"developer": true}
++	if e.ReadOnly || name == "use_capability" {
++		packs["basic"] = true
++	}
++	if strings.Contains(text, "file") || strings.Contains(text, "read") || strings.Contains(text, "write") || strings.Contains(text, "edit") || strings.Contains(text, "grep") || strings.Contains(text, "search") || strings.Contains(text, "list") || strings.Contains(text, "find") {
++		packs["files"] = true
++	}
++	if strings.Contains(text, "test") || strings.Contains(text, "lint") || strings.Contains(text, "check") || strings.Contains(text, "build") || strings.Contains(text, "doctor") || strings.Contains(text, "verify") {
++		packs["verify"] = true
++	}
++	if strings.Contains(text, "git") || strings.Contains(text, "version control") || strings.Contains(text, "diff") {
++		packs["vcs"] = true
++	}
++	if strings.Contains(text, "bash") || strings.Contains(text, "shell") || strings.Contains(text, "terminal") || strings.Contains(text, "command") {
++		packs["shell"] = true
++	}
++	if name == "use_capability" {
++		// Keep the stable proxy available in selected packs. The resolved target
++		// still passes through Reasonix's native per-tool permission gate, so a
++		// hidden/denied writer cannot be reached through the proxy.
++		packs["files"] = true
++		packs["verify"] = true
++		packs["vcs"] = true
++		packs["shell"] = true
++	}
++	out := make([]string, 0, len(packs))
++	for p := range packs {
++		out = append(out, p)
++	}
++	sort.Strings(out)
++	return out
++}
++
++func (s *Server) modToolPacks() []modToolPackView {
++	ctl, ok := s.ctl().(modToolPolicyController)
++	if !ok {
++		return nil
++	}
++	byPack := map[string][]string{
++		"basic": {}, "files": {}, "verify": {}, "vcs": {}, "shell": {}, "developer": {},
++	}
++	for _, e := range ctl.AllToolContractEntries() {
++		for _, p := range toolPackNamesFor(e) {
++			byPack[p] = append(byPack[p], e.Name)
++		}
++	}
++	desc := map[string]string{
++		"basic":     "Read-only inspection and capability discovery",
++		"files":     "Workspace file/search operations",
++		"verify":    "Build, test, lint and verification operations",
++		"vcs":       "Version-control and diff operations",
++		"shell":     "Shell/command execution operations",
++		"developer": "All registered development tools",
++	}
++	order := []string{"basic", "files", "verify", "vcs", "shell", "developer"}
++	out := make([]modToolPackView, 0, len(order))
++	for _, name := range order {
++		tools := append([]string(nil), byPack[name]...)
++		sort.Strings(tools)
++		out = append(out, modToolPackView{Name: name, Description: desc[name], Tools: tools})
++	}
++	return out
++}
++
++func (s *Server) knownModToolPack(name string) bool {
++	name = strings.ToLower(strings.TrimSpace(name))
++	for _, p := range s.modToolPacks() {
++		if p.Name == name {
++			return true
++		}
++	}
++	return false
++}
++
++func (s *Server) modEffectiveToolDecisions() map[string]string {
++	manual := s.modToolDecisionsSnapshot()
++	effective := make(map[string]string, len(manual))
++	for k, v := range manual {
++		effective[k] = v
++	}
++	ctl, ok := s.ctl().(modToolPolicyController)
++	if !ok {
++		return effective
++	}
++	profile := s.modProfile.Snapshot()
++	allowedByPack := map[string]bool{}
++	if len(profile.ToolPacks) > 0 {
++		selected := map[string]bool{}
++		for _, p := range profile.ToolPacks {
++			selected[strings.ToLower(strings.TrimSpace(p))] = true
++		}
++		for _, e := range ctl.AllToolContractEntries() {
++			for _, p := range toolPackNamesFor(e) {
++				if selected[p] {
++					allowedByPack[e.Name] = true
++					break
++				}
++			}
++		}
++	}
++	for _, e := range ctl.AllToolContractEntries() {
++		if len(profile.ToolPacks) > 0 && !allowedByPack[e.Name] {
++			effective[e.Name] = "deny"
++			continue
++		}
++		if profile.Mode == efficiency.AgentModeChat && !e.ReadOnly && e.Name != "use_capability" {
++			effective[e.Name] = "deny"
++		}
++	}
++	return effective
++}
++
++type modEnvironmentProbe struct {
++	Command string `json:"command"`
++	Binary  string `json:"binary"`
++	Output  string `json:"output,omitempty"`
++	Found   bool   `json:"found"`
++	Error   string `json:"error,omitempty"`
++}
++
++type modEnvironmentSnapshot struct {
++	Enabled        bool                  `json:"enabled"`
++	ModelFacing    bool                  `json:"modelFacing"`
++	Source         string                `json:"source"`
++	OS             string                `json:"os"`
++	Arch           string                `json:"arch"`
++	Workspace      string                `json:"workspace"`
++	ProjectKinds   []string              `json:"projectKinds,omitempty"`
++	Markers        []string              `json:"markers,omitempty"`
++	Probes         []modEnvironmentProbe `json:"probes,omitempty"`
++	DiscoveredAtMS int64                 `json:"discoveredAtMs"`
++}
++
++func modProjectMarkers(root string) ([]string, []string) {
++	markers := []struct {
++		path string
++		kind string
++	}{
++		{"go.mod", "go"},
++		{"package.json", "node"},
++		{"pyproject.toml", "python"},
++		{"requirements.txt", "python"},
++		{"Cargo.toml", "rust"},
++		{"build.gradle", "gradle"},
++		{"build.gradle.kts", "gradle"},
++		{"settings.gradle", "gradle"},
++		{"settings.gradle.kts", "gradle"},
++		{filepath.Join("app", "build.gradle"), "android"},
++		{filepath.Join("app", "build.gradle.kts"), "android"},
++		{filepath.Join("app", "src", "main", "AndroidManifest.xml"), "android"},
++		{".git", "git"},
++	}
++	kinds := map[string]struct{}{}
++	found := map[string]struct{}{}
++	for _, marker := range markers {
++		if _, err := os.Stat(filepath.Join(root, marker.path)); err == nil {
++			kinds[marker.kind] = struct{}{}
++			found[filepath.ToSlash(marker.path)] = struct{}{}
++		}
++	}
++	outKinds := make([]string, 0, len(kinds))
++	for kind := range kinds {
++		outKinds = append(outKinds, kind)
++	}
++	outMarkers := make([]string, 0, len(found))
++	for marker := range found {
++		outMarkers = append(outMarkers, marker)
++	}
++	sort.Strings(outKinds)
++	sort.Strings(outMarkers)
++	return outKinds, outMarkers
++}
++
++// discoverModEnvironment is only an APK projection. It deliberately reuses
++// Reasonix's native environment probe/cache/snapshot implementation — the same
++// mechanism boot uses for the model-facing cache-stable Environment section.
++// Project markers are cheap APK metadata and never replace the native probes.
++func discoverModEnvironment(ctx context.Context, root string, runProbes bool) modEnvironmentSnapshot {
++	root = strings.TrimSpace(root)
++	if root == "" {
++		root = "."
++	}
++	if abs, err := filepath.Abs(root); err == nil {
++		root = abs
++	}
++	kinds, markers := modProjectMarkers(root)
++	snap := modEnvironmentSnapshot{
++		Source:         "reasonix-native-environment",
++		OS:             runtime.GOOS,
++		Arch:           runtime.GOARCH,
++		Workspace:      root,
++		ProjectKinds:   kinds,
++		Markers:        markers,
++		DiscoveredAtMS: time.Now().UnixMilli(),
++	}
++	cfg, err := config.LoadForRootReadOnly(root)
++	if err != nil {
++		// Fail closed for host execution metadata rather than inventing a probe
++		// policy when trusted/project configuration could not be resolved.
++		return snap
++	}
++	snap.Enabled = cfg.EnvironmentEnabled()
++	snap.ModelFacing = snap.Enabled
++	if !runProbes || !snap.Enabled {
++		return snap
++	}
++	results := environment.RunProbesWithOptions(ctx, environment.DefaultProbes(), environment.ProbeOptions{
++		Overrides:   cfg.Environment.Tools,
++		DenyRoots:   []string{root},
++		SnapshotDir: config.CacheDir(),
++	})
++	snap.Probes = make([]modEnvironmentProbe, 0, len(results))
++	for _, result := range results {
++		snap.Probes = append(snap.Probes, modEnvironmentProbe{
++			Command: result.Command,
++			Binary:  result.Binary,
++			Output:  result.Output,
++			Found:   result.Found,
++			Error:   result.Error,
++		})
++	}
++	return snap
++}
++
++func (s *Server) modEnvironmentSnapshot(ctx context.Context, refresh bool) modEnvironmentSnapshot {
++	if refresh {
++		snap := discoverModEnvironment(ctx, s.modWorkspacePath(), true)
++		s.modMu.Lock()
++		s.modEnv = snap
++		s.modMu.Unlock()
++		return snap
++	}
++	s.modMu.RLock()
++	snap := s.modEnv
++	s.modMu.RUnlock()
++	if strings.TrimSpace(snap.Workspace) == "" {
++		snap = discoverModEnvironment(ctx, s.modWorkspacePath(), false)
++		s.modMu.Lock()
++		s.modEnv = snap
++		s.modMu.Unlock()
++	}
++	return snap
++}
++
++func (s *Server) modCapabilitiesGet(w http.ResponseWriter, _ *http.Request) {
++	ctl, ok := s.ctl().(modToolPolicyController)
++	if !ok {
++		http.Error(w, "runtime capability registry unavailable", http.StatusNotImplemented)
++		return
++	}
++	visible := map[string]bool{}
++	for _, e := range ctl.ToolContractEntries() {
++		visible[e.Name] = true
++	}
++	effective := ctl.SessionToolDecisions()
++	manual := s.modToolDecisionsSnapshot()
++	caps := make([]modCapabilityView, 0)
++	for _, e := range ctl.AllToolContractEntries() {
++		d := effective[e.Name]
++		if d == "" {
++			d = "inherit"
++		}
++		md := manual[e.Name]
++		if md == "" {
++			md = "inherit"
++		}
++		caps = append(caps, modCapabilityView{
++			Name: e.Name, Description: e.Description, ReadOnly: e.ReadOnly,
++			ProviderVisible: visible[e.Name], Decision: d, ManualDecision: md,
++			Packs: toolPackNamesFor(e), Schema: append(json.RawMessage(nil), e.Schema...),
++		})
++	}
++	sort.Slice(caps, func(i, j int) bool { return caps[i].Name < caps[j].Name })
++	writeJSON(w, map[string]any{"profile": s.modProfile.Snapshot(), "packs": s.modToolPacks(), "capabilities": caps})
++}
++
++func (s *Server) modEnvironmentGet(w http.ResponseWriter, r *http.Request) {
++	writeJSON(w, s.modEnvironmentSnapshot(r.Context(), true))
++}
++
++func (s *Server) modProjectGet(w http.ResponseWriter, r *http.Request) {
++	writeJSON(w, map[string]any{
++		"profile":            s.modProfile.Snapshot(),
++		"workspace":          s.modWorkspacePath(),
++		"environment":        s.modEnvironmentSnapshot(r.Context(), false),
++		"chatEndpoint":       "/submit",
++		"eventsEndpoint":     "/mod/events",
++		"historyEndpoint":    "/mod/live/history",
++		"profilePersistence": "apk-owned; re-apply after backend restart",
++		"reasoningPolicy":    "hidden-chain-never-exported; use live plans/actions/results",
++	})
++}
++
++func (s *Server) modProjectSet(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot change project profile while a turn is running", http.StatusConflict)
++		return
++	}
++	var p efficiency.ProjectProfile
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&p); err != nil {
++		http.Error(w, "invalid project profile: "+err.Error(), http.StatusBadRequest)
++		return
++	}
++	for _, pack := range p.ToolPacks {
++		if !s.knownModToolPack(pack) {
++			http.Error(w, fmt.Sprintf("unknown tool pack: %s", strings.TrimSpace(pack)), http.StatusBadRequest)
++			return
++		}
++	}
++	before := s.modProfile.Snapshot()
++	snap, err := s.modProfile.Configure(p)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
++		_, _ = s.modProfile.Configure(before)
++		_ = s.applyModToolDecisionsToCurrentController()
++		http.Error(w, "apply project profile: "+err.Error(), http.StatusConflict)
++		return
++	}
++	s.modHub.Emit("project.profile.updated", map[string]any{"profile": snap, "workspace": s.modWorkspacePath()})
++	writeJSON(w, map[string]any{"profile": snap, "tools": s.modToolViews(), "environment": s.modEnvironmentSnapshot(r.Context(), false)})
++}
+diff --git a/internal/serve/mod_capabilities_test.go b/internal/serve/mod_capabilities_test.go
+new file mode 100644
+index 0000000..f012f8f
+--- /dev/null
++++ b/internal/serve/mod_capabilities_test.go
+@@ -0,0 +1,167 @@
++package serve
++
++import (
++	"encoding/json"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func TestModProjectChatModeHidesMutatingToolsAndRestoresAgentMode(t *testing.T) {
++	ts, _ := newModAgentTestServer(t)
++	defer ts.Close()
++
++	post := func(body string) {
++		t.Helper()
++		resp, err := http.Post(ts.URL+"/mod/project", "application/json", strings.NewReader(body))
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer resp.Body.Close()
++		if resp.StatusCode != http.StatusOK {
++			b, _ := io.ReadAll(resp.Body)
++			t.Fatalf("status=%d body=%s", resp.StatusCode, b)
++		}
++	}
++	post(`{"name":"Test","mode":"chat","toolPacks":["developer"],"liveDetail":"project"}`)
++
++	got, err := http.Get(ts.URL + "/mod/capabilities")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer got.Body.Close()
++	var body struct {
++		Capabilities []modCapabilityView `json:"capabilities"`
++	}
++	if err := json.NewDecoder(got.Body).Decode(&body); err != nil {
++		t.Fatal(err)
++	}
++	seen := map[string]modCapabilityView{}
++	for _, c := range body.Capabilities {
++		seen[c.Name] = c
++	}
++	if !seen["read_x"].ProviderVisible || seen["read_x"].Decision == "deny" {
++		t.Fatalf("read_x=%+v", seen["read_x"])
++	}
++	if len(seen["read_x"].Schema) == 0 {
++		t.Fatal("capability registry must expose the native tool schema to the APK")
++	}
++	if seen["write_x"].ProviderVisible || seen["write_x"].Decision != "deny" {
++		t.Fatalf("write_x=%+v", seen["write_x"])
++	}
++
++	post(`{"name":"Test","mode":"agent","toolPacks":["developer"],"liveDetail":"project"}`)
++	got2, err := http.Get(ts.URL + "/mod/capabilities")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer got2.Body.Close()
++	body.Capabilities = nil
++	if err := json.NewDecoder(got2.Body).Decode(&body); err != nil {
++		t.Fatal(err)
++	}
++	seen = map[string]modCapabilityView{}
++	for _, c := range body.Capabilities {
++		seen[c.Name] = c
++	}
++	if !seen["write_x"].ProviderVisible || seen["write_x"].Decision == "deny" {
++		t.Fatalf("write_x not restored in agent mode: %+v", seen["write_x"])
++	}
++}
++
++func TestModProjectToolPackRestrictsSurfaceAndManualDenySurvives(t *testing.T) {
++	ts, _ := newModAgentTestServer(t)
++	defer ts.Close()
++	resp, err := http.Post(ts.URL+"/mod/agent/tools", "application/json", strings.NewReader(`{"decisions":{"read_x":"deny"}}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("tool policy status=%d", resp.StatusCode)
++	}
++	resp, err = http.Post(ts.URL+"/mod/project", "application/json", strings.NewReader(`{"mode":"agent","toolPacks":["basic"],"liveDetail":"metadata"}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("project status=%d", resp.StatusCode)
++	}
++	got, err := http.Get(ts.URL + "/mod/capabilities")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer got.Body.Close()
++	raw, _ := io.ReadAll(got.Body)
++	if !strings.Contains(string(raw), `"manualDecision":"deny"`) {
++		t.Fatalf("manual deny not preserved: %s", raw)
++	}
++	var caps struct {
++		Capabilities []modCapabilityView `json:"capabilities"`
++	}
++	if err := json.Unmarshal(raw, &caps); err != nil {
++		t.Fatal(err)
++	}
++	seen := map[string]modCapabilityView{}
++	for _, c := range caps.Capabilities {
++		seen[c.Name] = c
++	}
++	if seen["write_x"].Decision != "deny" || seen["write_x"].ProviderVisible {
++		t.Fatalf("basic pack must hide writer: %+v", seen["write_x"])
++	}
++}
++
++func TestModEnvironmentAndProjectContract(t *testing.T) {
++	ts, root := newModAgentTestServer(t)
++	defer ts.Close()
++	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module apk-test\n"), 0644); err != nil {
++		t.Fatal(err)
++	}
++	resp, err := http.Get(ts.URL + "/mod/environment")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		raw, _ := io.ReadAll(resp.Body)
++		t.Fatalf("environment=%d %s", resp.StatusCode, raw)
++	}
++	var env modEnvironmentSnapshot
++	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
++		t.Fatal(err)
++	}
++	if env.Source != "reasonix-native-environment" {
++		t.Fatalf("environment source=%q", env.Source)
++	}
++	if env.Workspace != root {
++		t.Fatalf("workspace=%q want %q", env.Workspace, root)
++	}
++	if !containsString(env.ProjectKinds, "go") || !containsString(env.Markers, "go.mod") {
++		t.Fatalf("environment markers=%v kinds=%v", env.Markers, env.ProjectKinds)
++	}
++
++	project, err := http.Get(ts.URL + "/mod/project")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer project.Body.Close()
++	p, _ := io.ReadAll(project.Body)
++	for _, want := range []string{`"chatEndpoint":"/submit"`, `"eventsEndpoint":"/mod/events"`, `"historyEndpoint":"/mod/live/history"`} {
++		if !strings.Contains(string(p), want) {
++			t.Fatalf("project contract missing %s: %s", want, p)
++		}
++	}
++}
++
++func containsString(values []string, want string) bool {
++	for _, value := range values {
++		if value == want {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/internal/serve/mod_live.go b/internal/serve/mod_live.go
+new file mode 100644
+index 0000000..2bb5866
+--- /dev/null
++++ b/internal/serve/mod_live.go
+@@ -0,0 +1,152 @@
++package serve
++
++import (
++	"encoding/json"
++	"net/http"
++	"strconv"
++	"strings"
++
++	"reasonix/internal/efficiency"
++	"reasonix/internal/event"
++	"reasonix/internal/secrets"
++)
++
++func modBoundedRedacted(s string, max int) string {
++	s = secrets.RedactCredentials(s)
++	if max <= 0 || len(s) <= max {
++		return s
++	}
++	return s[:max] + "\n…[truncated]"
++}
++
++func (s *Server) modProjectDetailsEnabled() bool {
++	return s.modProfile.Snapshot().LiveDetail == efficiency.LiveDetailProject
++}
++
++// observeLiveCoreEvent translates Reasonix's typed event stream into the
++// stable APK protocol. It intentionally never mirrors event.Reasoning or the
++// Message.Reasoning field: the APK gets visible chat text, actions, diffs,
++// command results and verification state, not hidden chain-of-thought.
++func (s *Server) observeLiveCoreEvent(e event.Event) {
++	details := s.modProjectDetailsEnabled()
++	switch e.Kind {
++	case event.TurnStarted:
++		s.modHub.Emit("live.turn.started", map[string]any{"modelRef": e.ModelRef})
++	case event.Text:
++		if e.Text != "" {
++			s.modHub.EmitTransient("live.chat.delta", map[string]any{"text": modBoundedRedacted(e.Text, 16<<10), "source": e.Source})
++		}
++	case event.Message:
++		if e.Text != "" {
++			s.modHub.Emit("live.chat.message", map[string]any{"text": modBoundedRedacted(e.Text, 64<<10), "source": e.Source})
++		}
++	case event.Phase:
++		s.modHub.Emit("live.phase", map[string]any{"label": modBoundedRedacted(e.Text, 512), "source": e.Source})
++	case event.TurnPhase:
++		s.modHub.Emit("live.phase", map[string]any{"phase": string(e.PhaseName)})
++	case event.ToolDispatch:
++		payload := map[string]any{
++			"id": e.Tool.ID, "name": e.Tool.Name, "resolvedName": e.Tool.ResolvedName,
++			"capabilityId": e.Tool.CapabilityID, "readOnly": e.Tool.ReadOnly,
++			"partial": e.Tool.Partial, "parentId": e.Tool.ParentID,
++			"added": e.Tool.Added, "removed": e.Tool.Removed,
++		}
++		if details && !e.Tool.Partial {
++			payload["argsPreview"] = modBoundedRedacted(e.Tool.Args, 4<<10)
++			if e.Tool.Diff != "" {
++				payload["diff"] = modBoundedRedacted(e.Tool.Diff, 12<<10)
++			}
++		}
++		s.modHub.Emit("live.tool.started", payload)
++	case event.ToolProgress:
++		if details && e.Tool.Output != "" {
++			s.modHub.EmitTransient("live.tool.progress", map[string]any{"id": e.Tool.ID, "name": e.Tool.Name, "outputPreview": modBoundedRedacted(e.Tool.Output, 2<<10)})
++		}
++	case event.ToolResult, event.ToolResultPreview:
++		payload := map[string]any{
++			"id": e.Tool.ID, "name": e.Tool.Name, "resolvedName": e.Tool.ResolvedName,
++			"ok": e.Tool.Err == "", "durationMs": e.Tool.DurationMs, "truncated": e.Tool.Truncated,
++		}
++		if e.Tool.Err != "" {
++			payload["error"] = modBoundedRedacted(e.Tool.Err, 4<<10)
++		}
++		if details && e.Tool.Output != "" {
++			payload["outputPreview"] = modBoundedRedacted(e.Tool.Output, 8<<10)
++		}
++		if e.Tool.Execution != nil {
++			payload["execution"] = map[string]any{
++				"kind": e.Tool.Execution.Kind, "state": e.Tool.Execution.State,
++				"failurePhase": e.Tool.Execution.FailurePhase, "exitCode": e.Tool.Execution.ExitCode,
++				"verification": e.Tool.Execution.Verification, "durationMs": e.Tool.Execution.DurationMs,
++			}
++		}
++		s.modHub.Emit("live.tool.finished", payload)
++	case event.ApprovalRequest:
++		payload := map[string]any{"id": e.Approval.ID, "tool": e.Approval.Tool}
++		if details && e.Approval.Subject != "" {
++			payload["subject"] = modBoundedRedacted(e.Approval.Subject, 2<<10)
++		}
++		s.modHub.Emit("live.approval.requested", payload)
++	case event.WorkspaceChanged:
++		if e.Workspace == nil {
++			return
++		}
++		payload := map[string]any{"changeCount": len(e.Workspace.Changes), "allPaths": e.Workspace.AllPaths, "source": e.Workspace.Source}
++		if details {
++			const maxChanges = 128
++			count := len(e.Workspace.Changes)
++			if count > maxChanges {
++				count = maxChanges
++				payload["changesTruncated"] = true
++			}
++			changes := make([]map[string]string, 0, count)
++			for _, c := range e.Workspace.Changes[:count] {
++				changes = append(changes, map[string]string{
++					"path": modBoundedRedacted(c.Path, 1024), "oldPath": modBoundedRedacted(c.OldPath, 1024), "op": c.Op,
++				})
++			}
++			payload["changes"] = changes
++		}
++		s.modHub.Emit("live.workspace.changed", payload)
++	case event.Retrying:
++		s.modHub.Emit("live.provider.retry", map[string]any{"attempt": e.RetryAttempt, "max": e.RetryMax, "scope": string(e.RetryScope)})
++	case event.CompletionSummary:
++		if e.Completion != nil {
++			s.modHub.Emit("live.verification.summary", e.Completion)
++		}
++	case event.TurnDone:
++		payload := map[string]any{"cancelled": e.Cancelled, "outcome": e.Outcome}
++		if e.Err != nil {
++			payload["error"] = secrets.RedactError(e.Err)
++		}
++		if e.Readiness != nil {
++			payload["readiness"] = e.Readiness
++		}
++		s.modHub.Emit("live.turn.done", payload)
++	}
++}
++
++func (s *Server) modLiveHistory(w http.ResponseWriter, r *http.Request) {
++	limit := 100
++	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
++		n, err := strconv.Atoi(raw)
++		if err != nil || n < 1 || n > 512 {
++			http.Error(w, "limit must be 1..512", http.StatusBadRequest)
++			return
++		}
++		limit = n
++	}
++	raw := s.modHub.History(512)
++	out := make([]modEvent, 0, len(raw))
++	for _, item := range raw {
++		var e modEvent
++		if json.Unmarshal(item, &e) != nil || !strings.HasPrefix(e.Type, "live.") {
++			continue
++		}
++		out = append(out, e)
++	}
++	if len(out) > limit {
++		out = out[len(out)-limit:]
++	}
++	writeJSON(w, map[string]any{"events": out, "count": len(out)})
++}
+diff --git a/internal/serve/mod_live_test.go b/internal/serve/mod_live_test.go
+new file mode 100644
+index 0000000..46a6b17
+--- /dev/null
++++ b/internal/serve/mod_live_test.go
+@@ -0,0 +1,82 @@
++package serve
++
++import (
++	"encoding/json"
++	"io"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"reasonix/internal/config"
++	"reasonix/internal/control"
++	"reasonix/internal/efficiency"
++	"reasonix/internal/event"
++	"reasonix/internal/tool"
++)
++
++func newModLiveTestServer(t *testing.T) (*Server, *httptest.Server) {
++	t.Helper()
++	reg := tool.NewRegistry()
++	reg.Add(modAgentTestTool{name: "read_x", ro: true})
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, Registry: reg, WorkspaceRoot: t.TempDir()})
++	srv := New(ctrl, bc, config.ServeConfig{})
++	return srv, httptest.NewServer(srv.Handler())
++}
++
++func TestModLiveProtocolExposesActionsButNeverReasoning(t *testing.T) {
++	srv, ts := newModLiveTestServer(t)
++	defer ts.Close()
++	srv.observeCoreEvent(event.Event{Kind: event.Reasoning, Text: "HIDDEN_CHAIN_123"})
++	srv.observeCoreEvent(event.Event{Kind: event.Text, Text: "visible answer"})
++	srv.observeCoreEvent(event.Event{Kind: event.Message, Text: "visible answer", Reasoning: "HIDDEN_MESSAGE_REASONING"})
++	srv.observeCoreEvent(event.Event{Kind: event.ToolDispatch, Tool: event.Tool{ID: "1", Name: "edit_file", Args: `{"path":"main.go","content":"x"}`, ReadOnly: false, FileDiff: event.FileDiff{Diff: "--- a/main.go\n+++ b/main.go\n+x\n", Added: 1}}})
++	srv.observeCoreEvent(event.Event{Kind: event.ToolResult, Tool: event.Tool{ID: "1", Name: "edit_file", Output: "done sk-proj-abcdefghijklmnop", DurationMs: 5}})
++
++	resp, err := ts.Client().Get(ts.URL + "/mod/live/history?limit=100")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	raw, _ := io.ReadAll(resp.Body)
++	text := string(raw)
++	if strings.Contains(text, "HIDDEN_CHAIN_123") || strings.Contains(text, "HIDDEN_MESSAGE_REASONING") {
++		t.Fatalf("hidden reasoning leaked: %s", text)
++	}
++	for _, want := range []string{"live.chat.message", "visible answer", "live.tool.started", "live.tool.finished", `"added":1`} {
++		if !strings.Contains(text, want) {
++			t.Fatalf("missing %q in %s", want, text)
++		}
++	}
++	if strings.Contains(text, "sk-proj-abcdefghijklmnop") {
++		t.Fatalf("credential was not redacted: %s", text)
++	}
++}
++
++func TestModLiveMetadataModeOmitsProjectPayloads(t *testing.T) {
++	srv, ts := newModLiveTestServer(t)
++	defer ts.Close()
++	if _, err := srv.modProfile.Configure(efficiency.ProjectProfile{Mode: efficiency.AgentModeAgent, LiveDetail: efficiency.LiveDetailMetadata}); err != nil {
++		t.Fatal(err)
++	}
++	srv.observeCoreEvent(event.Event{Kind: event.ToolDispatch, Tool: event.Tool{ID: "1", Name: "edit_file", Args: `{"secret":"SOURCE_BODY"}`, FileDiff: event.FileDiff{Diff: "DIFF_BODY", Added: 2}}})
++	srv.observeCoreEvent(event.Event{Kind: event.ToolResult, Tool: event.Tool{ID: "1", Name: "edit_file", Output: "OUTPUT_BODY"}})
++	srv.observeCoreEvent(event.Event{Kind: event.ApprovalRequest, Approval: event.Approval{ID: "a1", Tool: "edit_file", Subject: "APPROVAL_SECRET_BODY"}})
++	srv.observeCoreEvent(event.Event{Kind: event.WorkspaceChanged, Workspace: &event.WorkspaceChangedPayload{Changes: []event.WorkspacePathChange{{Path: "SECRET_FILE_NAME", Op: "write"}}}})
++	resp, err := ts.Client().Get(ts.URL + "/mod/live/history")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	var body map[string]any
++	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
++		t.Fatal(err)
++	}
++	raw, _ := json.Marshal(body)
++	text := string(raw)
++	for _, forbidden := range []string{"SOURCE_BODY", "DIFF_BODY", "OUTPUT_BODY", "APPROVAL_SECRET_BODY", "SECRET_FILE_NAME", "argsPreview", "outputPreview"} {
++		if strings.Contains(text, forbidden) {
++			t.Fatalf("metadata mode leaked %q: %s", forbidden, text)
++		}
++	}
++}
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index 3ca0e2b..85108e1 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -63,9 +63,11 @@ type Server struct {
+ 	modRouter   *efficiency.Escalator
+ 	modCycle    *efficiency.RepairCycle
+ 	modExec     *efficiency.ExecutionRouter
++	modProfile  *efficiency.ProjectProfileManager
+ 	modHub      *modBroadcaster
+ 	modMu       sync.RWMutex
+ 	modTaskGate modTaskCostGateStatus
++	modEnv      modEnvironmentSnapshot
+ 	// modToolDecisions persists APK/session tool overrides across native model rebuilds.
+ 	modToolDecisions map[string]string
+ 	// buildController builds the replacement controller during a model switch.
+@@ -103,6 +105,7 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 		modGov:           efficiency.NewGovernor(),
+ 		modQuality:       efficiency.NewQualityMonitor(),
+ 		modRouter:        efficiency.NewEscalator(),
++		modProfile:       efficiency.NewProjectProfileManager(),
+ 		modHub:           newModBroadcaster(),
+ 		modToolDecisions: map[string]string{},
+ 		titles:           newTitleCache(ctrl.SessionDir()),
+@@ -111,6 +114,7 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 	// v0.5 execution routing stays disabled until explicitly configured. The
+ 	// switch adapter is the native serve model-switch path, so there is still one
+ 	// controller/session implementation rather than a Balance Mod fork.
++	s.modEnv = discoverModEnvironment(context.Background(), s.modWorkspacePath(), false)
+ 	s.modExec = efficiency.NewExecutionRouter(s.modGov)
+ 	s.modExec.SetSwitcher(func(ctx context.Context, ref string) error { return s.switchModel(ctx, ref) })
+ 	s.modExec.ObserveCurrentModel(currentModelRef(ctrl))
+@@ -575,6 +579,10 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("POST /mod/execution/reset", s.modExecutionReset)
+ 	mux.HandleFunc("GET /mod/agent", s.modAgentGet)
+ 	mux.HandleFunc("POST /mod/agent/reload", s.modAgentReload)
++	mux.HandleFunc("GET /mod/capabilities", s.modCapabilitiesGet)
++	mux.HandleFunc("GET /mod/environment", s.modEnvironmentGet)
++	mux.HandleFunc("GET /mod/project", s.modProjectGet)
++	mux.HandleFunc("POST /mod/project", s.modProjectSet)
+ 	mux.HandleFunc("GET /mod/agent/tools", s.modAgentToolsGet)
+ 	mux.HandleFunc("POST /mod/agent/tools", s.modAgentToolsSet)
+ 	mux.HandleFunc("GET /mod/agent/skills", s.modAgentSkillsGet)
+@@ -588,6 +596,7 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("GET /mod/recovery", s.modRecoveryGet)
+ 	mux.HandleFunc("POST /mod/recovery/rollback-last", s.modRecoveryRollbackLast)
+ 	mux.HandleFunc("GET /mod/events", s.modEvents)
++	mux.HandleFunc("GET /mod/live/history", s.modLiveHistory)
+ 	mux.HandleFunc("GET /sessions", s.sessions)
+ 	mux.HandleFunc("GET /skills", s.skills)
+ 	mux.HandleFunc("GET /todos", s.todos)
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index a540bf8..b81ca2d 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,52 +5,61 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/20] Unit tests: Balance Mod core + APK bridge"
++echo "[1/24] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/20] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++echo "[2/24] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
+ 
+-echo "[3/20] Failure cache: verified-only persistence + corruption recovery"
++echo "[3/24] Failure cache: verified-only persistence + corruption recovery"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
+ 
+-echo "[4/20] Context/patch economy: log reducer + patch governor"
++echo "[4/24] Context/patch economy: log reducer + patch governor"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
+ 
+-echo "[5/20] Unified repair cycle: verifier -> router -> cache"
++echo "[5/24] Unified repair cycle: verifier -> router -> cache"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestVerificationReceiptRequiresHostEvidence|TestRepairCycleFlashFlashProFlashAndVerifiedCache)$' -count=1
+ 
+-echo "[6/20] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
++echo "[6/24] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleDrivenByOfflineMockProvider$' -count=1
+ 
+-echo "[7/20] Recovery policy: regression/oversize rollback + fail-closed conflict"
++echo "[7/24] Recovery policy: regression/oversize rollback + fail-closed conflict"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleRollback' -count=1
+ 
+-echo "[8/20] APK cycle/recovery API integration"
++echo "[8/24] APK cycle/recovery API integration"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModCycleAPIAndHostRepairWiring|TestModRecoveryAPIIsFailClosedWithoutCheckpoint)$' -count=1
+ 
+-echo "[9/20] Execution router: model slots + immediate KZT admission re-check"
++echo "[9/24] Execution router: model slots + immediate KZT admission re-check"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouter' -count=1
+ 
+-echo "[10/20] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
++echo "[10/24] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModExecutionRouterUsesNativeServeModelSwitch$' -count=1
+ 
+-echo "[11/20] APK execution config/status contract"
++echo "[11/24] APK execution config/status contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModExecutionAPIIsStrictAndAPKVisible|TestModStatusExposesTypedAPKSurface)$' -count=1
+ 
+-echo "[12/20] Universal agent control: native per-tool allow/ask/deny + schema trim"
++echo "[12/24] Universal agent control: native per-tool allow/ask/deny + schema trim"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control ./internal/tool -run '^(TestSessionToolDecisions|TestSessionHiddenTools)' -count=1
+ 
+-echo "[13/20] APK agent/tools API contract"
++echo "[13/24] APK agent/tools API contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAgentToolsAPIUsesNativeRuntimePolicy$' -count=1
+ 
+-echo "[14/20] APK instructions + workspace file bridge"
++echo "[14/24] APK instructions + workspace file bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModInstructionsAndWorkspaceFileAPI|TestModWorkspaceFileRejectsTraversal)$' -count=1
+ 
+-echo "[15/20] Native Reasonix completion gate regression test"
++echo "[15/24] Provider-agnostic project profile"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestProjectProfile' -count=1
++
++echo "[16/24] Capability Registry + Chat/Agent mode + Tool Packs"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProjectChatModeHidesMutatingToolsAndRestoresAgentMode|TestModProjectToolPackRestrictsSurfaceAndManualDenySurvives|TestModEnvironmentAndProjectContract)$' -count=1
++
++echo "[17/24] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModLive' -count=1
++
++echo "[18/24] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[16/20] Build CLI only (skip example plugin)"
++echo "[19/24] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -76,7 +85,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[17/20] Offline normal tool-loop"
++echo "[20/24] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+@@ -103,7 +112,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[18/20] Offline anti-loop intervention"
++echo "[21/24] Offline anti-loop intervention"
+ LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+@@ -111,17 +120,25 @@ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+   exit 1
+ fi
+ 
+-echo "[19/20] APK universal control contract summary"
++echo "[22/24] Universal agent-control contract summary"
+ echo "  - workspace root + confined file browser: PASS"
+ echo "  - per-tool allow/ask/deny via native gate: PASS"
+ echo "  - instruction editor via native memory docs: PASS"
+ echo "  - skill management surface: compiled in core serve tests"
+ 
+-echo "[20/20] PASS — no provider API key/network was used"
++echo "[23/24] Universal APK protocol summary"
++echo "  - dynamic Capability Registry + Tool Packs: PASS"
++echo "  - Chat mode denies mutating tools without creating a second agent: PASS"
++echo "  - APK environment endpoint reuses Reasonix native probes/cache + project markers: PASS"
++echo "  - project profile is provider-agnostic and APK-replayable: PASS"
++echo "  - live event history exposes actions/diffs/results but not hidden reasoning: PASS"
++
++echo "[24/24] PASS — no provider API key/network was used"
+ echo "  - v0.1 KZT budget/resource telemetry: PASS"
+ echo "  - v0.2 native anti-loop/completion telemetry: PASS"
+ echo "  - v0.3 router/cache/log/patch modules: PASS"
+ echo "  - v0.4 unified repair cycle + native rollback adapter: PASS"
+ echo "  - v0.5 provider-agnostic execution router + native model switching: PASS"
+ echo "  - v0.6 universal APK agent control + workspace bridge: PASS"
+-echo "BALANCE_MOD_V06_SMOKE_PASS"
++echo "  - v0.7 capability/environment/project/live APK protocol: PASS"
++echo "BALANCE_MOD_V07_SMOKE_PASS"

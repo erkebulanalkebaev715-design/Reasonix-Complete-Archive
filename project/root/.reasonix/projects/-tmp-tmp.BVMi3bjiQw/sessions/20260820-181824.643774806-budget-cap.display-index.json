@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "revision_known": true,
+  "content_digest": "521ca24841b29944fb3ecb0acb3ead85581d8b6909ee6831e2e3de0b143c4733",
+  "transcript_size": 5071,
+  "message_count": 3,
+  "authored_turns": 1,
+  "entries": [
+    {
+      "index": 0,
+      "offset": 0,
+      "length": 4533,
+      "role": "system",
+      "authored_turn": 0
+    },
+    {
+      "index": 1,
+      "offset": 4533,
+      "length": 457,
+      "role": "user",
+      "authored_turn": 1,
+      "starts_turn": true
+    },
+    {
+      "index": 2,
+      "offset": 4990,
+      "length": 81,
+      "role": "assistant",
+      "authored_turn": 1
+    }
+  ],
+  "updated_at": "2026-08-20T18:18:26.103643036Z"
+}

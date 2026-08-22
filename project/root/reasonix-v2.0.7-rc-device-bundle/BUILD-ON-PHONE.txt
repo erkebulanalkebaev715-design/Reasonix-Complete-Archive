@@ -1,0 +1,19 @@
+Reasonix v2.0.7 RC — physical device build gate
+
+STEP A — Termux host (NOT inside Debian):
+  pkg install d8 aapt apksigner ecj zip -y
+  cd <extracted bundle>/mobile
+  bash ./build_in_termux.sh
+
+Expected only if real Android build succeeds:
+  VOICE_BUILD_READY
+  APK=/sdcard/Download/Reasonix-Mobile-v2.0.7-RC.apk
+
+STEP B — Debian/PRoot backend:
+  Copy/extract backend directory to ~/reasonix-mobile-v1.5.0-backend
+  cd ~/reasonix-mobile-v1.5.0-backend
+  bash ./upgrade_backend.sh
+  bash ./reasonix_mobile_backend.sh full-stack-audit
+
+Do NOT call voice PASS until VOICE_TEST.md is completed on the physical device.
+Do NOT delete the previous APK before update installation is confirmed.

@@ -1,0 +1,12 @@
+{
+  "id": "bash-1",
+  "kind": "bash",
+  "label": "go build ./... 2\u003e\u00261 | tail -20; echo \"BUILD_EXIT…",
+  "sessionId": "20260819-104022.197469237-deepseek-v4-flash",
+  "ownerId": "745fb2a82093133231a6c76364bfe3c4",
+  "status": "done",
+  "startedAt": 1787136298884,
+  "finishedAt": 1787136299090,
+  "artifactComplete": true,
+  "logPath": "bash-1.log"
+}

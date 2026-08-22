@@ -1,0 +1,12 @@
+{
+  "id": "20260818-080012.717869531-smoke",
+  "created_at": "2026-08-18T08:00:14.400927607Z",
+  "updated_at": "2026-08-18T08:00:14.652706991Z",
+  "model": "balance-rc-mock/smoke",
+  "revision": 1,
+  "content_digest": "11d7c0d50cbd360d8ac649a3aa0df729d45196012d431ed3ff4071c8c0330506",
+  "writer_id": "localhost-31246-699da79c960b47b7",
+  "schema_version": 2,
+  "turns": 1,
+  "preview": "Run the v0.18 offline RC tool-loop and verify hello.py."
+}

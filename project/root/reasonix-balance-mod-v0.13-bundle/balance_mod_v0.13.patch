@@ -1,0 +1,968 @@
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+index 1f0890a..c5f2096 100644
+--- a/docs/BALANCE_MOD.md
++++ b/docs/BALANCE_MOD.md
+@@ -566,3 +566,19 @@ Safety rules:
+ 
+ APK endpoints: `GET /mod/orchestrator`, `POST /mod/orchestrator/config`,
+ `POST /mod/orchestrator/stop`, and `POST /mod/orchestrator/resume`.
++
++## v0.13 — durable route recovery + hard Pro diagnosis sandbox
++
++The two known v0.12 safety gaps are closed before the APK protocol is frozen.
++A host-derived pending power route is persisted in sanitized form before an
++automatic model transition. Raw logs, fix hints, prompts, source and hidden
++reasoning are never written into that state. Continuations use a stable native
++session-inbox idempotency key, so a restart after durable enqueue replays the
++same receipt instead of creating a second model turn. Restored pending routes
++require an explicit APK resume after backend restart.
++
++`pro_diagnosis` is now a native permission/schema boundary, not merely a prompt
++instruction: every mutating tool is denied and removed from the provider schema
++while read-only tools remain available. The `use_capability` proxy can stay
++visible because its resolved target still passes through the same native deny
++policy. A failed model switch rolls the temporary execution-policy overlay back.
+diff --git a/internal/efficiency/execution_router.go b/internal/efficiency/execution_router.go
+index 010421b..47a5577 100644
+--- a/internal/efficiency/execution_router.go
++++ b/internal/efficiency/execution_router.go
+@@ -68,6 +68,12 @@ type ExecutionSnapshot struct {
+ // independently testable and prevents a second controller/session engine.
+ type ModelSwitchFunc func(context.Context, string) error
+ 
++// ExecutionModeGuardFunc lets the host install a fail-closed policy overlay
++// before a route changes execution mode/model. The returned undo function is
++// called if the subsequent model switch fails, restoring the previous policy.
++// A nil undo is allowed.
++type ExecutionModeGuardFunc func(context.Context, ExecutionMode, string) (undo func(), err error)
++
+ // ExecutionRouter converts deterministic policy decisions into concrete model
+ // selections. It never decides whether Pro is deserved — Escalator owns that.
+ // Its job is fail-closed admission + switching + APK-visible state.
+@@ -77,6 +83,7 @@ type ExecutionRouter struct {
+ 	cfg      ExecutionConfig
+ 	budget   *Governor
+ 	switcher ModelSwitchFunc
++	guard    ExecutionModeGuardFunc
+ 	snap     ExecutionSnapshot
+ }
+ 
+@@ -114,6 +121,15 @@ func ValidateExecutionConfig(c ExecutionConfig) error {
+ 	return nil
+ }
+ 
++func (r *ExecutionRouter) SetModeGuard(fn ExecutionModeGuardFunc) {
++	if r == nil {
++		return
++	}
++	r.mu.Lock()
++	r.guard = fn
++	r.mu.Unlock()
++}
++
+ func (r *ExecutionRouter) SetSwitcher(fn ModelSwitchFunc) {
+ 	if r == nil {
+ 		return
+@@ -209,6 +225,7 @@ func (r *ExecutionRouter) Apply(ctx context.Context, in ExecutionRequest) (Execu
+ 	r.mu.Lock()
+ 	cfg := r.cfg
+ 	switcher := r.switcher
++	guard := r.guard
+ 	priorSwitches := r.snap.Switches
+ 	configured := r.snap.Configured
+ 	r.mu.Unlock()
+@@ -241,6 +258,14 @@ func (r *ExecutionRouter) Apply(ctx context.Context, in ExecutionRequest) (Execu
+ 			CurrentModelRef: current, LastAction: in.Decision.Action,
+ 			Reason: in.Decision.Reason, Config: cfg, UpdatedAtUnixMS: time.Now().UnixMilli(), Switches: priorSwitches,
+ 		}
++		if guard != nil {
++			if _, guardErr := guard(ctx, mode, ""); guardErr != nil {
++				snap.Blocked = true
++				snap.Reason = "execution mode guard failed: " + guardErr.Error()
++				r.store(snap)
++				return snap, guardErr
++			}
++		}
+ 		r.store(snap)
+ 		return snap, nil
+ 	}
+@@ -274,18 +299,35 @@ func (r *ExecutionRouter) Apply(ctx context.Context, in ExecutionRequest) (Execu
+ 		r.store(snap)
+ 		return snap, fmt.Errorf("%s", snap.Reason)
+ 	}
++	var undoGuard func()
++	if guard != nil {
++		var guardErr error
++		undoGuard, guardErr = guard(ctx, mode, target)
++		if guardErr != nil {
++			snap.Blocked = true
++			snap.Reason = "execution mode guard failed: " + guardErr.Error()
++			r.store(snap)
++			return snap, guardErr
++		}
++	}
+ 	if sameModelRef(current, target) {
+ 		snap.CurrentModelRef = target
+ 		r.store(snap)
+ 		return snap, nil
+ 	}
+ 	if switcher == nil {
++		if undoGuard != nil {
++			undoGuard()
++		}
+ 		snap.Blocked = true
+ 		snap.Reason = "model switch adapter unavailable"
+ 		r.store(snap)
+ 		return snap, fmt.Errorf("%s", snap.Reason)
+ 	}
+ 	if err := switcher(ctx, target); err != nil {
++		if undoGuard != nil {
++			undoGuard()
++		}
+ 		snap.Blocked = true
+ 		snap.Reason = "model switch failed: " + err.Error()
+ 		r.store(snap)
+diff --git a/internal/efficiency/execution_router_test.go b/internal/efficiency/execution_router_test.go
+index 8b906ec..26cac86 100644
+--- a/internal/efficiency/execution_router_test.go
++++ b/internal/efficiency/execution_router_test.go
+@@ -3,6 +3,7 @@ package efficiency
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"reflect"
+ 	"testing"
+ )
+@@ -107,3 +108,25 @@ func TestExecutionRouterNoSwitcherNeededWhenRefAlreadyActive(t *testing.T) {
+ 		t.Fatalf("snap=%+v err=%v", snap, err)
+ 	}
+ }
++
++func TestExecutionRouterModeGuardRunsBeforeSwitchAndRollsBackOnFailure(t *testing.T) {
++	gov := NewGovernor()
++	r := NewExecutionRouter(gov)
++	if _, err := r.Configure(ExecutionConfig{Enabled: true, FlashPrimaryRef: "flash", ProRef: "pro"}, "flash"); err != nil {
++		t.Fatal(err)
++	}
++	var guarded ExecutionMode
++	var undone bool
++	r.SetModeGuard(func(_ context.Context, mode ExecutionMode, _ string) (func(), error) {
++		guarded = mode
++		return func() { undone = true }, nil
++	})
++	r.SetSwitcher(func(context.Context, string) error { return fmt.Errorf("switch failed") })
++	_, err := r.Apply(context.Background(), ExecutionRequest{Decision: RouteDecision{Action: RouteDiagnosePro}, CurrentModelRef: "flash"})
++	if err == nil {
++		t.Fatal("expected switch failure")
++	}
++	if guarded != ExecutionProDiagnosis || !undone {
++		t.Fatalf("guarded=%q undone=%v", guarded, undone)
++	}
++}
+diff --git a/internal/serve/mod_agent_control.go b/internal/serve/mod_agent_control.go
+index 0b1b19d..7bd485a 100644
+--- a/internal/serve/mod_agent_control.go
++++ b/internal/serve/mod_agent_control.go
+@@ -11,6 +11,7 @@ import (
+ 	"sort"
+ 	"strings"
+ 
++	"reasonix/internal/efficiency"
+ 	"reasonix/internal/memory"
+ 	"reasonix/internal/tool"
+ )
+@@ -84,6 +85,37 @@ func (s *Server) canonicalModToolDecisions(in map[string]string) (map[string]str
+ 	return out, nil
+ }
+ 
++func (s *Server) modExecutionPolicyModeSnapshot() efficiency.ExecutionMode {
++	s.modMu.RLock()
++	defer s.modMu.RUnlock()
++	return s.modExecutionPolicyMode
++}
++
++func (s *Server) setModExecutionPolicyMode(mode efficiency.ExecutionMode) {
++	s.modMu.Lock()
++	s.modExecutionPolicyMode = mode
++	s.modMu.Unlock()
++}
++
++// prepareModExecutionPolicyMode installs the tool-policy overlay before a model
++// switch. The returned undo closure restores the previous overlay if the switch
++// fails. This keeps pro_diagnosis physically read-only even across controller
++// rebuilds, because switchModel re-applies the same effective policy to the new
++// controller before it can accept work.
++func (s *Server) prepareModExecutionPolicyMode(mode efficiency.ExecutionMode) (func(), error) {
++	previous := s.modExecutionPolicyModeSnapshot()
++	s.setModExecutionPolicyMode(mode)
++	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
++		s.setModExecutionPolicyMode(previous)
++		_ = s.applyModToolDecisionsToCurrentController()
++		return nil, err
++	}
++	return func() {
++		s.setModExecutionPolicyMode(previous)
++		_ = s.applyModToolDecisionsToCurrentController()
++	}, nil
++}
++
+ func (s *Server) applyModToolDecisionsToCurrentController() error {
+ 	ctl, ok := s.ctl().(modToolPolicyController)
+ 	if !ok {
+diff --git a/internal/serve/mod_app.go b/internal/serve/mod_app.go
+index 7e981b7..67ff209 100644
+--- a/internal/serve/mod_app.go
++++ b/internal/serve/mod_app.go
+@@ -18,6 +18,55 @@ import (
+ const modAppStateSchema = 1
+ const modAPKProtocolVersion = "balance-apk-v1"
+ 
++type modPersistedPowerRoute struct {
++	ID                  string                         `json:"id"`
++	StrategyID          string                         `json:"strategyId,omitempty"`
++	FailureFingerprint  string                         `json:"failureFingerprint,omitempty"`
++	ResolvedFingerprint string                         `json:"resolvedFingerprint,omitempty"`
++	PatchNumstat        string                         `json:"patchNumstat,omitempty"`
++	Regression          bool                           `json:"regression,omitempty"`
++	Verification        efficiency.VerificationReceipt `json:"verification"`
++	EstimatedFlashKZT   float64                        `json:"estimatedFlashKzt,omitempty"`
++	EstimatedProKZT     float64                        `json:"estimatedProKzt,omitempty"`
++	Finalization        bool                           `json:"finalization,omitempty"`
++}
++
++func sanitizePersistedNumstat(raw string) string {
++	lines := strings.Split(strings.TrimSpace(raw), "\n")
++	out := make([]string, 0, len(lines))
++	for i, line := range lines {
++		fields := strings.Fields(line)
++		if len(fields) < 2 {
++			continue
++		}
++		out = append(out, fmt.Sprintf("%s\t%s\t<persisted-%d>", fields[0], fields[1], i+1))
++	}
++	return strings.Join(out, "\n")
++}
++
++func persistableModPowerRoute(id string, a efficiency.RepairAttempt) *modPersistedPowerRoute {
++	if strings.TrimSpace(id) == "" {
++		return nil
++	}
++	return &modPersistedPowerRoute{
++		ID: strings.TrimSpace(id), StrategyID: strings.TrimSpace(a.StrategyID),
++		FailureFingerprint: strings.TrimSpace(a.FailureFingerprint), ResolvedFingerprint: strings.TrimSpace(a.ResolvedFingerprint),
++		PatchNumstat: sanitizePersistedNumstat(a.PatchNumstat), Regression: a.Regression, Verification: a.Verification,
++		EstimatedFlashKZT: a.EstimatedFlashKZT, EstimatedProKZT: a.EstimatedProKZT, Finalization: a.Finalization,
++	}
++}
++
++func (p *modPersistedPowerRoute) attempt() efficiency.RepairAttempt {
++	if p == nil {
++		return efficiency.RepairAttempt{}
++	}
++	return efficiency.RepairAttempt{
++		StrategyID: p.StrategyID, FailureFingerprint: p.FailureFingerprint, ResolvedFingerprint: p.ResolvedFingerprint,
++		PatchNumstat: p.PatchNumstat, Regression: p.Regression, Verification: p.Verification,
++		EstimatedFlashKZT: p.EstimatedFlashKZT, EstimatedProKZT: p.EstimatedProKZT, Finalization: p.Finalization,
++	}
++}
++
+ type modPersistedAppState struct {
+ 	SchemaVersion int                              `json:"schemaVersion"`
+ 	Workspace     string                           `json:"workspace"`
+@@ -28,6 +77,7 @@ type modPersistedAppState struct {
+ 	Budget        efficiency.BudgetPersistentState `json:"budget"`
+ 	Execution     efficiency.ExecutionConfig       `json:"execution"`
+ 	Orchestrator  *modAutoConfig                   `json:"orchestrator,omitempty"`
++	PendingPower  *modPersistedPowerRoute          `json:"pendingPower,omitempty"`
+ }
+ 
+ func canonicalModWorkspace(root string) string {
+@@ -59,16 +109,21 @@ func (s *Server) modPersistenceStatus() map[string]any {
+ 	s.modPersistMu.Lock()
+ 	defer s.modPersistMu.Unlock()
+ 	return map[string]any{
+-		"enabled":              s.modPersistPath != "",
+-		"path":                 s.modPersistPath,
+-		"lastError":            s.modPersistErr,
+-		"schemaVersion":        modAppStateSchema,
+-		"preservesBudgetSpend": true,
++		"enabled":                    s.modPersistPath != "",
++		"path":                       s.modPersistPath,
++		"lastError":                  s.modPersistErr,
++		"schemaVersion":              modAppStateSchema,
++		"preservesBudgetSpend":       true,
++		"preservesPendingPowerRoute": true,
+ 	}
+ }
+ 
+ func (s *Server) captureModAppState() modPersistedAppState {
+ 	auto := s.modAuto.Snapshot().Config
++	var pending *modPersistedPowerRoute
++	if id, attempt, ok := s.modPowerTurn.PendingRecord(); ok {
++		pending = persistableModPowerRoute(id, attempt)
++	}
+ 	return modPersistedAppState{
+ 		SchemaVersion: modAppStateSchema,
+ 		Workspace:     canonicalModWorkspace(s.modWorkspacePath()),
+@@ -79,6 +134,7 @@ func (s *Server) captureModAppState() modPersistedAppState {
+ 		Budget:        s.modGov.PersistentState(),
+ 		Execution:     s.modExec.Snapshot().Config,
+ 		Orchestrator:  &auto,
++		PendingPower:  pending,
+ 	}
+ }
+ 
+@@ -231,16 +287,22 @@ func (s *Server) loadModAppState() {
+ 			}
+ 		}
+ 	}
+-	if _, err := s.modExec.Configure(st.Execution, currentModelRef(s.ctl())); err != nil {
++	execSnap, err := s.modExec.Configure(st.Execution, currentModelRef(s.ctl()))
++	if err != nil {
+ 		s.setModPersistenceError(err)
+ 		return
+ 	}
++	s.setModExecutionPolicyMode(execSnap.Mode)
+ 	if st.Orchestrator != nil {
+ 		if _, err := s.modAuto.Configure(*st.Orchestrator); err != nil {
+ 			s.setModPersistenceError(err)
+ 			return
+ 		}
+ 	}
++	if st.PendingPower != nil && strings.TrimSpace(st.PendingPower.ID) != "" {
++		s.modPowerTurn.RestorePending(st.PendingPower.ID, st.PendingPower.attempt())
++		s.modAuto.noteBlocked("restored durable pending route after backend restart; explicit resume required", true)
++	}
+ 	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
+ 		s.setModPersistenceError(err)
+ 		return
+@@ -438,6 +500,7 @@ func (s *Server) modAppBootstrap(w http.ResponseWriter, r *http.Request) {
+ 		"projectManager":  map[string]any{"registryScope": "reasonix-home", "budgetScope": "workspace", "switchMethod": "supervisor-restart"},
+ 		"taskQueue":       s.modQueueView(),
+ 		"transport":       map[string]any{"http": true, "sse": true, "hiddenReasoningExported": false},
++		"safety":          map[string]any{"proDiagnosisReadOnly": true, "pendingRouteDurable": true, "continuationIdempotent": true, "restartRequiresExplicitResume": true},
+ 		"endpoints": map[string]string{
+ 			"bootstrap": "/mod/app/bootstrap", "apply": "/mod/app/apply",
+ 			"startTask": "/mod/app/task/start", "stopTask": "/mod/app/task/stop",
+diff --git a/internal/serve/mod_app_test.go b/internal/serve/mod_app_test.go
+index 2caa49c..902927a 100644
+--- a/internal/serve/mod_app_test.go
++++ b/internal/serve/mod_app_test.go
+@@ -14,6 +14,7 @@ import (
+ 	"reasonix/internal/billing"
+ 	"reasonix/internal/config"
+ 	"reasonix/internal/control"
++	"reasonix/internal/efficiency"
+ 	"reasonix/internal/event"
+ 	"reasonix/internal/memory"
+ 	"reasonix/internal/provider"
+@@ -141,3 +142,44 @@ func TestModAppStatePersistsBudgetSpendProfileAndToolsAcrossRestart(t *testing.T
+ // Compile-time guard: the test tool still satisfies the actual native tool contract.
+ var _ tool.Tool = modAgentTestTool{}
+ var _ = context.Background
++
++func TestModPendingPowerRoutePersistsSanitizedAcrossRestart(t *testing.T) {
++	home := t.TempDir()
++	t.Setenv("REASONIX_HOME", home)
++	root := t.TempDir()
++	reg := tool.NewRegistry()
++	reg.Add(modAgentTestTool{name: "read_x", ro: true})
++	bc1 := NewBroadcaster()
++	ctrl1 := control.New(control.Options{Sink: bc1, Registry: reg, WorkspaceRoot: root, SessionDir: filepath.Join(root, ".sessions"), ModelRef: "mock/flash"})
++	s1 := New(ctrl1, bc1, config.ServeConfig{})
++	a := efficiency.RepairAttempt{
++		StrategyID: "flash-a", FailureFingerprint: "fp-1", PatchNumstat: "1\t1\tx.go",
++		BuildLog: "SECRET_RAW_BUILD_LOG", FixHint: "SECRET_FIX_HINT",
++		Verification: efficiency.VerificationReceipt{RequiredChecks: 1, ChecksFailed: 1},
++	}
++	s1.modPowerTurn.RestorePending("pending-stable-id", a)
++	if err := s1.persistModAppState(); err != nil {
++		t.Fatal(err)
++	}
++	raw, err := os.ReadFile(s1.modPersistPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if strings.Contains(string(raw), "SECRET_RAW_BUILD_LOG") || strings.Contains(string(raw), "SECRET_FIX_HINT") {
++		t.Fatalf("content-bearing repair fields leaked into durable APK state: %s", raw)
++	}
++
++	bc2 := NewBroadcaster()
++	ctrl2 := control.New(control.Options{Sink: bc2, Registry: reg, WorkspaceRoot: root, SessionDir: filepath.Join(root, ".sessions"), ModelRef: "mock/flash"})
++	s2 := New(ctrl2, bc2, config.ServeConfig{})
++	id, restored, ok := s2.modPowerTurn.PendingRecord()
++	if !ok || id != "pending-stable-id" || restored.FailureFingerprint != "fp-1" {
++		t.Fatalf("restored=(%q,%+v,%v)", id, restored, ok)
++	}
++	if restored.BuildLog != "" || restored.FixHint != "" {
++		t.Fatal("restored durable route must remain sanitized")
++	}
++	if snap := s2.modAuto.Snapshot(); !snap.PendingRoute || snap.Active {
++		t.Fatalf("restart must require explicit APK resume: %+v", snap)
++	}
++}
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index fd3836d..10a73de 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -16,7 +16,7 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.12"
++const balanceModVersion = "balance-mod-v0.13"
+ 
+ // modEvent is a typed machine event for the Android client. Most Balance Mod
+ // telemetry is content-free; v0.7 live.* events may additionally carry bounded,
+@@ -225,6 +225,8 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 			"taskQueue":            "native-sessioninbox+reviewed-recovery+per-turn-budget-v0.10",
+ 			"unifiedPowerEngine":   "repair+router+budget+execution-single-path-v0.11",
+ 			"autoContinuation":     "idle-boundary+durable-inbox+submit-gate-v0.12",
++			"durablePendingRoute":  "sanitized-state+stable-idempotency-v0.13",
++			"proDiagnosisGuard":    "native-read-only-policy-overlay-v0.13",
+ 			"androidSupervisor":    "debian-process-wrapper-v0.8",
+ 		},
+ 	})
+@@ -359,6 +361,11 @@ func (s *Server) modExecutionConfigure(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, err.Error(), http.StatusBadRequest)
+ 		return
+ 	}
++	s.setModExecutionPolicyMode(snap.Mode)
++	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
++		http.Error(w, "apply execution tool guard: "+err.Error(), http.StatusConflict)
++		return
++	}
+ 	s.modHub.Emit("execution.configured", snap)
+ 	s.persistModAppStateBestEffort()
+ 	writeJSON(w, snap)
+@@ -374,6 +381,8 @@ func (s *Server) modExecutionReset(w http.ResponseWriter, _ *http.Request) {
+ 		return
+ 	}
+ 	snap := s.modExec.Reset(currentModelRef(s.ctl()))
++	s.setModExecutionPolicyMode(snap.Mode)
++	_ = s.applyModToolDecisionsToCurrentController()
+ 	s.modHub.Emit("execution.reset", snap)
+ 	s.persistModAppStateBestEffort()
+ 	writeJSON(w, snap)
+diff --git a/internal/serve/mod_capabilities.go b/internal/serve/mod_capabilities.go
+index c6c953d..b2e93d5 100644
+--- a/internal/serve/mod_capabilities.go
++++ b/internal/serve/mod_capabilities.go
+@@ -124,6 +124,7 @@ func (s *Server) modEffectiveToolDecisions() map[string]string {
+ 		return effective
+ 	}
+ 	profile := s.modProfile.Snapshot()
++	diagnosisReadOnly := s.modExecutionPolicyModeSnapshot() == efficiency.ExecutionProDiagnosis
+ 	allowedByPack := map[string]bool{}
+ 	if len(profile.ToolPacks) > 0 {
+ 		selected := map[string]bool{}
+@@ -140,6 +141,10 @@ func (s *Server) modEffectiveToolDecisions() map[string]string {
+ 		}
+ 	}
+ 	for _, e := range ctl.AllToolContractEntries() {
++		if diagnosisReadOnly && !e.ReadOnly && e.Name != "use_capability" {
++			effective[e.Name] = "deny"
++			continue
++		}
+ 		if len(profile.ToolPacks) > 0 && !allowedByPack[e.Name] {
+ 			effective[e.Name] = "deny"
+ 			continue
+diff --git a/internal/serve/mod_capabilities_test.go b/internal/serve/mod_capabilities_test.go
+index f012f8f..02f1439 100644
+--- a/internal/serve/mod_capabilities_test.go
++++ b/internal/serve/mod_capabilities_test.go
+@@ -8,6 +8,11 @@ import (
+ 	"path/filepath"
+ 	"strings"
+ 	"testing"
++
++	"reasonix/internal/config"
++	"reasonix/internal/control"
++	"reasonix/internal/efficiency"
++	"reasonix/internal/tool"
+ )
+ 
+ func TestModProjectChatModeHidesMutatingToolsAndRestoresAgentMode(t *testing.T) {
+@@ -165,3 +170,32 @@ func containsString(values []string, want string) bool {
+ 	}
+ 	return false
+ }
++
++func TestModProDiagnosisHardDeniesMutatingTools(t *testing.T) {
++	ts, _ := newModAgentTestServer(t)
++	defer ts.Close()
++	// Reach into the handler server through a direct instance so the execution
++	// overlay itself, not a chat/profile deny, is what hides the writer.
++	root := t.TempDir()
++	reg := tool.NewRegistry()
++	reg.Add(modAgentTestTool{name: "read_x", ro: true})
++	reg.Add(modAgentTestTool{name: "write_x"})
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc, Registry: reg, WorkspaceRoot: root, ModelRef: "mock/pro"})
++	s := New(ctrl, bc, config.ServeConfig{})
++	s.setModExecutionPolicyMode(efficiency.ExecutionProDiagnosis)
++	if err := s.applyModToolDecisionsToCurrentController(); err != nil {
++		t.Fatal(err)
++	}
++	views := s.modToolViews()
++	seen := map[string]modToolView{}
++	for _, v := range views {
++		seen[v.Name] = v
++	}
++	if seen["read_x"].Decision == "deny" || !seen["read_x"].ProviderVisible {
++		t.Fatalf("read tool unexpectedly blocked: %+v", seen["read_x"])
++	}
++	if seen["write_x"].Decision != "deny" || seen["write_x"].ProviderVisible {
++		t.Fatalf("pro diagnosis writer not hard-denied: %+v", seen["write_x"])
++	}
++}
+diff --git a/internal/serve/mod_orchestrator.go b/internal/serve/mod_orchestrator.go
+index 42e7db4..407803f 100644
+--- a/internal/serve/mod_orchestrator.go
++++ b/internal/serve/mod_orchestrator.go
+@@ -407,7 +407,7 @@ func (s *Server) runModAutoContinuation(ctx context.Context, seq uint64, session
+ 		return
+ 	}
+ 
+-	attempt, ok := s.modPowerTurn.Pending()
++	pendingID, attempt, ok := s.modPowerTurn.PendingRecord()
+ 	if !ok {
+ 		s.restoreModAutoQueue()
+ 		s.modAuto.finish(seq, "idle", "", "pending route disappeared", "", true)
+@@ -443,8 +443,9 @@ func (s *Server) runModAutoContinuation(ctx context.Context, seq uint64, session
+ 		return
+ 	}
+ 	action := res.Snapshot.NextAction
+-	s.modPowerTurn.Applied(string(action), true)
+ 	if res.Snapshot.Terminal || res.Snapshot.Blocked {
++		s.modPowerTurn.Applied(string(action), true)
++		s.persistModAppStateBestEffort()
+ 		s.restoreModAutoQueue()
+ 		state := "terminal"
+ 		if res.Snapshot.Blocked {
+@@ -468,25 +469,47 @@ func (s *Server) runModAutoContinuation(ctx context.Context, seq uint64, session
+ 		return
+ 	}
+ 
++	idem := fmt.Sprintf("balance-auto-v13-%s-%s", pendingID, action)
+ 	rec, err := api.EnqueueInbox(control.InboxRequest{
+ 		Intent:      sessioninbox.IntentFollowup,
+ 		Display:     display,
+ 		Raw:         prompt,
+ 		Submit:      prompt,
+ 		Source:      "balance-auto",
+-		Idempotency: fmt.Sprintf("balance-auto-%d-%s", seq, action),
++		Idempotency: idem,
+ 		Extra:       extra,
+ 	})
+ 	if err != nil {
+ 		s.finishModAutoBlocked(seq, "cannot persist automatic continuation: "+err.Error())
+ 		return
+ 	}
+-	if err := api.MoveInboxItem(rec.ItemID, 0); err != nil {
+-		_ = api.DeleteInboxItem(rec.ItemID)
+-		s.finishModAutoBlocked(seq, "cannot prioritize automatic continuation: "+err.Error())
++	// A completed idempotency receipt means this exact continuation already ran
++	// before a crash. Clear the restored pending route instead of duplicating the
++	// model turn. A live queued replay keeps the original item and may be moved
++	// to the front without creating another durable record.
++	if rec.Idempotent && rec.Position == 0 {
++		s.modPowerTurn.Applied(string(action), true)
++		s.persistModAppStateBestEffort()
++		s.restoreModAutoQueue()
++		s.modAuto.finish(seq, "recovered_completed", string(action), "durable continuation already completed", rec.ItemID, true)
++		s.modHub.Emit("orchestrator.recovered", map[string]any{"action": action, "itemId": rec.ItemID, "state": "completed"})
+ 		return
+ 	}
++	if rec.Position > 1 {
++		if err := api.MoveInboxItem(rec.ItemID, 0); err != nil {
++			if !rec.Idempotent {
++				_ = api.DeleteInboxItem(rec.ItemID)
++			}
++			s.finishModAutoBlocked(seq, "cannot prioritize automatic continuation: "+err.Error())
++			return
++		}
++	}
+ 
++	// The continuation is now durably represented by the native inbox. Clearing
++	// our pending route after that boundary is safe: on a crash before this save,
++	// the stable idempotency key above converts recovery into a replay hit.
++	s.modPowerTurn.Applied(string(action), true)
++	s.persistModAppStateBestEffort()
+ 	s.modAuto.stage(seq, "queued", string(action), "")
+ 	// Resuming the queue invokes Reasonix's native FIFO dispatcher synchronously.
+ 	// Because the auto item was moved to index 0, it owns the next admission.
+diff --git a/internal/serve/mod_power.go b/internal/serve/mod_power.go
+index 081b83a..1c16fbe 100644
+--- a/internal/serve/mod_power.go
++++ b/internal/serve/mod_power.go
+@@ -49,6 +49,7 @@ func (s *Server) modPowerApplyPending(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 	s.modPowerTurn.Applied(string(res.Snapshot.NextAction), true)
++	s.persistModAppStateBestEffort()
+ 	writeJSON(w, map[string]any{"power": res.Snapshot, "turn": s.modPowerTurn.Snapshot()})
+ }
+ 
+diff --git a/internal/serve/mod_power_turn.go b/internal/serve/mod_power_turn.go
+index 96a2f0c..3cf1e00 100644
+--- a/internal/serve/mod_power_turn.go
++++ b/internal/serve/mod_power_turn.go
+@@ -1,6 +1,7 @@
+ package serve
+ 
+ import (
++	"crypto/rand"
+ 	"crypto/sha256"
+ 	"encoding/hex"
+ 	"fmt"
+@@ -34,6 +35,7 @@ type modPowerTurnTracker struct {
+ 	lastFailureText string
+ 	completion      *event.CompletionSummaryInfo
+ 	pending         *efficiency.RepairAttempt
++	pendingID       string
+ }
+ 
+ func newModPowerTurnTracker() *modPowerTurnTracker { return &modPowerTurnTracker{} }
+@@ -47,6 +49,7 @@ func (t *modPowerTurnTracker) Reset() modPowerTurnSnapshot {
+ 	t.lastFailureText = ""
+ 	t.completion = nil
+ 	t.pending = nil
++	t.pendingID = ""
+ 	out := t.snap
+ 	t.mu.Unlock()
+ 	return out
+@@ -193,10 +196,52 @@ func (t *modPowerTurnTracker) Finish(e event.Event) (efficiency.RepairAttempt, b
+ 	t.snap.Active = false
+ 	t.snap.PendingApplication = true
+ 	t.pending = &a
++	t.pendingID = newModPowerPendingID()
+ 	t.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
+ 	return a, true
+ }
+ 
++func (t *modPowerTurnTracker) PendingRecord() (string, efficiency.RepairAttempt, bool) {
++	if t == nil {
++		return "", efficiency.RepairAttempt{}, false
++	}
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	if t.pending == nil {
++		return "", efficiency.RepairAttempt{}, false
++	}
++	return t.pendingID, *t.pending, true
++}
++
++func (t *modPowerTurnTracker) RestorePending(id string, a efficiency.RepairAttempt) {
++	if t == nil {
++		return
++	}
++	id = strings.TrimSpace(id)
++	if id == "" {
++		id = newModPowerPendingID()
++	}
++	t.mu.Lock()
++	cp := a
++	t.pending = &cp
++	t.pendingID = id
++	t.snap.StrategyID = strings.TrimSpace(a.StrategyID)
++	t.snap.LastFailureHash = strings.TrimSpace(a.FailureFingerprint)
++	t.snap.Active = false
++	t.snap.PendingApplication = true
++	t.snap.LastDecision = "restored_after_restart"
++	t.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++	t.mu.Unlock()
++}
++
++func newModPowerPendingID() string {
++	var b [12]byte
++	if _, err := rand.Read(b[:]); err == nil {
++		return hex.EncodeToString(b[:])
++	}
++	return modPowerHash(fmt.Sprintf("%d", time.Now().UnixNano()))
++}
++
+ func (t *modPowerTurnTracker) Pending() (efficiency.RepairAttempt, bool) {
+ 	if t == nil {
+ 		return efficiency.RepairAttempt{}, false
+@@ -218,6 +263,7 @@ func (t *modPowerTurnTracker) Applied(decision string, clear bool) {
+ 	t.snap.LastDecision = decision
+ 	if clear {
+ 		t.pending = nil
++		t.pendingID = ""
+ 		t.snap.PendingApplication = false
+ 	}
+ 	t.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
+@@ -254,6 +300,13 @@ func (s *Server) observePowerCoreEvent(e event.Event) {
+ 	s.modHub.Emit("power.turn.observed", s.modPowerTurn.Snapshot())
+ 	s.modHub.Emit("power.route.pending", map[string]any{"strategyId": attempt.StrategyID, "failureFingerprint": attempt.FailureFingerprint != "", "finalization": attempt.Finalization})
+ 	_ = attempt // the content-bearing attempt stays private in modPowerTurn.pending
++	// Persist the sanitized pending route before any model switch/continuation.
++	// This closes the TurnDone -> enqueue crash-loss window for real workspaces.
++	if err := s.persistModAppState(); err != nil {
++		s.modAuto.noteBlocked("cannot durably persist pending power route: "+err.Error(), true)
++		s.modHub.Emit("power.route.persistence_failed", map[string]any{"reason": err.Error()})
++		return
++	}
+ 	// v0.12 schedules the route at a real idle boundary. The scheduler pauses
+ 	// the native durable inbox before TurnDone fan-out finishes, then performs
+ 	// model switching and continuation admission outside this callback. If any
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index 92680b0..1c69322 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -79,6 +79,10 @@ type Server struct {
+ 	modPersistErr  string
+ 	// modToolDecisions persists APK/session tool overrides across native model rebuilds.
+ 	modToolDecisions map[string]string
++	// modExecutionPolicyMode is the host-owned tool-policy overlay selected by
++	// the execution router. Pro diagnosis is physically read-only at the native
++	// permission/schema layer; it is not merely a prompt instruction.
++	modExecutionPolicyMode efficiency.ExecutionMode
+ 	// buildController builds the replacement controller during a model switch.
+ 	// Nil in production (switchModel falls back to boot.Build); tests inject a
+ 	// fake so switchModel can be exercised without real provider IO.
+@@ -125,6 +129,9 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 	// controller/session implementation rather than a Balance Mod fork.
+ 	s.modEnv = discoverModEnvironment(context.Background(), s.modWorkspacePath(), false)
+ 	s.modExec = efficiency.NewExecutionRouter(s.modGov)
++	s.modExec.SetModeGuard(func(ctx context.Context, mode efficiency.ExecutionMode, _ string) (func(), error) {
++		return s.prepareModExecutionPolicyMode(mode)
++	})
+ 	s.modExec.SetSwitcher(func(ctx context.Context, ref string) error { return s.switchModel(ctx, ref) })
+ 	s.modExec.ObserveCurrentModel(currentModelRef(ctrl))
+ 	// v0.4 wires the previously independent policy pieces into one repair cycle.
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index 7df111b..da10a5c 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,100 +5,109 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/38] Unit tests: Balance Mod core + APK bridge"
++echo "[1/41] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/38] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++echo "[2/41] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
+ 
+-echo "[3/38] Failure cache: verified-only persistence + corruption recovery"
++echo "[3/41] Failure cache: verified-only persistence + corruption recovery"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
+ 
+-echo "[4/38] Context/patch economy: log reducer + patch governor"
++echo "[4/41] Context/patch economy: log reducer + patch governor"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
+ 
+-echo "[5/38] Unified repair cycle: verifier -> router -> cache"
++echo "[5/41] Unified repair cycle: verifier -> router -> cache"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestVerificationReceiptRequiresHostEvidence|TestRepairCycleFlashFlashProFlashAndVerifiedCache)$' -count=1
+ 
+-echo "[6/38] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
++echo "[6/41] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleDrivenByOfflineMockProvider$' -count=1
+ 
+-echo "[7/38] Recovery policy: regression/oversize rollback + fail-closed conflict"
++echo "[7/41] Recovery policy: regression/oversize rollback + fail-closed conflict"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleRollback' -count=1
+ 
+-echo "[8/38] APK cycle/recovery API integration"
++echo "[8/41] APK cycle/recovery API integration"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModCycleAPIAndHostRepairWiring|TestModRecoveryAPIIsFailClosedWithoutCheckpoint)$' -count=1
+ 
+-echo "[9/38] Execution router: model slots + immediate KZT admission re-check"
++echo "[9/41] Execution router: model slots + immediate KZT admission re-check"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouter' -count=1
+ 
+-echo "[10/38] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
++echo "[10/41] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModExecutionRouterUsesNativeServeModelSwitch$' -count=1
+ 
+-echo "[11/38] APK execution config/status contract"
++echo "[11/41] APK execution config/status contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModExecutionAPIIsStrictAndAPKVisible|TestModStatusExposesTypedAPKSurface)$' -count=1
+ 
+-echo "[12/38] Universal agent control: native per-tool allow/ask/deny + schema trim"
++echo "[12/41] Universal agent control: native per-tool allow/ask/deny + schema trim"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control ./internal/tool -run '^(TestSessionToolDecisions|TestSessionHiddenTools)' -count=1
+ 
+-echo "[13/38] APK agent/tools API contract"
++echo "[13/41] APK agent/tools API contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAgentToolsAPIUsesNativeRuntimePolicy$' -count=1
+ 
+-echo "[14/38] APK instructions + workspace file bridge"
++echo "[14/41] APK instructions + workspace file bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModInstructionsAndWorkspaceFileAPI|TestModWorkspaceFileRejectsTraversal)$' -count=1
+ 
+-echo "[15/38] Provider-agnostic project profile"
++echo "[15/41] Provider-agnostic project profile"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestProjectProfile' -count=1
+ 
+-echo "[16/38] Capability Registry + Chat/Agent mode + Tool Packs"
++echo "[16/41] Capability Registry + Chat/Agent mode + Tool Packs"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProjectChatModeHidesMutatingToolsAndRestoresAgentMode|TestModProjectToolPackRestrictsSurfaceAndManualDenySurvives|TestModEnvironmentAndProjectContract)$' -count=1
+ 
+-echo "[17/38] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
++echo "[17/41] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModLive' -count=1
+ 
+-echo "[18/38] Restart-safe KZT ledger persistence"
++echo "[18/41] Restart-safe KZT ledger persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestBudgetPersistentState' -count=1
+ 
+-echo "[19/38] APK bootstrap + atomic apply + restart persistence"
++echo "[19/41] APK bootstrap + atomic apply + restart persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModApp' -count=1
+ 
+-echo "[20/38] APK project registry + supervisor handoff"
++echo "[20/41] APK project registry + supervisor handoff"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModProjectRegistryAndSupervisorHandoff$' -count=1
+ 
+-echo "[21/38] Native task catalog + local rename (no provider listing call)"
++echo "[21/41] Native task catalog + local rename (no provider listing call)"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModTaskCatalogUsesNativeSessionsAndRename$' -count=1
+ 
+-echo "[22/38] APK durable task queue + per-turn budget metadata"
++echo "[22/41] APK durable task queue + per-turn budget metadata"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve ./internal/control -run '^(TestModQueue|TestParseInboxTaskBudget)' -count=1
+ 
+-echo "[23/38] Unified power engine: repair + router + budget + native execution"
++echo "[23/41] Unified power engine: repair + router + budget + native execution"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestPowerEngine' -count=1
+ 
+-echo "[24/38] Native turn evidence -> pending power route (no mid-turn model race)"
++echo "[24/41] Native turn evidence -> pending power route (no mid-turn model race)"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModPowerTurnTracker' -count=1
+ 
+-echo "[25/38] APK unified power endpoint + explicit idle-boundary apply"
++echo "[25/41] APK unified power endpoint + explicit idle-boundary apply"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModPowerAPIExposesUnifiedState|TestModPowerPendingRouteAppliesOnlyAtExplicitIdleBoundary)$' -count=1
+ 
+-echo "[26/38] Auto continuation policy: bounded lease + terminal route mapping"
++echo "[26/41] Auto continuation policy: bounded lease + terminal route mapping"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModAutoOrchestratorLeaseAndLimit|TestModAutoContinuationPromptsCoverOnlyNonTerminalRoutes)$' -count=1
+ 
+-echo "[27/38] Auto continuation safety: direct-submit gate + fail-closed without execution routing"
++echo "[27/41] Auto continuation safety: direct-submit gate + fail-closed without execution routing"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModAutoSubmitGateRejectsDirectHTTPDuringTransition|TestModAutoScheduleFailsClosedWithoutExecutionRouting)$' -count=1
+ 
+-echo "[28/38] APK orchestrator config/stop contract"
++echo "[28/41] APK orchestrator config/stop contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAutoAPIConfigAndStop$' -count=1
+ 
+-echo "[29/38] Native session-inbox crash recovery regression"
++echo "[29/41] v0.13 execution-mode guard rollback semantics"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouterModeGuardRunsBeforeSwitchAndRollsBackOnFailure$' -count=1
++
++echo "[30/41] v0.13 Pro diagnosis is physically read-only"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModProDiagnosisHardDeniesMutatingTools$' -count=1
++
++echo "[31/41] v0.13 pending route survives restart without raw log/prompt leakage"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModPendingPowerRoutePersistsSanitizedAcrossRestart$' -count=1
++
++echo "[32/41] Native session-inbox crash recovery regression"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control -run '^TestInboxSnapshotRecoversUnownedInFlightItem$' -count=1
+ 
+-echo "[30/38] Debian Android backend supervisor syntax"
++echo "[33/41] Debian Android backend supervisor syntax"
+ bash -n ./scripts/reasonix_android_backend.sh
+ 
+-echo "[31/38] Native Reasonix completion gate regression test"
++echo "[34/41] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[32/38] Build CLI only (skip example plugin)"
++echo "[35/41] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -124,7 +133,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[33/38] Offline normal tool-loop"
++echo "[36/41] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+@@ -151,7 +160,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[34/38] Offline anti-loop intervention"
++echo "[37/41] Offline anti-loop intervention"
+ LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+@@ -159,27 +168,27 @@ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+   exit 1
+ fi
+ 
+-echo "[35/38] Universal agent-control contract summary"
++echo "[38/41] Universal agent-control contract summary"
+ echo "  - workspace root + confined file browser: PASS"
+ echo "  - per-tool allow/ask/deny via native gate: PASS"
+ echo "  - instruction editor via native memory docs: PASS"
+ echo "  - skill management surface: compiled in core serve tests"
+ 
+-echo "[36/38] Universal APK protocol summary"
++echo "[39/41] Universal APK protocol summary"
+ echo "  - dynamic Capability Registry + Tool Packs: PASS"
+ echo "  - Chat mode denies mutating tools without creating a second agent: PASS"
+ echo "  - APK environment endpoint reuses Reasonix native probes/cache + project markers: PASS"
+ echo "  - project profile is provider-agnostic and APK-replayable: PASS"
+ echo "  - live event history exposes actions/diffs/results but not hidden reasoning: PASS"
+ 
+-echo "[37/38] APK supervisor/control-plane summary"
++echo "[40/41] APK supervisor/control-plane summary"
+ echo "  - bootstrap + atomic settings apply: PASS"
+ echo "  - task start/stop aliases reuse native submit/cancel: PASS"
+ echo "  - workspace-scoped policy survives backend restart: PASS"
+ echo "  - KZT/Pro spend ledger survives restart: PASS"
+ echo "  - Debian Android supervisor wrapper syntax: PASS"
+ 
+-echo "[38/38] PASS — no provider API key/network was used"
++echo "[41/41] PASS — no provider API key/network was used"
+ echo "  - v0.1 KZT budget/resource telemetry: PASS"
+ echo "  - v0.2 native anti-loop/completion telemetry: PASS"
+ echo "  - v0.3 router/cache/log/patch modules: PASS"
+@@ -192,4 +201,5 @@ echo "  - v0.9 project registry + native task catalog: PASS"
+ echo "  - v0.10 native durable task queue + reviewed recovery + per-turn budgets: PASS"
+ echo "  - v0.11 unified power engine + native turn-evidence bridge: PASS"
+ echo "  - v0.12 idle-boundary auto continuation + durable inbox handoff: PASS"
+-echo "BALANCE_MOD_V12_SMOKE_PASS"
++echo "  - v0.13 durable pending route recovery + hard Pro diagnosis read-only gate: PASS"
++echo "BALANCE_MOD_V13_SMOKE_PASS"
+diff --git a/scripts/balance_mod_smoke_quick.sh b/scripts/balance_mod_smoke_quick.sh
+index dd8df08..6106fbe 100755
+--- a/scripts/balance_mod_smoke_quick.sh
++++ b/scripts/balance_mod_smoke_quick.sh
+@@ -5,15 +5,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ cd "$ROOT"
+ 
+-echo "[1/4] v0.12 orchestrator policy + APK contract"
++echo "[1/5] v0.12 orchestrator policy + APK contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAuto' -count=1
+ 
+-echo "[2/4] Serve package compile gate"
++echo "[2/5] v0.13 execution-mode guard rollback"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouterModeGuardRunsBeforeSwitchAndRollsBackOnFailure$' -count=1
++
++echo "[3/5] v0.13 hard Pro diagnosis + durable pending route"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProDiagnosisHardDeniesMutatingTools|TestModPendingPowerRoutePersistsSanitizedAcrossRestart)$' -count=1
++
++echo "[4/5] Serve package compile gate"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^$' -count=1
+ 
+-echo "[3/4] CLI compile gate"
++echo "[5/5] CLI compile gate"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+-echo "[4/4] PASS"
+-echo "BALANCE_MOD_V12_QUICK_PASS"
++echo "BALANCE_MOD_V13_QUICK_PASS"

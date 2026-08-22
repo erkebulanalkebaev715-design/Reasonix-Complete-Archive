@@ -1,0 +1,31 @@
+# v0.20 REAL-provider gate template. NO API KEY is embedded.
+default_model = "deepseek-v20/deepseek-v4-flash"
+
+[agent]
+system_prompt = "Minimal API verification. Return only the exact text requested by the user."
+
+[[providers]]
+name = "deepseek-v20"
+kind = "openai"
+base_url = "https://api.deepseek.com"
+models = ["deepseek-v4-flash"]
+default = "deepseek-v4-flash"
+api_key_env = "DEEPSEEK_API_KEY"
+context_window = 1000000
+max_output_tokens = 64
+billing_currency = "USD"
+price = { cache_hit = 0.014, input = 0.44, output = 1.32, currency = "USD" }
+effort = "disabled"
+
+[environment]
+enabled = false
+offline = false
+
+[tools]
+enabled = []
+
+[sandbox]
+bash = "off"
+
+[serve]
+auth_mode = "token"

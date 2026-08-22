@@ -1,0 +1,32 @@
+Reasonix Mobile backend v1.3 (audited)
+
+This is a thin local supervisor/bridge for the existing Reasonix + Balance Mod.
+It does not contain a second agent engine and it does not replace Fixed12.
+
+Upgrade from v1.2:
+  cd ~/reasonix-mobile-v1.3-backend
+  bash ./upgrade_backend.sh
+
+Status:
+  bash ./reasonix_mobile_backend.sh status
+
+Token:
+  bash ./reasonix_mobile_backend.sh token
+
+Diagnostics:
+  bash ./reasonix_mobile_backend.sh diagnose
+
+Default APK bridge URL:
+  http://127.0.0.1:37914
+
+Important v1.3 fixes:
+- loopback-only bridge binding
+- no parent reasonix.log fd leak across model/server restarts
+- process-group stop for reasonix serve descendants
+- stale PID validation before kill
+- upstream requests do not hold the supervisor lifecycle lock for their entire duration
+- atomic config/state writes
+- legacy project skill deletion symmetry
+- corrected Android root/su capability reporting (Debian /usr/bin/su is not Android root)
+- MCP JSON-RPC error responses preserve request IDs
+- daemon HTTP request threads

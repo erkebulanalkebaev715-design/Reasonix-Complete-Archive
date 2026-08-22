@@ -1,0 +1,13 @@
+export REASONIX_ANDROID_TOOLS="/root/reasonix-android-tools"
+export PATH="/root/reasonix-android-tools/bin:$PATH"
+export GOTOOLCHAIN=local
+export AAPT2_BIN="/usr/bin/aapt2"
+export AAPT_BIN="/usr/bin/aapt"
+export APKSIGNER_BIN="/usr/bin/apksigner"
+export ZIPALIGN_BIN="/usr/bin/zipalign"
+export ADB_BIN="/usr/bin/adb"
+export D8_BIN="/data/data/com.termux/files/usr/bin/d8"
+export R8_JAR=""
+export JAVA_BIN="/usr/bin/java"
+export JAVAC_BIN="/usr/bin/javac"
+export KEYTOOL_BIN="/usr/bin/keytool"

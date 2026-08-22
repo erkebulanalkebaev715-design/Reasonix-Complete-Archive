@@ -1,0 +1,17 @@
+Reasonix Mobile backend v1.5.1 verification
+
+VERIFIED in ChatGPT build environment:
+- Python py_compile: PASS
+- shell bash -n: PASS
+- project API integration test: V150_PROJECT_INTEGRATION_PASS
+- full fake-Reasonix integration test: V150_FULL_INTEGRATION_PASS
+- approval/answer/tool-approval proxy flows: PASS in fake-Reasonix integration
+- model de-duplication: PASS in fake-Reasonix integration
+- built-in Skills list/toggle/detail: PASS in fake-Reasonix integration
+- project create/list/update/delete persistence contract: PASS
+- workflows endpoints backed by real Reasonix skill files: PASS in backend integration harness
+
+NOT VERIFIED here:
+- physical Realme/Termux backend startup
+- live current /root/DeepSeek-Reasonix tree
+- real provider request after this backend update

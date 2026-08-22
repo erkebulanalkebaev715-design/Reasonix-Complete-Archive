@@ -1,0 +1,20 @@
+# Reasonix Balance Mod v0.19 canonical OFFLINE APK-backend integration fixture.
+# The v0.19 harness copies this into a temporary workspace only.
+# It is NOT the user's live reasonix.toml and requires no provider API key.
+
+default_model = "balance-apk-mock"
+
+[[providers]]
+name = "balance-apk-mock"
+kind = "mock"
+model = "smoke"
+base_url = "http://127.0.0.1"
+context_window = 1000000
+billing_currency = "CNY"
+price = { cache_hit = 0.02, input = 1, output = 2, currency = "CNY" }
+
+[environment]
+offline = true
+
+[sandbox]
+bash = "off"

@@ -1,0 +1,5 @@
+milestone=diagnostics_started t=2026-08-18T14:21:14.925468287Z
+milestone=config_load_begin t=2026-08-18T14:21:14.929836287Z
+milestone=config_load_done t=2026-08-18T14:21:15.163689287Z
+milestone=controller_build_begin t=2026-08-18T14:21:15.166858672Z
+watchdog_state phase=closed gen=0 source=closed

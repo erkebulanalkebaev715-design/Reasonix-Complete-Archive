@@ -1,0 +1,40 @@
+Reasonix Mobile backend v1.3.2 (Android/PRoot port-recovery fix)
+
+This is a thin local supervisor/bridge for the existing Reasonix + Balance Mod.
+It does not contain a second agent engine and it does not replace Fixed12.
+
+Upgrade from v1.2/v1.3/v1.3.1:
+  cd ~/reasonix-mobile-v1.3.2-backend
+  bash ./upgrade_backend.sh
+
+Status:
+  bash ./reasonix_mobile_backend.sh status
+
+Token:
+  bash ./reasonix_mobile_backend.sh token
+
+Diagnostics:
+  bash ./reasonix_mobile_backend.sh diagnose
+
+Default APK bridge URL:
+  http://127.0.0.1:37914
+
+Important v1.3 fixes:
+- loopback-only bridge binding
+- no parent reasonix.log fd leak across model/server restarts
+- process-group stop for reasonix serve descendants
+- stale PID validation before kill
+- upstream requests do not hold the supervisor lifecycle lock for their entire duration
+- atomic config/state writes
+- legacy project skill deletion symmetry
+- corrected Android root/su capability reporting (Debian /usr/bin/su is not Android root)
+- MCP JSON-RPC error responses preserve request IDs
+- daemon HTTP request threads
+
+Important v1.3.2 fix:
+- does not use /proc/net to discover the bridge listener (Android 10+ restricts it)
+- recognizes old bridge processes by script basename + --state/--addr, regardless of old absolute install path
+- kills stale/orphan Reasonix mobile bridge processes before bind
+- verifies port availability by an actual SO_REUSEADDR bind probe
+- refuses to kill unrelated processes
+- `port-debug` prints bind/health/process diagnostics without /proc/net

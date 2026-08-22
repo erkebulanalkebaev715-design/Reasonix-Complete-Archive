@@ -1,0 +1,1604 @@
+[0m
+> build · deepseek-v4-flash
+[0m
+[0m# [0mTodos
+[•] STAGE 0: Baseline inspection (repo, branch, HEAD, Go, processes, configs)
+[ ] STAGE 1: Identify current blockers from baseline
+[ ] STAGE 2: Complete Reasonix 2.0 contracts
+[ ] STAGE 3: Local 2.0 regression gates
+[ ] STAGE 4: Design 3.0 architecture from actual code
+[ ] STAGE 5: Swarm state/task primitives
+[ ] STAGE 6: Orchestrator/scheduler
+[ ] STAGE 7: Worker runtime
+[ ] STAGE 8: Bounded parallelism
+[ ] STAGE 9: Shared evidence/artifacts
+[ ] STAGE 10: Provider-agnostic routing
+[ ] STAGE 11: Integration/verification
+[ ] STAGE 12: Budget/cancel/recovery
+[ ] STAGE 13: Swarm events/API
+[ ] STAGE 14: Minimal mobile swarm observability
+[ ] STAGE 15: Deterministic mock/local swarm tests
+[ ] STAGE 16: Controlled real provider tests
+[ ] STAGE 17: Controlled real swarm test
+[ ] STAGE 18: Replacement APK/backend/core if changed
+[ ] STAGE 19: Release gates
+[ ] STAGE 20: Final report
+[0m
+STAGE 0 starting. Gathering baseline in parallel.
+[0m$ [0mps aux | grep -iE 'reasonix|deepseek|opencode' | grep -v grep | head -30
+u0_a402  17097  0.1  0.0  23484  4428 ?        Ss    2023   0:00 tmux new -s reasonix-night
+u0_a402  17381  0.0  0.0   2316   704 pts/1    S+    2023   0:00 tee /root/reasonix-night-20260820-170419.log
+[0m
+[0m$ [0mgit rev-parse --show-toplevel && git branch --show-current && git rev-parse HEAD && git log --oneline -10
+/root/DeepSeek-Reasonix
+main-v2
+9e68643823943f05d13ab6a4578b7a629d490b07
+9e68643 docs(release): 准备 v1.25.4 中英更新日志 (#8986)
+[0m
+[0m$ [0mwhich go; go version; echo "GOTOOLCHAIN=$GOTOOLCHAIN"; echo "PATH=$PATH"; echo "GOPATH=$(go env GOPATH)"; echo "GOROOT=$(go env GOROOT)"
+/usr/local/go/bin/go
+go version go1.26.4 linux/arm64
+GOTOOLCHAIN=local
+PATH=/root/.opencode/bin:/usr/local/go/bin:/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/data/data/com.termux/files/usr/bin
+GOPATH=/root/go
+GOROOT=/usr/local/go
+[0m
+[0m$ [0mgit status --porcelain | head -50; echo "---UNTRACKED COUNT---"; git status --porcelain | wc -l
+M cmd/reasonix/main.go
+ M internal/agent/agent.go
+ M internal/agent/compact.go
+ M internal/agent/coordinator.go
+ M internal/agent/execute_one.go
+ M internal/agent/reasoning_replay.go
+ M internal/agent/run_budget.go
+ M internal/agent/run_loop.go
+ M internal/agent/run_usage.go
+ M internal/agent/sampling_request.go
+ M internal/control/approval.go
+ M internal/control/capability.go
+ M internal/control/controller.go
+ M internal/control/inbox.go
+ M internal/control/inbox_run.go
+ M internal/provider/retry.go
+ M internal/serve/broadcaster.go
+ M internal/serve/serve.go
+ M internal/sessioninbox/manifest.go
+ M internal/sessioninbox/ops.go
+ M internal/sessioninbox/recovery.go
+ M internal/sessioninbox/store.go
+ M internal/sessioninbox/types.go
+ M internal/tool/tool.go
+?? .balance_mod_backups/
+?? .mcp.json
+?? balance_mod_hotfix_v0.8.2/
+?? configs/
+?? docs/BALANCE_MOD.md
+?? docs/BALANCE_MOD_V017.md
+?? docs/BALANCE_MOD_V018.md
+?? docs/BALANCE_MOD_V019.md
+?? docs/BALANCE_MOD_V020.md
+?? docs/BALANCE_MOD_V020_FIXED.md
+?? docs/BALANCE_MOD_V020_FIXED10.md
+?? docs/BALANCE_MOD_V020_FIXED12.md
+?? docs/BALANCE_MOD_V020_FIXED5.md
+?? docs/BALANCE_MOD_V020_FIXED9.md
+?? internal/agent/balance_strict_retry_fixed9_test.go
+?? internal/agent/balance_v20_usage_receipt_fixed12.go
+?? internal/agent/balance_v20_usage_receipt_fixed12_test.go
+?? internal/agent/precall_budget_test.go
+?? internal/agent/strict_budget_tools.go
+?? internal/control/inbox_budget.go
+?? internal/control/inbox_budget_test.go
+?? internal/control/inbox_completion_receipt_test.go
+?? internal/control/precall_budget_setter.go
+?? internal/control/precall_budget_setter.go.v016bak
+?? internal/control/runtime_tool_policy.go
+?? internal/control/runtime_tool_policy_test.go
+---UNTRACKED COUNT---
+125
+[0m
+[0m$ [0mls -la /root/DeepSeek-Reasonix; echo "---"; ls /root/DeepSeek-Reasonix/*.md 2>/dev/null
+total 557
+drwxr-xr-x. 29 root root  4096 Aug 19 14:14 .
+drwx------. 59 root root 20480 Aug 20 17:04 ..
+drwxr-xr-x. 17 root root  3452 Aug 18 13:36 .balance_mod_backups
+-rw-r--r--.  1 root root   202 Aug 16 17:57 .env.example
+drwxr-xr-x.  8 root root  3452 Aug 20 17:05 .git
+-rw-r--r--.  1 root root   540 Aug 16 17:57 .gitattributes
+drwxr-xr-x.  2 root root  3452 Aug 16 17:57 .githooks
+drwxr-xr-x.  5 root root  3452 Aug 16 17:57 .github
+-rw-r--r--.  1 root root  1531 Aug 16 17:57 .gitignore
+-rw-r--r--.  1 root root     8 Aug 16 17:57 .golangci-version
+-rw-r--r--.  1 root root  2012 Aug 16 17:57 .golangci.yml
+-rw-r--r--.  1 root root  1993 Aug 16 17:57 .goreleaser.yaml
+-rw-r--r--.  1 root root   209 Aug 19 14:00 .mcp.json
+drwxr-xr-x.  5 root root  3452 Aug 19 10:44 .reasonix
+drwxr-xr-x.  4 root root  3452 Aug 16 17:57 .signpath
+-rw-r--r--.  1 root root     8 Aug 16 17:57 .wails-version
+-rw-r--r--.  1 root root 23151 Aug 16 17:57 CHANGELOG.md
+-rw-r--r--.  1 root root   166 Aug 16 17:57 CLAUDE.md
+-rw-r--r--.  1 root root  6792 Aug 16 17:57 CONTRIBUTING.md
+-rw-r--r--.  1 root root  1078 Aug 16 17:57 LICENSE
+-rw-r--r--.  1 root root  3179 Aug 16 17:57 Makefile
+-rw-r--r--.  1 root root 12518 Aug 16 17:57 README.md
+-rw-r--r--.  1 root root 12354 Aug 16 17:57 README.zh-CN.md
+-rw-r--r--.  1 root root  6889 Aug 16 17:57 REASONIX.md
+-rw-r--r--.  1 root root  6446 Aug 16 17:57 SECURITY.md
+drwxr-sr-x.  2 root root  3452 Aug 17 11:26 balance_mod_hotfix_v0.8.2
+drwxr-xr-x.  8 root root  3452 Aug 16 17:57 benchmarks
+drwxr-xr-x.  2 root root  3452 Aug 18 13:38 bin
+drwxr-xr-x.  9 root root  3452 Aug 16 17:57 cmd
+drwxr-xr-x.  2 root root  3452 Aug 18 13:36 configs
+drwxr-xr-x.  8 root root 53248 Aug 16 17:57 desktop
+-rwxr-xr-x.  1 root root  1212 Aug 16 17:57 dev
+drwxr-xr-x.  6 root root  8192 Aug 18 13:36 docs
+-rw-r--r--.  1 root root  2805 Aug 16 17:57 go.mod
+-rw-r--r--.  1 root root 21839 Aug 16 17:57 go.sum
+drwxr-xr-x. 96 root root  4096 Aug 16 20:08 internal
+drwxr-xr-x.  3 root root  3452 Aug 16 17:57 npm
+-rwxr-xr-x.  1 root root   974 Aug 16 17:57 prod_fast_test
+-rwxr-xr-x.  1 root root  7883 Aug 16 17:57 prod_test
+drwxr-sr-x.  2 root root  3452 Aug 17 16:52 reasonix-balance-mod-v0.15-bundle
+-rw-r-----.  1 root root 11065 Aug 17 16:55 reasonix-balance-mod-v0.15-bundle.tar.gz
+drwxr-sr-x.  2 root root  3452 Aug 17 18:14 reasonix-balance-mod-v0.16-bundle
+-rw-r-----.  1 root root 20603 Aug 17 19:03 reasonix-balance-mod-v0.16-bundle.tar.gz
+drwxr-xr-x.  3 root root  3452 Aug 18 08:06 reasonix-balance-mod-v0.19-bundle
+-rw-r-----.  1 root root  8698 Aug 18 08:07 reasonix-balance-mod-v0.19-bundle.tar.gz
+drwxr-sr-x.  3 root root  3452 Aug 18 09:58 reasonix-balance-mod-v0.20-fixed-bundle
+-rw-r-----.  1 root root 10965 Aug 18 10:00 reasonix-balance-mod-v0.20-fixed-bundle.tar.gz
+drwxr-sr-x.  3 root root  3452 Aug 18 10:22 reasonix-balance-mod-v0.20-fixed3-bundle
+-rw-r-----.  1 root root 20598 Aug 18 10:24 reasonix-balance-mod-v0.20-fixed3-bundle.tar.gz
+drwxr-sr-x.  3 root root  3452 Aug 18 10:34 reasonix-balance-mod-v0.20-fixed4-bundle
+-rw-r-----.  1 root root 21406 Aug 18 10:37 reasonix-balance-mod-v0.20-fixed4-bundle.tar.gz
+-rw-r-----.  1 root root  1257 Aug 17 11:28 reasonix-balance-mod-v0.8.2-hotfix.tar.gz
+-rw-r--r--.  1 root root 14589 Aug 16 17:57 reasonix.example.toml
+-rw-r--r--.  1 root root 25989 Aug 19 14:14 reasonix.toml
+-rw-r--r--.  1 root root  8621 Aug 18 14:30 reasonix.toml.bak-context
+-rw-r--r--.  1 root root  8574 Aug 18 14:34 reasonix.toml.bak-final
+-rw-r--r--.  1 root root 28711 Aug 19 10:40 reasonix.toml.bak-router-20260819-141452
+drwxr-xr-x.  2 root root  3452 Aug 16 17:57 release-notes
+drwxr-xr-x.  3 root root  8192 Aug 18 13:36 scripts
+drwxr-xr-x.  3 root root  3452 Aug 16 17:57 sdk
+drwxr-xr-x.  5 root root  3452 Aug 16 17:57 site
+-rw-r--r--.  1 root root 15915 Aug 17 20:17 tHardPreCallBudgetSurvivesNativeModelSwitch$' 
+drwxr-xr-x.  4 root root  3452 Aug 16 17:57 tools
+drwxr-xr-x.  5 root root  3452 Aug 16 17:57 workers
+---
+/root/DeepSeek-Reasonix/CHANGELOG.md
+/root/DeepSeek-Reasonix/CLAUDE.md
+/root/DeepSeek-Reasonix/CONTRIBUTING.md
+/root/DeepSeek-Reasonix/README.md
+/root/DeepSeek-Reasonix/README.zh-CN.md
+/root/DeepSeek-Reasonix/REASONIX.md
+/root/DeepSeek-Reasonix/SECURITY.md
+[0m
+[0m$ [0mls -la /root/DeepSeek-Reasonix/configs 2>/dev/null; echo "---BALANCE_BACKUPS---"; ls -la /root/DeepSeek-Reasonix/.balance_mod_backups 2>/dev/null | head; echo "---HOTFIX---"; ls -la /root/DeepSeek-Reasonix/balance_mod_hotfix_v0.8.2 2>/dev/null | head
+total 32
+drwxr-xr-x.  2 root root 3452 Aug 18 13:36 .
+drwxr-xr-x. 29 root root 4096 Aug 19 14:14 ..
+-rw-r--r--.  1 root root  797 Aug 18 07:39 balance_mod_v018_rc_manifest.json
+-rw-r--r--.  1 root root 1731 Aug 18 08:07 balance_mod_v019_apk_backend_manifest.json
+-rw-r--r--.  1 root root 2519 Aug 18 13:36 balance_mod_v020_real_provider_manifest.json
+-rw-r--r--.  1 root root  500 Aug 18 07:39 reasonix.balance.v018.toml
+-rw-r--r--.  1 root root  532 Aug 18 08:07 reasonix.balance.v019.toml
+-rw-r--r--.  1 root root  691 Aug 18 13:36 reasonix.balance.v020.real.template.toml
+---BALANCE_BACKUPS---
+total 60
+drwxr-xr-x. 17 root root 3452 Aug 18 13:36 .
+drwxr-xr-x. 29 root root 4096 Aug 19 14:14 ..
+drwxr-xr-x.  5 root root 3452 Aug 18 10:00 v0.20-fixed-20260818-100026
+drwxr-xr-x.  5 root root 3452 Aug 18 10:08 v0.20-fixed-20260818-100815
+drwxr-xr-x.  5 root root 3452 Aug 18 12:20 v0.20-fixed10-20260818-122014
+drwxr-xr-x.  5 root root 3452 Aug 18 12:20 v0.20-fixed10-20260818-122036
+drwxr-xr-x.  6 root root 3452 Aug 18 13:03 v0.20-fixed11-20260818-130331
+drwxr-xr-x.  6 root root 3452 Aug 18 13:03 v0.20-fixed11-20260818-130344
+drwxr-xr-x.  6 root root 3452 Aug 18 13:36 v0.20-fixed12-20260818-133634
+---HOTFIX---
+total 20
+drwxr-sr-x.  2 root root 3452 Aug 17 11:26 .
+drwxr-xr-x. 29 root root 4096 Aug 19 14:14 ..
+-rw-r--r--.  1 root root  456 Aug 17 11:26 README.txt
+-rwxr-xr-x.  1 root root 1377 Aug 17 11:26 apply_hotfix_v0.8.2.sh
+-rw-r--r--.  1 root root  521 Aug 17 11:25 reasonix-balance-mod-v0.8.2.patch
+[0m
+[0m$ [0mls /root; echo "---"; ls -la /root/reasonix-night*.log 2>/dev/null; echo "---termux---"; ls /data/data/com.termux/files/usr/bin 2>/dev/null | head -5
+DeepSeek-Reasonix
+DeepSeek-Reasonix-20260820-162912-working-state.txt
+DeepSeek-Reasonix-20260820-162912.bundle
+REASONIX_3_NIGHT_PROMPT.txt
+balance_mod_bundle_v0.1
+balance_mod_bundle_v0.2
+balance_mod_bundle_v0.3
+balance_mod_bundle_v0.4
+balance_mod_bundle_v0.5
+balance_mod_bundle_v0.6
+balance_mod_bundle_v0.7
+balance_mod_bundle_v0.8
+balance_mod_bundle_v0.8.1
+balance_mod_bundle_v0.9
+balance_mod_hotfix_v0.1.1
+balance_mod_hotfix_v0.4.1
+balance_mod_hotfix_v0.6.1
+clicker
+go
+projects
+reasonix-balance-mod-v0.1-bundle.tar.gz
+reasonix-balance-mod-v0.1.1-hotfix.tar.gz
+reasonix-balance-mod-v0.10-bundle
+reasonix-balance-mod-v0.10-bundle.tar.gz
+reasonix-balance-mod-v0.11-bundle
+reasonix-balance-mod-v0.11-bundle.tar.gz
+reasonix-balance-mod-v0.12-bundle
+reasonix-balance-mod-v0.12-bundle.tar.gz
+reasonix-balance-mod-v0.13-bundle
+reasonix-balance-mod-v0.13-bundle.tar.gz
+reasonix-balance-mod-v0.14-bundle
+reasonix-balance-mod-v0.14-bundle.tar.gz
+reasonix-balance-mod-v0.14.1-hotfix
+reasonix-balance-mod-v0.14.1-hotfix.tar.gz
+reasonix-balance-mod-v0.14.2-hotfix
+reasonix-balance-mod-v0.14.2-hotfix.tar.gz
+reasonix-balance-mod-v0.14.3-hotfix
+reasonix-balance-mod-v0.14.3-hotfix.tar.gz
+reasonix-balance-mod-v0.16-fixed-bundle
+reasonix-balance-mod-v0.16-fixed-bundle.tar.gz
+reasonix-balance-mod-v0.17-bundle
+reasonix-balance-mod-v0.17-bundle.tar.gz
+reasonix-balance-mod-v0.18-fixed-bundle
+reasonix-balance-mod-v0.18-fixed-bundle.tar.gz
+reasonix-balance-mod-v0.2-bundle.tar.gz
+reasonix-balance-mod-v0.20-bundle
+reasonix-balance-mod-v0.20-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed10-bundle
+reasonix-balance-mod-v0.20-fixed10-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed11-bundle
+reasonix-balance-mod-v0.20-fixed11-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed12-bundle
+reasonix-balance-mod-v0.20-fixed12-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed2-bundle
+reasonix-balance-mod-v0.20-fixed2-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed5-bundle
+reasonix-balance-mod-v0.20-fixed5-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed6-bundle
+reasonix-balance-mod-v0.20-fixed6-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed7-bundle
+reasonix-balance-mod-v0.20-fixed7-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed8-bundle
+reasonix-balance-mod-v0.20-fixed8-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed9-bundle
+reasonix-balance-mod-v0.20-fixed9-bundle.tar.gz
+reasonix-balance-mod-v0.3-bundle.tar.gz
+reasonix-balance-mod-v0.4-bundle.tar.gz
+reasonix-balance-mod-v0.4.1-hotfix.tar.gz
+reasonix-balance-mod-v0.5-bundle.tar.gz
+reasonix-balance-mod-v0.6-bundle.tar.gz
+reasonix-balance-mod-v0.6.1-hotfix.tar.gz
+reasonix-balance-mod-v0.7-bundle.tar.gz
+reasonix-balance-mod-v0.8-bundle.tar.gz
+reasonix-balance-mod-v0.8.1-bundle.tar.gz
+reasonix-balance-mod-v0.9-bundle.tar.gz
+reasonix-mobile-v1.0-backend
+reasonix-mobile-v1.2-backend
+reasonix-mobile-v1.3-backend
+reasonix-mobile-v1.3.1-backend
+reasonix-mobile-v1.3.2-backend
+reasonix-mobile-v1.4.0-backend
+reasonix-mobile-v1.5.0-backend
+reasonix-mobile-v1.5.1-backend
+reasonix-night-20260820-170419.log
+reasonix-night-permissions.json
+reasonix-source.tar.gz
+reasonix-v2.0.7-rc-device-bundle
+---
+-rw-r--r--. 1 root root 8184 Aug 20 17:05 /root/reasonix-night-20260820-170419.log
+---termux---
+[
+aapt
+aapt2
+aarch64-linux-android-ar
+aarch64-linux-android-clang
+[0m
+[0m$ [0mcat /root/reasonix-night-20260820-170419.log
+[0m
+> build · deepseek-v4-flash
+[0m
+[0m# [0mTodos
+[•] STAGE 0: Baseline inspection (repo, branch, HEAD, Go, processes, configs)
+[ ] STAGE 1: Identify current blockers from baseline
+[ ] STAGE 2: Complete Reasonix 2.0 contracts
+[ ] STAGE 3: Local 2.0 regression gates
+[ ] STAGE 4: Design 3.0 architecture from actual code
+[ ] STAGE 5: Swarm state/task primitives
+[ ] STAGE 6: Orchestrator/scheduler
+[ ] STAGE 7: Worker runtime
+[ ] STAGE 8: Bounded parallelism
+[ ] STAGE 9: Shared evidence/artifacts
+[ ] STAGE 10: Provider-agnostic routing
+[ ] STAGE 11: Integration/verification
+[ ] STAGE 12: Budget/cancel/recovery
+[ ] STAGE 13: Swarm events/API
+[ ] STAGE 14: Minimal mobile swarm observability
+[ ] STAGE 15: Deterministic mock/local swarm tests
+[ ] STAGE 16: Controlled real provider tests
+[ ] STAGE 17: Controlled real swarm test
+[ ] STAGE 18: Replacement APK/backend/core if changed
+[ ] STAGE 19: Release gates
+[ ] STAGE 20: Final report
+[0m
+STAGE 0 starting. Gathering baseline in parallel.
+[0m$ [0mps aux | grep -iE 'reasonix|deepseek|opencode' | grep -v grep | head -30
+u0_a402  17097  0.1  0.0  23484  4428 ?        Ss    2023   0:00 tmux new -s reasonix-night
+u0_a402  17381  0.0  0.0   2316   704 pts/1    S+    2023   0:00 tee /root/reasonix-night-20260820-170419.log
+[0m
+[0m$ [0mgit rev-parse --show-toplevel && git branch --show-current && git rev-parse HEAD && git log --oneline -10
+/root/DeepSeek-Reasonix
+main-v2
+9e68643823943f05d13ab6a4578b7a629d490b07
+9e68643 docs(release): 准备 v1.25.4 中英更新日志 (#8986)
+[0m
+[0m$ [0mwhich go; go version; echo "GOTOOLCHAIN=$GOTOOLCHAIN"; echo "PATH=$PATH"; echo "GOPATH=$(go env GOPATH)"; echo "GOROOT=$(go env GOROOT)"
+/usr/local/go/bin/go
+go version go1.26.4 linux/arm64
+GOTOOLCHAIN=local
+PATH=/root/.opencode/bin:/usr/local/go/bin:/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/data/data/com.termux/files/usr/bin
+GOPATH=/root/go
+GOROOT=/usr/local/go
+[0m
+[0m$ [0mgit status --porcelain | head -50; echo "---UNTRACKED COUNT---"; git status --porcelain | wc -l
+M cmd/reasonix/main.go
+ M internal/agent/agent.go
+ M internal/agent/compact.go
+ M internal/agent/coordinator.go
+ M internal/agent/execute_one.go
+ M internal/agent/reasoning_replay.go
+ M internal/agent/run_budget.go
+ M internal/agent/run_loop.go
+ M internal/agent/run_usage.go
+ M internal/agent/sampling_request.go
+ M internal/control/approval.go
+ M internal/control/capability.go
+ M internal/control/controller.go
+ M internal/control/inbox.go
+ M internal/control/inbox_run.go
+ M internal/provider/retry.go
+ M internal/serve/broadcaster.go
+ M internal/serve/serve.go
+ M internal/sessioninbox/manifest.go
+ M internal/sessioninbox/ops.go
+ M internal/sessioninbox/recovery.go
+ M internal/sessioninbox/store.go
+ M internal/sessioninbox/types.go
+ M internal/tool/tool.go
+?? .balance_mod_backups/
+?? .mcp.json
+?? balance_mod_hotfix_v0.8.2/
+?? configs/
+?? docs/BALANCE_MOD.md
+?? docs/BALANCE_MOD_V017.md
+?? docs/BALANCE_MOD_V018.md
+?? docs/BALANCE_MOD_V019.md
+?? docs/BALANCE_MOD_V020.md
+?? docs/BALANCE_MOD_V020_FIXED.md
+?? docs/BALANCE_MOD_V020_FIXED10.md
+?? docs/BALANCE_MOD_V020_FIXED12.md
+?? docs/BALANCE_MOD_V020_FIXED5.md
+?? docs/BALANCE_MOD_V020_FIXED9.md
+?? internal/agent/balance_strict_retry_fixed9_test.go
+?? internal/agent/balance_v20_usage_receipt_fixed12.go
+?? internal/agent/balance_v20_usage_receipt_fixed12_test.go
+?? internal/agent/precall_budget_test.go
+?? internal/agent/strict_budget_tools.go
+?? internal/control/inbox_budget.go
+?? internal/control/inbox_budget_test.go
+?? internal/control/inbox_completion_receipt_test.go
+?? internal/control/precall_budget_setter.go
+?? internal/control/precall_budget_setter.go.v016bak
+?? internal/control/runtime_tool_policy.go
+?? internal/control/runtime_tool_policy_test.go
+---UNTRACKED COUNT---
+125
+[0m
+[0m$ [0mls -la /root/DeepSeek-Reasonix; echo "---"; ls /root/DeepSeek-Reasonix/*.md 2>/dev/null
+total 557
+drwxr-xr-x. 29 root root  4096 Aug 19 14:14 .
+drwx------. 59 root root 20480 Aug 20 17:04 ..
+drwxr-xr-x. 17 root root  3452 Aug 18 13:36 .balance_mod_backups
+-rw-r--r--.  1 root root   202 Aug 16 17:57 .env.example
+drwxr-xr-x.  8 root root  3452 Aug 20 17:05 .git
+-rw-r--r--.  1 root root   540 Aug 16 17:57 .gitattributes
+drwxr-xr-x.  2 root root  3452 Aug 16 17:57 .githooks
+drwxr-xr-x.  5 root root  3452 Aug 16 17:57 .github
+-rw-r--r--.  1 root root  1531 Aug 16 17:57 .gitignore
+-rw-r--r--.  1 root root     8 Aug 16 17:57 .golangci-version
+-rw-r--r--.  1 root root  2012 Aug 16 17:57 .golangci.yml
+-rw-r--r--.  1 root root  1993 Aug 16 17:57 .goreleaser.yaml
+-rw-r--r--.  1 root root   209 Aug 19 14:00 .mcp.json
+drwxr-xr-x.  5 root root  3452 Aug 19 10:44 .reasonix
+drwxr-xr-x.  4 root root  3452 Aug 16 17:57 .signpath
+-rw-r--r--.  1 root root     8 Aug 16 17:57 .wails-version
+-rw-r--r--.  1 root root 23151 Aug 16 17:57 CHANGELOG.md
+-rw-r--r--.  1 root root   166 Aug 16 17:57 CLAUDE.md
+-rw-r--r--.  1 root root  6792 Aug 16 17:57 CONTRIBUTING.md
+-rw-r--r--.  1 root root  1078 Aug 16 17:57 LICENSE
+-rw-r--r--.  1 root root  3179 Aug 16 17:57 Makefile
+-rw-r--r--.  1 root root 12518 Aug 16 17:57 README.md
+-rw-r--r--.  1 root root 12354 Aug 16 17:57 README.zh-CN.md
+-rw-r--r--.  1 root root  6889 Aug 16 17:57 REASONIX.md
+-rw-r--r--.  1 root root  6446 Aug 16 17:57 SECURITY.md
+drwxr-sr-x.  2 root root  3452 Aug 17 11:26 balance_mod_hotfix_v0.8.2
+drwxr-xr-x.  8 root root  3452 Aug 16 17:57 benchmarks
+drwxr-xr-x.  2 root root  3452 Aug 18 13:38 bin
+drwxr-xr-x.  9 root root  3452 Aug 16 17:57 cmd
+drwxr-xr-x.  2 root root  3452 Aug 18 13:36 configs
+drwxr-xr-x.  8 root root 53248 Aug 16 17:57 desktop
+-rwxr-xr-x.  1 root root  1212 Aug 16 17:57 dev
+drwxr-xr-x.  6 root root  8192 Aug 18 13:36 docs
+-rw-r--r--.  1 root root  2805 Aug 16 17:57 go.mod
+-rw-r--r--.  1 root root 21839 Aug 16 17:57 go.sum
+drwxr-xr-x. 96 root root  4096 Aug 16 20:08 internal
+drwxr-xr-x.  3 root root  3452 Aug 16 17:57 npm
+-rwxr-xr-x.  1 root root   974 Aug 16 17:57 prod_fast_test
+-rwxr-xr-x.  1 root root  7883 Aug 16 17:57 prod_test
+drwxr-sr-x.  2 root root  3452 Aug 17 16:52 reasonix-balance-mod-v0.15-bundle
+-rw-r-----.  1 root root 11065 Aug 17 16:55 reasonix-balance-mod-v0.15-bundle.tar.gz
+drwxr-sr-x.  2 root root  3452 Aug 17 18:14 reasonix-balance-mod-v0.16-bundle
+-rw-r-----.  1 root root 20603 Aug 17 19:03 reasonix-balance-mod-v0.16-bundle.tar.gz
+drwxr-xr-x.  3 root root  3452 Aug 18 08:06 reasonix-balance-mod-v0.19-bundle
+-rw-r-----.  1 root root  8698 Aug 18 08:07 reasonix-balance-mod-v0.19-bundle.tar.gz
+drwxr-sr-x.  3 root root  3452 Aug 18 09:58 reasonix-balance-mod-v0.20-fixed-bundle
+-rw-r-----.  1 root root 10965 Aug 18 10:00 reasonix-balance-mod-v0.20-fixed-bundle.tar.gz
+drwxr-sr-x.  3 root root  3452 Aug 18 10:22 reasonix-balance-mod-v0.20-fixed3-bundle
+-rw-r-----.  1 root root 20598 Aug 18 10:24 reasonix-balance-mod-v0.20-fixed3-bundle.tar.gz
+drwxr-sr-x.  3 root root  3452 Aug 18 10:34 reasonix-balance-mod-v0.20-fixed4-bundle
+-rw-r-----.  1 root root 21406 Aug 18 10:37 reasonix-balance-mod-v0.20-fixed4-bundle.tar.gz
+-rw-r-----.  1 root root  1257 Aug 17 11:28 reasonix-balance-mod-v0.8.2-hotfix.tar.gz
+-rw-r--r--.  1 root root 14589 Aug 16 17:57 reasonix.example.toml
+-rw-r--r--.  1 root root 25989 Aug 19 14:14 reasonix.toml
+-rw-r--r--.  1 root root  8621 Aug 18 14:30 reasonix.toml.bak-context
+-rw-r--r--.  1 root root  8574 Aug 18 14:34 reasonix.toml.bak-final
+-rw-r--r--.  1 root root 28711 Aug 19 10:40 reasonix.toml.bak-router-20260819-141452
+drwxr-xr-x.  2 root root  3452 Aug 16 17:57 release-notes
+drwxr-xr-x.  3 root root  8192 Aug 18 13:36 scripts
+drwxr-xr-x.  3 root root  3452 Aug 16 17:57 sdk
+drwxr-xr-x.  5 root root  3452 Aug 16 17:57 site
+-rw-r--r--.  1 root root 15915 Aug 17 20:17 tHardPreCallBudgetSurvivesNativeModelSwitch$' 
+drwxr-xr-x.  4 root root  3452 Aug 16 17:57 tools
+drwxr-xr-x.  5 root root  3452 Aug 16 17:57 workers
+---
+/root/DeepSeek-Reasonix/CHANGELOG.md
+/root/DeepSeek-Reasonix/CLAUDE.md
+/root/DeepSeek-Reasonix/CONTRIBUTING.md
+/root/DeepSeek-Reasonix/README.md
+/root/DeepSeek-Reasonix/README.zh-CN.md
+/root/DeepSeek-Reasonix/REASONIX.md
+/root/DeepSeek-Reasonix/SECURITY.md
+[0m
+[0m$ [0mls -la /root/DeepSeek-Reasonix/configs 2>/dev/null; echo "---BALANCE_BACKUPS---"; ls -la /root/DeepSeek-Reasonix/.balance_mod_backups 2>/dev/null | head; echo "---HOTFIX---"; ls -la /root/DeepSeek-Reasonix/balance_mod_hotfix_v0.8.2 2>/dev/null | head
+total 32
+drwxr-xr-x.  2 root root 3452 Aug 18 13:36 .
+drwxr-xr-x. 29 root root 4096 Aug 19 14:14 ..
+-rw-r--r--.  1 root root  797 Aug 18 07:39 balance_mod_v018_rc_manifest.json
+-rw-r--r--.  1 root root 1731 Aug 18 08:07 balance_mod_v019_apk_backend_manifest.json
+-rw-r--r--.  1 root root 2519 Aug 18 13:36 balance_mod_v020_real_provider_manifest.json
+-rw-r--r--.  1 root root  500 Aug 18 07:39 reasonix.balance.v018.toml
+-rw-r--r--.  1 root root  532 Aug 18 08:07 reasonix.balance.v019.toml
+-rw-r--r--.  1 root root  691 Aug 18 13:36 reasonix.balance.v020.real.template.toml
+---BALANCE_BACKUPS---
+total 60
+drwxr-xr-x. 17 root root 3452 Aug 18 13:36 .
+drwxr-xr-x. 29 root root 4096 Aug 19 14:14 ..
+drwxr-xr-x.  5 root root 3452 Aug 18 10:00 v0.20-fixed-20260818-100026
+drwxr-xr-x.  5 root root 3452 Aug 18 10:08 v0.20-fixed-20260818-100815
+drwxr-xr-x.  5 root root 3452 Aug 18 12:20 v0.20-fixed10-20260818-122014
+drwxr-xr-x.  5 root root 3452 Aug 18 12:20 v0.20-fixed10-20260818-122036
+drwxr-xr-x.  6 root root 3452 Aug 18 13:03 v0.20-fixed11-20260818-130331
+drwxr-xr-x.  6 root root 3452 Aug 18 13:03 v0.20-fixed11-20260818-130344
+drwxr-xr-x.  6 root root 3452 Aug 18 13:36 v0.20-fixed12-20260818-133634
+---HOTFIX---
+total 20
+drwxr-sr-x.  2 root root 3452 Aug 17 11:26 .
+drwxr-xr-x. 29 root root 4096 Aug 19 14:14 ..
+-rw-r--r--.  1 root root  456 Aug 17 11:26 README.txt
+-rwxr-xr-x.  1 root root 1377 Aug 17 11:26 apply_hotfix_v0.8.2.sh
+-rw-r--r--.  1 root root  521 Aug 17 11:25 reasonix-balance-mod-v0.8.2.patch
+[0m
+[0m$ [0mls /root; echo "---"; ls -la /root/reasonix-night*.log 2>/dev/null; echo "---termux---"; ls /data/data/com.termux/files/usr/bin 2>/dev/null | head -5
+DeepSeek-Reasonix
+DeepSeek-Reasonix-20260820-162912-working-state.txt
+DeepSeek-Reasonix-20260820-162912.bundle
+REASONIX_3_NIGHT_PROMPT.txt
+balance_mod_bundle_v0.1
+balance_mod_bundle_v0.2
+balance_mod_bundle_v0.3
+balance_mod_bundle_v0.4
+balance_mod_bundle_v0.5
+balance_mod_bundle_v0.6
+balance_mod_bundle_v0.7
+balance_mod_bundle_v0.8
+balance_mod_bundle_v0.8.1
+balance_mod_bundle_v0.9
+balance_mod_hotfix_v0.1.1
+balance_mod_hotfix_v0.4.1
+balance_mod_hotfix_v0.6.1
+clicker
+go
+projects
+reasonix-balance-mod-v0.1-bundle.tar.gz
+reasonix-balance-mod-v0.1.1-hotfix.tar.gz
+reasonix-balance-mod-v0.10-bundle
+reasonix-balance-mod-v0.10-bundle.tar.gz
+reasonix-balance-mod-v0.11-bundle
+reasonix-balance-mod-v0.11-bundle.tar.gz
+reasonix-balance-mod-v0.12-bundle
+reasonix-balance-mod-v0.12-bundle.tar.gz
+reasonix-balance-mod-v0.13-bundle
+reasonix-balance-mod-v0.13-bundle.tar.gz
+reasonix-balance-mod-v0.14-bundle
+reasonix-balance-mod-v0.14-bundle.tar.gz
+reasonix-balance-mod-v0.14.1-hotfix
+reasonix-balance-mod-v0.14.1-hotfix.tar.gz
+reasonix-balance-mod-v0.14.2-hotfix
+reasonix-balance-mod-v0.14.2-hotfix.tar.gz
+reasonix-balance-mod-v0.14.3-hotfix
+reasonix-balance-mod-v0.14.3-hotfix.tar.gz
+reasonix-balance-mod-v0.16-fixed-bundle
+reasonix-balance-mod-v0.16-fixed-bundle.tar.gz
+reasonix-balance-mod-v0.17-bundle
+reasonix-balance-mod-v0.17-bundle.tar.gz
+reasonix-balance-mod-v0.18-fixed-bundle
+reasonix-balance-mod-v0.18-fixed-bundle.tar.gz
+reasonix-balance-mod-v0.2-bundle.tar.gz
+reasonix-balance-mod-v0.20-bundle
+reasonix-balance-mod-v0.20-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed10-bundle
+reasonix-balance-mod-v0.20-fixed10-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed11-bundle
+reasonix-balance-mod-v0.20-fixed11-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed12-bundle
+reasonix-balance-mod-v0.20-fixed12-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed2-bundle
+reasonix-balance-mod-v0.20-fixed2-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed5-bundle
+reasonix-balance-mod-v0.20-fixed5-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed6-bundle
+reasonix-balance-mod-v0.20-fixed6-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed7-bundle
+reasonix-balance-mod-v0.20-fixed7-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed8-bundle
+reasonix-balance-mod-v0.20-fixed8-bundle.tar.gz
+reasonix-balance-mod-v0.20-fixed9-bundle
+reasonix-balance-mod-v0.20-fixed9-bundle.tar.gz
+reasonix-balance-mod-v0.3-bundle.tar.gz
+reasonix-balance-mod-v0.4-bundle.tar.gz
+reasonix-balance-mod-v0.4.1-hotfix.tar.gz
+reasonix-balance-mod-v0.5-bundle.tar.gz
+reasonix-balance-mod-v0.6-bundle.tar.gz
+reasonix-balance-mod-v0.6.1-hotfix.tar.gz
+reasonix-balance-mod-v0.7-bundle.tar.gz
+reasonix-balance-mod-v0.8-bundle.tar.gz
+reasonix-balance-mod-v0.8.1-bundle.tar.gz
+reasonix-balance-mod-v0.9-bundle.tar.gz
+reasonix-mobile-v1.0-backend
+reasonix-mobile-v1.2-backend
+reasonix-mobile-v1.3-backend
+reasonix-mobile-v1.3.1-backend
+reasonix-mobile-v1.3.2-backend
+reasonix-mobile-v1.4.0-backend
+reasonix-mobile-v1.5.0-backend
+reasonix-mobile-v1.5.1-backend
+reasonix-night-20260820-170419.log
+reasonix-night-permissions.json
+reasonix-source.tar.gz
+reasonix-v2.0.7-rc-device-bundle
+---
+-rw-r--r--. 1 root root 8184 Aug 20 17:05 /root/reasonix-night-20260820-170419.log
+---termux---
+[
+aapt
+aapt2
+aarch64-linux-android-ar
+aarch64-linux-android-clang
+[0m
+[0m
+[0m$ [0mls -la /root/DeepSeek-Reasonix/.reasonix; echo "---BIN---"; ls -la /root/DeepSeek-Reasonix/bin
+total 18
+drwxr-xr-x.  5 root root 3452 Aug 19 10:44 .
+drwxr-xr-x. 29 root root 4096 Aug 19 14:14 ..
+drwxr-xr-x.  2 root root 3452 Aug 16 17:57 commands
+drwxr-xr-x.  7 root root 3452 Aug 19 10:03 skills
+drwx------.  3 root root 3452 Aug 19 10:44 tasks
+---BIN---
+total 53332
+drwxr-xr-x.  2 root root     3452 Aug 18 13:38 .
+drwxr-xr-x. 29 root root     4096 Aug 19 14:14 ..
+-rwxr-xr-x.  1 root root 52511752 Aug 18 13:45 reasonix
+-rwxr-xr-x.  1 root root  2031778 Aug 16 18:17 reasonix-plugin-example
+[0m
+[0m→ [0mRead REASONIX.md
+[0m
+[0m$ [0mcat /root/REASONIX_3_NIGHT_PROMPT.txt 2>/dev/null | head -40; echo "====WORKING STATE===="; head -100 /root/DeepSeek-Reasonix-20260820-162912-working-state.txt
+YOU ARE THE PRINCIPAL ENGINEER OF THE EXISTING DEEPSEEK-REASONIX PROJECT.
+
+OpenCode is only the development environment.
+DeepSeek is the engineering model.
+THE PRODUCT IS THE EXISTING REASONIX PROJECT.
+
+DO NOT:
+- start a replacement project;
+- rewrite from scratch without evidence;
+- modify OpenCode itself;
+- spawn OpenCode subagents;
+- build another agent environment around Reasonix.
+
+GOAL FOR THIS RUN:
+
+CURRENT REASONIX
+ verify real baseline
+ stabilize/complete Reasonix 2.0
+ build a REAL Reasonix 3.0 Swarm core
+ deterministic local tests
+ controlled real provider tests
+ controlled real swarm test
+ mobile/backend integration
+ one replacement build if needed
+ final evidence report
+
+==================================================
+FACT MODEL
+==================================================
+
+Use:
+
+OBSERVED
+VERIFIED
+KNOWN_FROM_REPOSITORY
+INFERENCE
+NOT_VERIFIED
+TESTING_BLOCKED
+
+Never claim more than evidence proves.
+====WORKING STATE====
+## main-v2...origin/main-v2
+ M cmd/reasonix/main.go
+ M internal/agent/agent.go
+ M internal/agent/compact.go
+ M internal/agent/coordinator.go
+ M internal/agent/execute_one.go
+ M internal/agent/reasoning_replay.go
+ M internal/agent/run_budget.go
+ M internal/agent/run_loop.go
+ M internal/agent/run_usage.go
+ M internal/agent/sampling_request.go
+ M internal/control/approval.go
+ M internal/control/capability.go
+ M internal/control/controller.go
+ M internal/control/inbox.go
+ M internal/control/inbox_run.go
+ M internal/provider/retry.go
+ M internal/serve/broadcaster.go
+ M internal/serve/serve.go
+ M internal/sessioninbox/manifest.go
+ M internal/sessioninbox/ops.go
+ M internal/sessioninbox/recovery.go
+ M internal/sessioninbox/store.go
+ M internal/sessioninbox/types.go
+ M internal/tool/tool.go
+?? .balance_mod_backups/
+?? .mcp.json
+?? balance_mod_hotfix_v0.8.2/
+?? configs/
+?? docs/BALANCE_MOD.md
+?? docs/BALANCE_MOD_V017.md
+?? docs/BALANCE_MOD_V018.md
+?? docs/BALANCE_MOD_V019.md
+?? docs/BALANCE_MOD_V020.md
+?? docs/BALANCE_MOD_V020_FIXED.md
+?? docs/BALANCE_MOD_V020_FIXED10.md
+?? docs/BALANCE_MOD_V020_FIXED12.md
+?? docs/BALANCE_MOD_V020_FIXED5.md
+?? docs/BALANCE_MOD_V020_FIXED9.md
+?? internal/agent/balance_strict_retry_fixed9_test.go
+?? internal/agent/balance_v20_usage_receipt_fixed12.go
+?? internal/agent/balance_v20_usage_receipt_fixed12_test.go
+?? internal/agent/precall_budget_test.go
+?? internal/agent/strict_budget_tools.go
+?? internal/control/inbox_budget.go
+?? internal/control/inbox_budget_test.go
+?? internal/control/inbox_completion_receipt_test.go
+?? internal/control/precall_budget_setter.go
+?? internal/control/precall_budget_setter.go.v016bak
+?? internal/control/runtime_tool_policy.go
+?? internal/control/runtime_tool_policy_test.go
+?? internal/control/task_budget_setter.go
+?? internal/efficiency/
+?? internal/provider/balance_strict_retry_fixed9_test.go
+?? internal/provider/mock/
+?? internal/serve/mod_agent_control.go
+?? internal/serve/mod_agent_control_test.go
+?? internal/serve/mod_app.go
+?? internal/serve/mod_app_test.go
+?? internal/serve/mod_bridge.go
+?? internal/serve/mod_bridge_test.go
+?? internal/serve/mod_capabilities.go
+?? internal/serve/mod_capabilities_test.go
+?? internal/serve/mod_contract.go
+?? internal/serve/mod_contract_test.go
+?? internal/serve/mod_live.go
+?? internal/serve/mod_live_test.go
+?? internal/serve/mod_orchestrator.go
+?? internal/serve/mod_orchestrator_test.go
+?? internal/serve/mod_power.go
+?? internal/serve/mod_power_turn.go
+?? internal/serve/mod_power_turn_test.go
+?? internal/serve/mod_projects.go
+?? internal/serve/mod_projects_test.go
+?? internal/serve/mod_queue.go
+?? internal/serve/mod_queue_test.go
+?? internal/serve/precall_switch_test.go
+?? internal/serve/precall_switch_test.go.v016bak
+?? internal/sessioninbox/completion_receipt.go
+?? internal/sessioninbox/completion_receipt.go.v017bak
+?? internal/sessioninbox/completion_receipt_test.go
+?? internal/tool/session_hidden_test.go
+?? reasonix-balance-mod-v0.15-bundle.tar.gz
+?? reasonix-balance-mod-v0.15-bundle/
+?? reasonix-balance-mod-v0.16-bundle.tar.gz
+?? reasonix-balance-mod-v0.16-bundle/
+?? reasonix-balance-mod-v0.19-bundle.tar.gz
+?? reasonix-balance-mod-v0.19-bundle/
+?? reasonix-balance-mod-v0.20-fixed-bundle.tar.gz
+?? reasonix-balance-mod-v0.20-fixed-bundle/
+?? reasonix-balance-mod-v0.20-fixed3-bundle.tar.gz
+?? reasonix-balance-mod-v0.20-fixed3-bundle/
+?? reasonix-balance-mod-v0.20-fixed4-bundle.tar.gz
+?? reasonix-balance-mod-v0.20-fixed4-bundle/
+?? reasonix-balance-mod-v0.8.2-hotfix.tar.gz
+?? reasonix.toml.bak-context
+?? reasonix.toml.bak-final
+?? reasonix.toml.bak-router-20260819-141452
+?? scripts/balance_mod_offline_prototype.sh
+?? scripts/balance_mod_offline_stress.sh
+[0m
+[0m$ [0mls -la /root/reasonix-v2.0.7-rc-device-bundle /root/clicker /root/go 2>/dev/null; echo "---PERMS---"; head -40 /root/reasonix-night-permissions.json 2>/dev/null
+/root/clicker:
+total 40
+drwxr-xr-x.  2 root root  3452 Aug 18 14:47 .
+drwx------. 59 root root 20480 Aug 20 17:04 ..
+-rw-r--r--.  1 root root 17670 Aug 18 14:47 index.html
+
+/root/go:
+total 23
+drwxr-xr-x.  3 root root  3452 Aug 16 18:00 .
+drwx------. 59 root root 20480 Aug 20 17:04 ..
+drwxr-xr-x.  4 root root  3452 Aug 16 18:03 pkg
+
+/root/reasonix-v2.0.7-rc-device-bundle:
+total 39
+drwxr-sr-x.  4 root root  3452 Aug 19 12:30 .
+drwx------. 59 root root 20480 Aug 20 17:04 ..
+-rw-r--r--.  1 root root   692 Aug 19 12:30 BUILD-ON-PHONE.txt
+-rw-r--r--.  1 root root  6087 Aug 19 12:30 ENGINEERING-REPORT.txt
+drwxr-xr-x.  2 root root  3452 Aug 19 12:30 backend
+drwxr-sr-x.  5 root root  3452 Aug 19 12:08 mobile
+---PERMS---
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "lsp": "allow",
+    "skill": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "edit": "allow",
+
+    "task": "deny",
+    "doom_loop": "deny",
+    "question": "deny",
+
+    "external_directory": "allow",
+
+    "bash": {
+      "*": "allow",
+
+      "git push *": "deny",
+      "git push": "deny",
+
+      "git reset *": "deny",
+      "git clean *": "deny",
+      "git restore *": "deny",
+      "git checkout -- *": "deny",
+
+      "rm -rf /": "deny",
+      "rm -rf /*": "deny",
+      "rm -rf /root": "deny",
+      "rm -rf /root/*": "deny",
+
+      "shutdown *": "deny",
+      "reboot *": "deny"
+    }
+  }
+}
+[0m
+[0m$ [0mgit diff --stat | tail -30
+cmd/reasonix/main.go               |   1 +
+ internal/agent/agent.go            |   6 ++
+ internal/agent/compact.go          |   6 ++
+ internal/agent/coordinator.go      |  20 ++++
+ internal/agent/execute_one.go      |   5 +
+ internal/agent/reasoning_replay.go |   5 +
+ internal/agent/run_budget.go       | 158 ++++++++++++++++++++++++++++++
+ internal/agent/run_loop.go         |   4 +
+ internal/agent/run_usage.go        |   1 +
+ internal/agent/sampling_request.go |  10 +-
+ internal/control/approval.go       |  20 ++++
+ internal/control/capability.go     |   6 +-
+ internal/control/controller.go     |   8 +-
+ internal/control/inbox.go          |  15 +++
+ internal/control/inbox_run.go      |   6 ++
+ internal/provider/retry.go         |  36 ++++++-
+ internal/serve/broadcaster.go      |  62 +++++++++++-
+ internal/serve/serve.go            | 193 ++++++++++++++++++++++++++++++++++++-
+ internal/sessioninbox/manifest.go  |   8 ++
+ internal/sessioninbox/ops.go       |   3 +
+ internal/sessioninbox/recovery.go  |  25 +++--
+ internal/sessioninbox/store.go     |  23 ++++-
+ internal/sessioninbox/types.go     |   7 +-
+ internal/tool/tool.go              |  46 +++++++--
+ 24 files changed, 645 insertions(+), 29 deletions(-)
+[0m
+[0m→ [0mRead reasonix.toml
+[0m
+[0m$ [0mps aux | grep -iE 'opencode|reasonix|tmux' | grep -v grep; echo "---TMUX---"; tmux ls 2>/dev/null; echo "---LOG TAIL---"; tail -5 /root/reasonix-night-20260820-170419.log
+u0_a402  17097  0.1  0.0  23484  4884 ?        Ss    2023   0:00 tmux new -s reasonix-night
+u0_a402  17381  0.0  0.0   2316   704 pts/1    S+    2023   0:00 tee /root/reasonix-night-20260820-170419.log
+---TMUX---
+reasonix-night: 1 windows (created Thu Aug 20 17:04:10 2026)
+---LOG TAIL---
+ internal/sessioninbox/types.go     |   7 +-
+ internal/tool/tool.go              |  46 +++++++--
+ 24 files changed, 645 insertions(+), 29 deletions(-)
+[0m
+[0m→ [0mRead reasonix.toml
+[0m
+[0m$ [0mls docs/ | grep -iE 'BALANCE|MOD' ; echo "---"; wc -l docs/BALANCE_MOD*.md
+BALANCE_MOD.md
+BALANCE_MOD_V017.md
+BALANCE_MOD_V018.md
+BALANCE_MOD_V019.md
+BALANCE_MOD_V020.md
+BALANCE_MOD_V020_FIXED.md
+BALANCE_MOD_V020_FIXED10.md
+BALANCE_MOD_V020_FIXED12.md
+BALANCE_MOD_V020_FIXED5.md
+BALANCE_MOD_V020_FIXED9.md
+COLLABORATION_MODES.md
+COLLABORATION_MODES.zh-CN.md
+TOOL_APPROVAL_MODES.md
+TOOL_APPROVAL_MODES.zh-CN.md
+---
+  724 docs/BALANCE_MOD.md
+   24 docs/BALANCE_MOD_V017.md
+   33 docs/BALANCE_MOD_V018.md
+   32 docs/BALANCE_MOD_V019.md
+    9 docs/BALANCE_MOD_V020.md
+   25 docs/BALANCE_MOD_V020_FIXED.md
+   23 docs/BALANCE_MOD_V020_FIXED10.md
+   10 docs/BALANCE_MOD_V020_FIXED12.md
+   15 docs/BALANCE_MOD_V020_FIXED5.md
+   18 docs/BALANCE_MOD_V020_FIXED9.md
+  913 total
+[0m
+[0m$ [0mls internal/serve/mod_*.go internal/serve/mod_*.txt 2>/dev/null; echo "---CONTROL NEW---"; ls internal/control/*budget* internal/control/*receipt* internal/control/*policy* internal/control/*setter* 2>/dev/null; echo "---AGENT NEW---"; ls internal/agent/balance* internal/agent/strict* internal/agent/precall* 2>/dev/null; echo "---EFFICIENCY---"; ls -R internal/efficiency 2>/dev/null; echo "---MOCK---"; ls internal/provider/mock 2>/dev/null
+internal/serve/mod_agent_control.go
+internal/serve/mod_agent_control_test.go
+internal/serve/mod_app.go
+internal/serve/mod_app_test.go
+internal/serve/mod_bridge.go
+internal/serve/mod_bridge_test.go
+internal/serve/mod_capabilities.go
+internal/serve/mod_capabilities_test.go
+internal/serve/mod_contract.go
+internal/serve/mod_contract_test.go
+internal/serve/mod_live.go
+internal/serve/mod_live_test.go
+internal/serve/mod_orchestrator.go
+internal/serve/mod_orchestrator_test.go
+internal/serve/mod_power.go
+internal/serve/mod_power_turn.go
+internal/serve/mod_power_turn_test.go
+internal/serve/mod_projects.go
+internal/serve/mod_projects_test.go
+internal/serve/mod_queue.go
+internal/serve/mod_queue_test.go
+---CONTROL NEW---
+internal/control/chat_run_budget_test.go
+internal/control/goal_budget.go
+internal/control/goal_budget_heuristic.go
+internal/control/goal_budget_intent.go
+internal/control/goal_research_budget.go
+internal/control/goal_spend_budget_test.go
+internal/control/inbox_budget.go
+internal/control/inbox_budget_test.go
+internal/control/inbox_completion_receipt_test.go
+internal/control/precall_budget_setter.go
+internal/control/precall_budget_setter.go
+internal/control/precall_budget_setter.go.v016bak
+internal/control/precall_budget_setter.go.v016bak
+internal/control/runtime_tool_policy.go
+internal/control/runtime_tool_policy_test.go
+internal/control/task_budget_setter.go
+internal/control/task_budget_setter.go
+internal/control/taskpolicy_route_test.go
+---AGENT NEW---
+internal/agent/balance_strict_retry_fixed9_test.go
+internal/agent/balance_v20_usage_receipt_fixed12.go
+internal/agent/balance_v20_usage_receipt_fixed12_test.go
+internal/agent/precall_budget_test.go
+internal/agent/strict_budget_tools.go
+---EFFICIENCY---
+internal/efficiency:
+budget.go
+budget_persist.go
+budget_persist_test.go
+budget_test.go
+execution_router.go
+execution_router_test.go
+failure_cache.go
+failure_cache_test.go
+log_reduce.go
+log_reduce_test.go
+patch_guard.go
+patch_guard_test.go
+power_engine.go
+power_engine_test.go
+project_profile.go
+project_profile_test.go
+quality.go
+quality_test.go
+repair_cycle.go
+repair_cycle_mock_test.go
+repair_cycle_test.go
+resource_linux.go
+resource_other.go
+router.go
+router_test.go
+---MOCK---
+mock.go
+mock_test.go
+[0m
+[0m→ [0mRead docs/BALANCE_MOD_V020_FIXED12.md
+[0m→ [0mRead docs/BALANCE_MOD.md
+[0m
+[0m$ [0mcat go.mod
+module reasonix
+
+go 1.25.0
+
+toolchain go1.26.6
+
+require (
+	charm.land/bubbles/v2 v2.1.1
+	charm.land/bubbletea/v2 v2.0.8
+	charm.land/lipgloss/v2 v2.0.5
+	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3
+	github.com/BurntSushi/toml v1.6.0
+	github.com/alecthomas/chroma/v2 v2.27.0
+	github.com/atotto/clipboard v0.1.4
+	github.com/aymanbagabas/go-udiff v0.4.1
+	github.com/bmatcuk/doublestar/v4 v4.10.0
+	github.com/charmbracelet/colorprofile v0.4.3
+	github.com/charmbracelet/x/ansi v0.11.7
+	github.com/godbus/dbus/v5 v5.2.2
+	github.com/joho/godotenv v1.5.1
+	github.com/kevinburke/ssh_config v1.6.0
+	github.com/larksuite/oapi-sdk-go/v3 v3.9.9
+	github.com/mattn/go-runewidth v0.0.27
+	github.com/pkg/sftp v1.13.11
+	github.com/rivo/uniseg v0.4.7
+	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
+	github.com/spf13/pflag v1.0.10
+	github.com/tree-sitter/go-tree-sitter v0.25.0
+	github.com/tree-sitter/tree-sitter-javascript v0.25.0
+	github.com/tree-sitter/tree-sitter-python v0.25.0
+	github.com/tree-sitter/tree-sitter-rust v0.24.2
+	github.com/tree-sitter/tree-sitter-typescript v0.23.2
+	github.com/yuin/goldmark v1.8.5
+	github.com/zalando/go-keyring v0.2.8
+	go.uber.org/goleak v1.3.0
+	golang.org/x/crypto v0.54.0
+	golang.org/x/image v0.45.0
+	golang.org/x/mod v0.38.0
+	golang.org/x/net v0.57.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
+	golang.org/x/text v0.41.0
+	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.56.0
+	mvdan.cc/sh/v3 v3.13.1
+)
+
+require (
+	github.com/charmbracelet/ultraviolet v0.0.0-20260703014108-f5a850f9c2b7 // indirect
+	github.com/charmbracelet/x/term v0.2.2 // indirect
+	github.com/charmbracelet/x/termios v0.1.1 // indirect
+	github.com/charmbracelet/x/windows v0.2.2 // indirect
+	github.com/clipperhouse/displaywidth v0.11.0 // indirect
+	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
+	github.com/danieljoos/wincred v1.2.3 // indirect
+	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/go-ole/go-ole v1.3.0 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/kr/fs v0.1.0 // indirect
+	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/mattn/go-pointer v0.0.1 // indirect
+	github.com/muesli/cancelreader v0.2.2 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	modernc.org/libc v1.74.4 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.11.0 // indirect
+)
+[0m
+[0m$ [0mcat .mcp.json; echo "---REASONIX HOME---"; ls -la ~/.reasonix 2>/dev/null; echo "---TASKS---"; ls -la ~/.reasonix/tasks 2>/dev/null; ls -la /root/DeepSeek-Reasonix/.reasonix/tasks 2>/dev/null; echo "---SKILLS---"; ls /root/DeepSeek-Reasonix/.reasonix/skills; echo "---COMMANDS---"; ls /root/DeepSeek-Reasonix/.reasonix/commands
+{
+  "mcpServers": {
+    "android": {
+      "auto_start": true,
+      "command": "/usr/bin/python3",
+      "args": [
+        "/root/reasonix-mobile-v1.5.1-backend/reasonix_android_tools.py"
+      ]
+    }
+  }
+}
+---REASONIX HOME---
+total 69
+drwx------.  8 root root  3452 Aug 18 16:52 .
+drwx------. 59 root root 20480 Aug 20 17:04 ..
+-rw-------.  1 root root    68 Aug 18 14:43 .env
+drwx------.  3 root root  3452 Aug 17 16:23 balance
+-rw-------.  1 root root 12873 Aug 18 16:52 config.toml
+drwx------.  2 root root  3452 Aug 18 14:43 logs
+-rw-r--r--.  1 root root     3 Aug 18 16:52 mcp-global-migration-v1
+drwx------.  3 root root  3452 Aug 18 16:52 mcp-state
+drwx------. 56 root root  8192 Aug 18 14:37 projects
+drwx------.  2 root root  3452 Aug 19 08:59 state
+drwx------.  2 root root  3452 Aug 19 07:28 stats
+---TASKS---
+total 11
+drwx------. 3 root root 3452 Aug 19 10:44 .
+drwxr-xr-x. 5 root root 3452 Aug 19 10:44 ..
+drwx------. 2 root root 3452 Aug 19 10:44 20260819-104022.197469237-deepseek-v4-flash--bash-1
+---SKILLS---
+android-developer
+debugger
+project-architect
+verifier
+web-researcher
+---COMMANDS---
+review.md
+[0m
+[0m$ [0mcat ~/.reasonix/.env 2>/dev/null | sed 's/=.*/=<set>/'; echo "---CONFIG PROVIDERS---"; grep -n -A6 'providers' ~/.reasonix/config.toml | head -80
+CUSTOM_API_DEEPSEEK_COM_API_KEY=<set>
+---CONFIG PROVIDERS---
+83:[[providers]]
+84-name        = "deepseek-flash"
+85-kind        = "anthropic"
+86-base_url    = "https://api.deepseek.com/anthropic"
+87-models      = ["deepseek-v4-flash"]
+88-default     = "deepseek-v4-flash"
+89-api_key_env = "DEEPSEEK_API_KEY"
+--
+104:[[providers]]
+105-name        = "deepseek-pro"
+106-kind        = "anthropic"
+107-base_url    = "https://api.deepseek.com/anthropic"
+108-model       = "deepseek-v4-pro"
+109-api_key_env = "DEEPSEEK_API_KEY"
+110-balance_url = "https://api.deepseek.com/user/balance"   # optional; wallet-balance endpoint shown in the status bar
+[0m
+[0m$ [0mgo build ./... 2>&1 | head -40; echo "BUILD_EXIT=${PIPESTATUS[0]}"
+BUILD_EXIT=0
+[0m
+[0m$ [0mls -la /root/reasonix-mobile-v1.5.1-backend; echo "---TOOLS PY HEAD---"; head -60 /root/reasonix-mobile-v1.5.1-backend/reasonix_android_tools.py 2>/dev/null
+total 123
+drwxr-xr-x.  3 root root  3452 Aug 19 13:54 .
+drwx------. 59 root root 20480 Aug 20 17:04 ..
+-rw-r--r--.  1 root root  1789 Aug 19 13:54 START-HERE.txt
+-rw-r--r--.  1 root root   782 Aug 19 13:54 VERIFICATION.txt
+drwxr-xr-x.  2 root root  3452 Aug 19 13:56 __pycache__
+-rwxr-xr-x.  1 root root 14050 Aug 18 19:03 reasonix_android_tools.py
+-rwxr-xr-x.  1 root root 10967 Aug 19 13:54 reasonix_mobile_backend.sh
+-rwxr-xr-x.  1 root root 58782 Aug 19 13:54 reasonix_mobile_bridge.py
+-rwxr-xr-x.  1 root root  1305 Aug 19 13:54 upgrade_backend.sh
+---TOOLS PY HEAD---
+#!/usr/bin/env python3
+"""Reasonix Android host MCP tools for the Debian/PRoot backend.
+
+This exposes only capabilities actually visible on the phone. It does not fake
+or bypass Android grants: Termux:API permissions, Shizuku/rish and root/su still
+control what succeeds. MCP annotations let Reasonix keep mutating operations
+behind its permission layer.
+"""
+from __future__ import annotations
+import argparse, json, os, pathlib, shutil, subprocess, sys
+
+PROTO="2024-11-05"
+TERMUX_PREFIX=pathlib.Path('/data/data/com.termux/files/usr/bin')
+TERMUX_NAMES=[
+ 'termux-battery-status','termux-clipboard-get','termux-clipboard-set','termux-notification',
+ 'termux-toast','termux-vibrate','termux-open-url','termux-wifi-connectioninfo','termux-camera-photo',
+ 'termux-location','termux-sensor','termux-volume','termux-brightness','termux-torch','termux-media-player',
+ 'termux-share','termux-open','termux-telephony-deviceinfo'
+]
+
+def which(name):
+    p=shutil.which(name)
+    if p:return p
+    q=TERMUX_PREFIX/name
+    return str(q) if q.exists() and os.access(q,os.X_OK) else ''
+
+
+def android_su():
+    # Never treat Debian/PRoot /usr/bin/su as Android root. Only Android/Termux
+    # host-side candidates are eligible; actual invocation may still fail if the
+    # phone is not rooted or permission is denied.
+    candidates=[
+      TERMUX_PREFIX/'su', pathlib.Path('/system/bin/su'), pathlib.Path('/system/xbin/su'),
+      pathlib.Path('/sbin/su'), pathlib.Path('/su/bin/su')]
+    for p in candidates:
+        try:
+            if p.exists() and os.access(p,os.X_OK): return str(p)
+        except Exception: pass
+    return ''
+
+def shared_roots():
+    out=[]
+    for raw in ['/sdcard','/storage/emulated/0','/data/data/com.termux/files/home/storage/shared']:
+        p=pathlib.Path(raw)
+        try:
+            if p.exists():
+                rp=p.resolve()
+                if rp not in out:out.append(rp)
+        except Exception:pass
+    return out
+
+def caps():
+    termux={n:which(n) for n in TERMUX_NAMES};rish=which('rish');su=android_su();system_sh='/system/bin/sh' if pathlib.Path('/system/bin/sh').exists() else ''
+    return {'termuxApi':bool(any(termux.values())),'termuxTools':sorted(k for k,v in termux.items() if v),
+      'shizukuRish':bool(rish),'rishPath':rish,'rootSu':bool(su),'suPath':su,
+      'androidSystemShell':bool(system_sh),'systemShellPath':system_sh,
+      'sharedStorage':[str(x) for x in shared_roots()],
+      'note':'Path visibility is not privilege. rootSu excludes Debian /usr/bin/su; /system/bin/sh still runs in the app/PRoot security context unless Android itself grants more.'}
+
+def run(cmd,timeout=20,input_text=None,shell=False):
+[0m
+[0m$ [0m./bin/reasonix --version 2>&1 | head -5; echo "---"; cat configs/balance_mod_v020_real_provider_manifest.json
+reasonix dev
+---
+{
+  "schema": "balance-real-provider-gate-v1",
+  "modVersion": "balance-mod-v0.20",
+  "baseline": "balance-mod-v0.19",
+  "state": "locked-until-explicit-user-approval",
+  "provider": {
+    "name": "deepseek-v20",
+    "kind": "openai",
+    "baseUrl": "https://api.deepseek.com",
+    "model": "deepseek-v4-flash",
+    "apiKeyEnv": "DEEPSEEK_API_KEY",
+    "apiKeyEmbedded": false,
+    "installerReadsApiKey": false,
+    "proAllowed": false
+  },
+  "hardGate": {
+    "approvalEnv": "BALANCE_V20_REAL_API_APPROVED",
+    "approvalValue": "YES_I_EXPLICITLY_APPROVE_DEEPSEEK_API",
+    "fxEnv": "BALANCE_V20_USD_KZT",
+    "budgetEnv": "BALANCE_V20_BUDGET_KZT",
+    "defaultBudgetKzt": 10.0,
+    "maximumBudgetKzt": 25.0,
+    "reservePercent": 20,
+    "proMaxPercent": 0,
+    "hardStop": true,
+    "maxOutputTokens": 64,
+    "failClosedOnMissingFX": true,
+    "failClosedOnMissingApproval": true,
+    "failClosedOnStalePricingSnapshot": true,
+    "retryPolicy": "strict-one-paid-attempt-no-hidden-retry-v0.20-fixed9"
+  },
+  "pricingSnapshot": {
+    "source": "DeepSeek official Models & Pricing",
+    "asOf": "2026-08-18",
+    "currency": "USD",
+    "unitTokens": 1000000,
+    "deepseek-v4-flash": {
+      "cacheHit": 0.0028,
+      "input": 0.14,
+      "output": 0.28
+    },
+    "maxAgeDays": 1
+  },
+  "reconciliation": {
+    "providerReportedUsageRequired": true,
+    "cacheHitMissAware": true,
+    "backendSpentDeltaRequired": true,
+    "absoluteToleranceKzt": 0.05,
+    "relativeTolerance": 0.05,
+    "note": "Exact provider Usage is captured at emitTurnUsage into a temporary gate-only receipt and independently reconciled against the backend KZT ledger. It is a rate-card estimate, not a wallet invoice.",
+    "ledgerPricingPolicy": "official-flat-v4-flash",
+    "usageReceipt": "agent.emitTurnUsage exact provider Usage -> env-gated atomic receipt v0.20-fixed12"
+  },
+  "requiredOfflineGates": [
+    "v0.19-full-regression",
+    "hard-precall-native-regression",
+    "real-gate-default-locked",
+    "no-secret-in-bundle",
+    "pricing-reconciler-self-test",
+    "real-config-build-preflight"
+  ],
+  "requiredRealGates": [
+    "explicit-user-approval",
+    "fresh-pricing-snapshot",
+    "positive-explicit-usd-kzt-fx",
+    "loopback-token-auth",
+    "known-provider-pricing-before-stream",
+    "hard-kzt-precall-gate",
+    "strict-one-paid-attempt-policy",
+    "flash-only-single-agent",
+    "single-tiny-real-task",
+    "provider-reported-usage",
+    "actual-vs-ratecard-reconciliation",
+    "spent-below-hard-budget"
+  ]
+}
+[0m
+[0m$ [0mgrep -rn 'Swarm\|swarm' --include='*.go' internal/ cmd/ | grep -vi '_test' | head -30
+(no output)
+[0m
+[0m$ [0mgrep -ril 'swarm' --include='*.go' . | grep -v _test | head -20; echo "---SWARM DOCS---"; grep -ril 'swarm' docs/ scripts/ 2>/dev/null | head
+---SWARM DOCS---
+[0m
+[0m$ [0mgo vet ./... 2>&1 | head -30; echo "VET_EXIT=${PIPESTATUS[0]}"
+VET_EXIT=0
+[0m
+[0m$ [0mgo test ./internal/agent/ ./internal/control/ ./internal/efficiency/ ./internal/provider/ ./internal/serve/ ./internal/sessioninbox/ 2>&1 | tail -30
+2026/08/20 17:12:39 WARN controller: keeping in-flight marker after failed turn snapshot err="session has content but no session path; conversation cannot be persisted"
+2026/08/20 17:12:39 WARN session: save without a held lease (write-authority probe, store P2) path=session.jsonl mode=0 writer=localhost-21910-1b7825a68e4b9913
+2026/08/20 17:12:40 WARN session: save without a held lease (write-authority probe, store P2) path=session.jsonl mode=0 writer=localhost-21910-1b7825a68e4b9913
+2026/08/20 17:12:40 WARN session: save without a held lease (write-authority probe, store P2) path=session.jsonl mode=0 writer=localhost-21910-1b7825a68e4b9913
+2026/08/20 17:12:41 WARN controller: refusing to snapshot session with content but no system message label="" session_dir="" message_count=2
+2026/08/20 17:12:41 WARN controller: session has content but no session path; conversation will not be persisted label="" session_dir=""
+2026/08/20 17:12:41 WARN controller: keeping in-flight marker after failed turn snapshot err="session has content but no session path; conversation cannot be persisted"
+2026/08/20 17:12:41 WARN controller: session has content but no session path; conversation will not be persisted label="" session_dir=""
+2026/08/20 17:12:41 WARN controller: keeping in-flight marker after failed turn snapshot err="session has content but no session path; conversation cannot be persisted"
+2026/08/20 17:12:41 WARN controller: session has content but no session path; conversation will not be persisted label="" session_dir=""
+2026/08/20 17:12:41 WARN controller: keeping in-flight marker after failed turn snapshot err="session has content but no session path; conversation cannot be persisted"
+2026/08/20 17:12:41 WARN controller: session has content but no session path; conversation will not be persisted label="" session_dir=""
+2026/08/20 17:12:41 WARN controller: keeping in-flight marker after failed turn snapshot err="session has content but no session path; conversation cannot be persisted"
+2026/08/20 17:12:41 WARN session: save without a held lease (write-authority probe, store P2) path=20260820-171241.830043550-test-model.jsonl mode=1 writer=localhost-21910-1b7825a68e4b9913
+2026/08/20 17:12:42 WARN session: save without a held lease (write-authority probe, store P2) path=stale-visible.jsonl mode=0 writer=localhost-21910-1b7825a68e4b9913
+2026/08/20 17:12:42 INFO controller: resume cache state path=/tmp/TestResumeRecoversStaleVisibleInFlightTurn3977311003/001/stale-visible.jsonl cache_state=warm idle=0s
+2026/08/20 17:12:42 WARN session: save without a held lease (write-authority probe, store P2) path=stale-synthetic.jsonl mode=0 writer=localhost-21910-1b7825a68e4b9913
+2026/08/20 17:12:42 INFO controller: resume cache state path=/tmp/TestResumeClearsStaleSyntheticInFlightTurn3997736702/001/stale-synthetic.jsonl cache_state=warm idle=0s
+2026/08/20 17:12:42 WARN session: save without a held lease (write-authority probe, store P2) path=20260820-171242.937681357-test.jsonl mode=0 writer=localhost-21910-1b7825a68e4b9913
+2026/08/20 17:12:43 WARN controller: refusing to snapshot session with content but no system message label="" session_dir="" message_count=6
+2026/08/20 17:12:43 WARN controller: refusing to snapshot session with content but no system message label="" session_dir="" message_count=6
+2026/08/20 17:12:43 WARN controller: session has content but no session path; conversation will not be persisted label="" session_dir=""
+2026/08/20 17:12:43 WARN controller: keeping in-flight marker after failed turn snapshot err="session has content but no session path; conversation cannot be persisted"
+FAIL
+FAIL	reasonix/internal/control	145.679s
+ok  	reasonix/internal/efficiency	(cached)
+ok  	reasonix/internal/provider	7.259s
+ok  	reasonix/internal/serve	81.115s
+ok  	reasonix/internal/sessioninbox	5.542s
+FAIL
+[0m
+[0m$ [0mgo test ./internal/control/ 2>&1 | grep -E '^(---|FAIL|ok|=== RUN|panic)' | head -40
+ok  	reasonix/internal/control	95.432s
+[0m
+[0m$ [0mgo test ./internal/agent/ ./internal/control/ ./internal/serve/ ./internal/efficiency/ ./internal/provider/ ./internal/sessioninbox/ 2>&1 | grep -E '^(--- FAIL|FAIL|ok|panic)' | head -30
+--- FAIL: TestStrictPreCallBudgetCapsUnboundedOutputBeforeProviderIO (0.00s)
+--- FAIL: TestMissingReasoningWarnStateReadFailureDoesNotOverwriteExistingIncidents (0.02s)
+FAIL
+FAIL	reasonix/internal/agent	129.620s
+ok  	reasonix/internal/control	(cached)
+ok  	reasonix/internal/serve	(cached)
+ok  	reasonix/internal/efficiency	(cached)
+ok  	reasonix/internal/provider	(cached)
+ok  	reasonix/internal/sessioninbox	(cached)
+FAIL
+[0m
+[0m$ [0mgo test ./internal/agent/ -run 'TestStrictPreCallBudgetCapsUnboundedOutputBeforeProviderIO|TestMissingReasoningWarnStateReadFailureDoesNotOverwriteExistingIncidents' -v 2>&1 | grep -vE 'WARN|INFO' | head -80
+=== RUN   TestStrictPreCallBudgetCapsUnboundedOutputBeforeProviderIO
+    precall_budget_test.go:31: MaxTokens = 495674, want budget-derived cap below DeepSeek ceiling
+--- FAIL: TestStrictPreCallBudgetCapsUnboundedOutputBeforeProviderIO (0.00s)
+=== RUN   TestMissingReasoningWarnStateReadFailureDoesNotOverwriteExistingIncidents
+    reasoning_warn_state_test.go:592: new incident was unexpectedly persisted from a partial read
+--- FAIL: TestMissingReasoningWarnStateReadFailureDoesNotOverwriteExistingIncidents (0.06s)
+FAIL
+FAIL	reasonix/internal/agent	0.449s
+FAIL
+[0m
+[0m→ [0mRead internal/agent/precall_budget_test.go
+[0m→ [0mRead internal/agent/reasoning_warn_state_test.go[90m [offset=540, limit=80][0m
+[0m✱ [0mGrep "missingReasoningWarnState|warnStateFilename|func.*claimAt|func.*load"[90m in internal/agent · 95 matches[0m
+[0m→ [0mRead internal/agent/reasoning_warn_state.go[90m [offset=240, limit=280][0m
+[0m
+[0m$ [0mgrep -rn 'providerRequestTokenUpperBound\|maxAffordable\|MaxTokens' internal/agent/run_budget.go | head -20
+243:// applyStrictPreCallBudget caps req.MaxTokens before provider network I/O. The
+259:	promptUpper := providerRequestTokenUpperBound(*req)
+260:	cap := req.MaxTokens
+308:		req.MaxTokens = cap
+313:func providerRequestTokenUpperBound(req provider.Request) int {
+315:	clone.MaxTokens = 0
+[0m
+[0m$ [0mgrep -rn 'DeepSeekMaxOutputTokens' internal/ | head; echo "---"; grep -rn 'applyStrictPreCallBudget\|SetStrictPreCallBudget\|strictTaskBudgetLimit' internal/agent/*.go | grep -v _test | head
+internal/agent/context_admission_test.go:55:		AutoOutputTokens: provider.DeepSeekMaxOutputTokens,
+internal/agent/context_admission_test.go:56:		MaxOutputTokens:  provider.DeepSeekMaxOutputTokens,
+internal/agent/context_admission_test.go:74:		AutoOutputTokens: provider.DeepSeekMaxOutputTokens,
+internal/agent/context_admission_test.go:75:		MaxOutputTokens:  provider.DeepSeekMaxOutputTokens,
+internal/agent/context_admission_test.go:108:		AutoOutputTokens: provider.DeepSeekMaxOutputTokens,
+internal/agent/output_budget.go:360:	case policy.AutoOutputTokens == provider.DeepSeekMaxOutputTokens && policy.LimitMode == provider.OutputLimitOmitWhenSafe:
+internal/agent/precall_budget_test.go:30:	if req.MaxTokens >= provider.DeepSeekMaxOutputTokens {
+internal/provider/anthropic/anthropic.go:125:			maxOutputTokens = provider.DeepSeekMaxOutputTokens
+internal/provider/anthropic/anthropic_test.go:165:		{name: "official deepseek", baseURL: "https://api.deepseek.com/anthropic", want: provider.DeepSeekMaxOutputTokens},
+internal/provider/anthropic/anthropic_test.go:166:		{name: "official deepseek high", baseURL: "https://api.deepseek.com/anthropic", extra: map[string]any{"effort": "high"}, want: provider.DeepSeekMaxOutputTokens},
+---
+internal/agent/compact.go:412:	if err := a.applyStrictPreCallBudget(ctx, &req); err != nil {
+internal/agent/coordinator.go:231:// SetStrictPreCallBudget makes hard-budget turns single-provider-agent turns.
+internal/agent/coordinator.go:235:func (c *Coordinator) SetStrictPreCallBudget(enabled bool) {
+internal/agent/run_budget.go:173:// strictTaskBudgetLimit preserves the controller's global hard cost ceiling even
+internal/agent/run_budget.go:176:func (a *Agent) strictTaskBudgetLimit(ctx context.Context) TaskBudget {
+internal/agent/run_budget.go:221:// SetStrictPreCallBudget toggles the host-owned pre-network budget guard. The
+internal/agent/run_budget.go:224:func (a *Agent) SetStrictPreCallBudget(enabled bool) {
+internal/agent/run_budget.go:243:// applyStrictPreCallBudget caps req.MaxTokens before provider network I/O. The
+internal/agent/run_budget.go:248:func (a *Agent) applyStrictPreCallBudget(ctx context.Context, req *provider.Request) error {
+internal/agent/run_budget.go:252:	limit := a.strictTaskBudgetLimit(ctx)
+[0m
+[0m→ [0mRead internal/agent/run_budget.go[90m [limit=170, offset=170][0m
+[0m
+[0m$ [0mgrep -rn 'output_budget\|OutputBudget\|maxOutputTokens\|MaxOutputTokens' internal/agent/output_budget.go | head -25
+50:	MaxOutputTokens       int
+127:	if budget, ok := p.(provider.OutputBudgetProvider); ok {
+128:		return budget.OutputBudget()
+360:	case policy.AutoOutputTokens == provider.DeepSeekMaxOutputTokens && policy.LimitMode == provider.OutputLimitOmitWhenSafe:
+362:	case policy.LimitMode == provider.OutputLimitAlways && policy.MaxOutputTokens > 0:
+371:// effectiveOutputBudget clips completion tokens at send time only; it never
+374:func (a *Agent) effectiveOutputBudget(req provider.Request) (int, bool, error) {
+375:	adm, err := a.admitOutputBudget(req)
+388:func (a *Agent) admitOutputBudget(req provider.Request) (contextAdmission, error) {
+414:	adm.MaxOutputTokens = policy.MaxOutputTokens
+444:	if policy.MaxOutputTokens > 0 && requested > policy.MaxOutputTokens {
+445:		requested = policy.MaxOutputTokens
+483:	adm, err := a.admitOutputBudget(*req)
+505:		if policy.MaxOutputTokens > 0 && effective > policy.MaxOutputTokens {
+506:			effective = policy.MaxOutputTokens
+[0m
+[0m$ [0mgrep -rn 'DeepSeekMaxOutputTokens\s*=' internal/provider/; echo "---REQUEST STRUCT---"; grep -rn 'MaxTokens\|AutoOutputTokens\|MaxOutputTokens' internal/provider/provider.go internal/provider/request.go 2>/dev/null | head -20
+internal/provider/provider.go:245:	DeepSeekMaxOutputTokens = 384_000
+---REQUEST STRUCT---
+internal/provider/provider.go:219:	MaxTokens   int
+internal/provider/provider.go:236:// (server 384K ceiling) and Anthropic sends DeepSeekMaxOutputTokens.
+internal/provider/provider.go:242:	// DeepSeekMaxOutputTokens is the official V4 Flash/Pro completion ceiling.
+internal/provider/provider.go:245:	DeepSeekMaxOutputTokens = 384_000
+internal/provider/provider.go:250:// DeepSeekMaxOutputTokens (Anthropic).
+[0m
+[0m→ [0mRead internal/agent/output_budget.go[90m [limit=90, offset=340][0m
+[0m→ [0mRead internal/provider/provider.go[90m [limit=80, offset=200][0m
+[0m
+[0m$ [0mgrep -n 'applyStrictPreCallBudget\|effectiveOutputBudget\|req.MaxTokens\|MaxTokens =' internal/agent/sampling_request.go internal/agent/compact.go | head -30
+internal/agent/sampling_request.go:51:	if err := a.applyStrictPreCallBudget(ctx, &req); err != nil {
+internal/agent/compact.go:23:	summaryOutputMaxTokens = 8192 // max digest output; further clipped by remaining candidate space
+internal/agent/compact.go:406:	if req.MaxTokens > summaryOutputMaxTokens {
+internal/agent/compact.go:407:		req.MaxTokens = summaryOutputMaxTokens
+internal/agent/compact.go:412:	if err := a.applyStrictPreCallBudget(ctx, &req); err != nil {
+internal/agent/compact.go:415:	if req.MaxTokens < 256 {
+internal/agent/compact.go:416:		return "", usage, fmt.Errorf("summary output budget too small (%d tokens)", req.MaxTokens)
+[0m
+[0m→ [0mRead internal/agent/sampling_request.go[90m [limit=120, offset=30][0m
+[0m
+[0m$ [0mgit diff internal/agent/run_budget.go | head -120
+diff --git a/internal/agent/run_budget.go b/internal/agent/run_budget.go
+index 48490ff..5510fc7 100644
+--- a/internal/agent/run_budget.go
++++ b/internal/agent/run_budget.go
+@@ -2,7 +2,9 @@ package agent
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"fmt"
++	"math"
+ 	"time"
+ 
+ 	"reasonix/internal/event"
+@@ -167,3 +169,159 @@ func taskBudgetFromContext(ctx context.Context) (TaskBudget, bool) {
+ 	b, ok := ctx.Value(taskBudgetContextKey{}).(TaskBudget)
+ 	return b, ok
+ }
++
++// strictTaskBudgetLimit preserves the controller's global hard cost ceiling even
++// when a queued/automatic turn supplies only token or wall limits. A context
++// budget may tighten an axis but must never erase the configured hard bound.
++func (a *Agent) strictTaskBudgetLimit(ctx context.Context) TaskBudget {
++	base := normalizeTaskBudget(a.task.budget.limit)
++	override, ok := taskBudgetFromContext(ctx)
++	if !ok {
++		return base
++	}
++	override = normalizeTaskBudget(override)
++	tighter := func(global, local float64) float64 {
++		switch {
++		case global > 0 && local > 0:
++			return math.Min(global, local)
++		case global > 0:
++			return global
++		default:
++			return local
++		}
++	}
++	base.Cost = tighter(base.Cost, override.Cost)
++	if base.Tokens > 0 && override.Tokens > 0 {
++		base.Tokens = min(base.Tokens, override.Tokens)
++	} else if base.Tokens <= 0 {
++		base.Tokens = override.Tokens
++	}
++	if base.Wall > 0 && override.Wall > 0 {
++		base.Wall = min(base.Wall, override.Wall)
++	} else if base.Wall <= 0 {
++		base.Wall = override.Wall
++	}
++	return base
++}
++
++// SetTaskCostBudget updates the configured cost ceiling for subsequent Runs.
++// The host must call it only while this Agent is idle; Controller enforces that
++// boundary for HTTP/APK callers. Existing task usage is preserved so lowering a
++// budget never erases already-spent cost.
++func (a *Agent) SetTaskCostBudget(cost float64) {
++	if a == nil {
++		return
++	}
++	if cost < 0 {
++		cost = 0
++	}
++	a.task.budget.limit.Cost = cost
++}
++
++// SetStrictPreCallBudget toggles the host-owned pre-network budget guard. The
++// controller exposes this only as an optional idle-only capability; ordinary
++// Reasonix users that never enable Balance hard budgets keep historical behavior.
++func (a *Agent) SetStrictPreCallBudget(enabled bool) {
++	if a == nil {
++		return
++	}
++	a.strictPreCallBudget.Store(enabled)
++}
++
++// StrictPreCallBudget reports whether provider requests are currently guarded.
++func (a *Agent) StrictPreCallBudget() bool {
++	return a != nil && a.strictPreCallBudget.Load()
++}
++
++// strict-one-paid-attempt-v0.20-fixed9: strict hard-budget mode disables
++// hidden provider/header retries and agent stream/reasoning replays. Therefore
++// this guard admits exactly the current paid attempt against the current
++// remaining allowance. A later paid attempt must return through host admission
++// after the ledger has observed the previous attempt.
++const strictPreCallInputChargeMultiplier = 2.0
++
++// applyStrictPreCallBudget caps req.MaxTokens before provider network I/O. The
++// prompt estimate is intentionally an upper bound based on the complete JSON
++// request byte size plus framing headroom. Byte count is conservative for the
++// byte-backed tokenizers used by supported providers and avoids needing another
++// tokenizer/model/API call on Android.
++func (a *Agent) applyStrictPreCallBudget(ctx context.Context, req *provider.Request) error {
++	if a == nil || req == nil || !a.StrictPreCallBudget() {
++		return nil
++	}
++	limit := a.strictTaskBudgetLimit(ctx)
++	if limit.Cost <= 0 && limit.Tokens <= 0 {
++		// Strict mode is only enabled by a host that promised a hard ceiling.
++		// Zero therefore means no allowance remains, not "unconfigured".
++		return fmt.Errorf("pre-call hard budget has no remaining allowance")
++	}
++
++	promptUpper := providerRequestTokenUpperBound(*req)
++	cap := req.MaxTokens
++	setCap := func(v int) {
++		if v <= 0 {
++			return
++		}
++		if cap <= 0 || v < cap {
++			cap = v
++		}
++	}
++
++	if limit.Tokens > 0 {
++		used := a.task.budget.promptTokens + a.task.budget.outputTokens
++		remaining := limit.Tokens - used
++		if remaining <= 0 {
+[0m
+[0m$ [0mgrep -n 'maxOutputTokens\|outputBudgetReserve' internal/agent/agent.go internal/agent/*.go | grep -v _test | head -30
+internal/agent/agent.go:1101:			maxOutputTokens:    opts.MaxOutputTokens,
+internal/agent/agent.go:1101:			maxOutputTokens:    opts.MaxOutputTokens,
+internal/agent/agent_config.go:12:	maxOutputTokens    int
+internal/agent/compact_projection.go:605:		maxPromptTokens = window - outputBudgetReserve - 256
+internal/agent/context_manager.go:256:		MaxTokens:   a.maxOutputTokens,
+internal/agent/context_recovery.go:36:	physical := window - prompt - outputBudgetReserve
+internal/agent/context_report.go:42:		OutputBudget: a.maxOutputTokens,
+internal/agent/output_budget.go:13:const outputBudgetReserve = 8 * 1024
+internal/agent/output_budget.go:390:		ReserveTokens: outputBudgetReserve,
+internal/agent/output_budget.go:425:	physical := window - est - outputBudgetReserve
+internal/agent/sampling_request.go:146:		MaxTokens:      a.maxOutputTokens,
+[0m
+[0m$ [0mfind .balance_mod_backups reasonix-balance-mod-v0.20-fixed* -name 'precall_budget_test.go' 2>/dev/null; echo "---"; grep -rn 'DeepSeek ceiling\|want budget-derived' .balance_mod_backups reasonix-balance-mod-v0.20-fixed* 2>/dev/null | head
+---
+[0m
+[0m$ [0mls .balance_mod_backups/v0.20-fixed-20260818-100026; echo "---"; find .balance_mod_backups -name 'run_budget.go' 2>/dev/null; find .balance_mod_backups -name 'precall*' 2>/dev/null
+configs
+docs
+scripts
+---
+.balance_mod_backups/v0.20-fixed5-20260818-105653/internal/agent/run_budget.go
+.balance_mod_backups/v0.20-fixed7-20260818-113814/internal/agent/run_budget.go
+.balance_mod_backups/v0.20-fixed8-20260818-114225/internal/agent/run_budget.go
+.balance_mod_backups/v0.20-fixed8-20260818-114825/internal/agent/run_budget.go
+.balance_mod_backups/v0.20-fixed9-20260818-115610/internal/agent/run_budget.go
+.balance_mod_backups/v0.20-fixed9-20260818-120606/internal/agent/run_budget.go
+[0m
+[0m$ [0mfor d in .balance_mod_backups/v0.20-fixed9-20260818-120606 .balance_mod_backups/v0.20-fixed8-20260818-114825; do echo "=== $d ==="; grep -n 'DeepSeekMaxOutputTokens\|setCap\|cap :=' $d/internal/agent/run_budget.go | head -10; done
+=== .balance_mod_backups/v0.20-fixed9-20260818-120606 ===
+260:	cap := req.MaxTokens
+261:	setCap := func(v int) {
+280:		setCap(share - promptUpper)
+303:			setCap(out)
+=== .balance_mod_backups/v0.20-fixed8-20260818-114825 ===
+260:	cap := req.MaxTokens
+261:	setCap := func(v int) {
+280:		setCap(share - promptUpper)
+303:			setCap(out)
+[0m
+[0m$ [0mgrep -rn 'perMillion\|1e6\|1000000\|Pricing{' internal/billing/*.go internal/provider/*.go | grep -i 'pric\|million\|per' | head -20
+internal/provider/provider_test.go:441:	p := &Pricing{Input: 2.0, Output: 10.0}
+internal/provider/provider_test.go:455:	p := &Pricing{
+internal/provider/provider_test.go:474:	p := &Pricing{Input: 2.0}
+internal/provider/provider_test.go:487:	p := &Pricing{Input: 2.0}
+internal/provider/provider_test.go:502:	p := &Pricing{Input: 2.0, Output: 10.0}
+internal/provider/provider_test.go:510:	p := &Pricing{Input: 2.0, Output: 10.0}
+internal/provider/provider_test.go:520:	p := &Pricing{}
+internal/provider/provider_test.go:534:	p := &Pricing{Currency: "$"}
+internal/provider/provider_test.go:557:		p := &Pricing{Currency: tc.currency}
+[0m
+[0m$ [0mgrep -rn 'TokenUSD\|PerMillion\|inputRate\|\.Input\b' internal/agent/run_usage.go internal/agent/run_budget.go internal/agent/agent.go | head -20; echo "---COST CALC---"; grep -rn 'cost' internal/agent/run_usage.go | head -15
+internal/agent/run_budget.go:293:		inputRate := math.Max(pricing.Input, pricing.CacheHit)
+internal/agent/run_budget.go:294:		inputUpper := float64(promptUpper) * inputRate * strictPreCallInputChargeMultiplier / 1e6
+---COST CALC---
+[0m
+[0m$ [0mgrep -rn '1e6\|per million\|CostUsage\|costUsage\|computeCost\|cost =' internal/agent/run_usage.go internal/agent/usage*.go internal/agent/run_budget.go 2>/dev/null | head; echo "---AGENT COST---"; grep -rn 'func.*[Cc]ost\|pricing\.' internal/agent/run_usage.go | head
+internal/agent/run_budget.go:216:		cost = 0
+internal/agent/run_budget.go:294:		inputUpper := float64(promptUpper) * inputRate * strictPreCallInputChargeMultiplier / 1e6
+internal/agent/run_budget.go:299:			out := int(math.Floor((share - inputUpper) * 1e6 / pricing.Output))
+---AGENT COST---
+[0m
+[0m$ [0mid; echo "---"; go test ./internal/agent/ -run 'TestMissingReasoningWarnStateReadFailureDoesNotOverwriteExistingIncidents' -v -count=1 2>&1 | grep -vE 'WARN|INFO' | head -20
+uid=0(root) gid=0(root) groups=0(root),1079,3003(aid_inet),9997(aid_everybody),20402(aid_u0_a402_cache),50402(aid_all_a402)
+---
+=== RUN   TestMissingReasoningWarnStateReadFailureDoesNotOverwriteExistingIncidents
+    reasoning_warn_state_test.go:592: new incident was unexpectedly persisted from a partial read
+--- FAIL: TestMissingReasoningWarnStateReadFailureDoesNotOverwriteExistingIncidents (0.03s)
+FAIL
+FAIL	reasonix/internal/agent	0.243s
+FAIL
+[0m
+STAGE 1 findings so far. Let me pin down the control-package flake before fixing.

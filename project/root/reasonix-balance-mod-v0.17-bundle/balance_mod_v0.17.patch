@@ -1,0 +1,701 @@
+diff --git a/docs/BALANCE_MOD_V017.md b/docs/BALANCE_MOD_V017.md
+new file mode 100644
+index 0000000..277fbb4
+--- /dev/null
++++ b/docs/BALANCE_MOD_V017.md
+@@ -0,0 +1,24 @@
++# Balance Mod v0.17 — Crash / replay hardening
++
++Baseline: verified v0.16 Hard Pre-Call Budget System.
++
++v0.17 closes one specific native session-inbox crash window:
++
++1. Controller finishes the turn.
++2. `SnapshotActivity()` durably commits transcript/activity state.
++3. v0.17 atomically writes a completion receipt for the entire active inbox set.
++4. Only then does normal `AckDequeue` remove each inbox item.
++
++Recovery semantics:
++
++- crash before the completion receipt -> in-flight work becomes `uncertain`, inbox pauses, explicit retry is required;
++- crash after the completion receipt but before dequeue -> recovery finalizes the item without replaying the turn;
++- a completion receipt is independent of the optional client idempotency key;
++- existing client idempotency aliases are converted to normal acknowledged receipts when a completed orphan is finalized;
++- a completed item cannot be requeued through `RetryItem` even if an acknowledgement failure temporarily made it `uncertain`.
++
++This is deliberately **not** a claim of universal exactly-once execution for arbitrary external side effects. External tools/providers need their own transactional or idempotency guarantees for that. v0.17 hardens Reasonix's durable inbox-turn replay boundary only.
++
++On-disk inbox schema is bumped from 2 to 3. Existing schema-2 manifests migrate forward. Older binaries continue to fail closed on an unknown newer schema.
++
++No provider/API key is needed or used by the v0.17 tests.
+diff --git a/internal/control/inbox.go b/internal/control/inbox.go
+index 403a6e9..de843be 100644
+--- a/internal/control/inbox.go
++++ b/internal/control/inbox.go
+@@ -653,6 +653,21 @@ func (c *Controller) onInboxTurnDone() {
+ 		sessioninbox.NoteUncertain()
+ 		return
+ 	}
++	// Persist one atomic completion marker for the entire active set after the
++	// transcript snapshot and before any dequeue. A crash after this commit can
++	// be recovered by finalizing the inbox items without replaying the turn.
++	if err := st.CommitCompletion(ids); err != nil {
++		slog.Warn("controller: inbox completion receipt", "err", err)
++		for _, id := range ids {
++			_ = st.SetState(id, sessioninbox.StateUncertain, "turn completed but durable completion receipt failed")
++		}
++		_ = st.SetPaused(true)
++		c.inbox.mu.Lock()
++		c.inbox.untrackActiveSet(ids)
++		c.inbox.mu.Unlock()
++		sessioninbox.NoteUncertain()
++		return
++	}
+ 	// Keep ownership published through every durable acknowledgement. Recovery
+ 	// can run concurrently, sees these IDs as live without a Controller lock,
+ 	// and ownership is removed only after dequeue or uncertain state is durable.
+diff --git a/internal/control/inbox_completion_receipt_test.go b/internal/control/inbox_completion_receipt_test.go
+new file mode 100644
+index 0000000..f8cc8fe
+--- /dev/null
++++ b/internal/control/inbox_completion_receipt_test.go
+@@ -0,0 +1,70 @@
++package control
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++
++	"reasonix/internal/event"
++	"reasonix/internal/sessioninbox"
++)
++
++func TestV017ControllerCommitsCompletionBeforeAck(t *testing.T) {
++	dir := t.TempDir()
++	session := filepath.Join(dir, "s.jsonl")
++	if err := os.WriteFile(session, []byte("{}\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	c := New(Options{SessionPath: session, SessionDir: dir, Sink: event.Discard})
++	st, err := c.ensureInbox()
++	if err != nil {
++		t.Fatal(err)
++	}
++	rec, err := c.EnqueueInbox(InboxRequest{Submit: "v0.17 crash-boundary"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := st.SetState(rec.ItemID, sessioninbox.StateRunning, ""); err != nil {
++		t.Fatal(err)
++	}
++	c.inbox.mu.Lock()
++	c.inbox.clearActive()
++	c.inbox.trackActive(rec.ItemID)
++	c.inbox.beforeCompletionAck = func() {
++		meta, _, readErr := st.ReadItem(rec.ItemID)
++		if readErr != nil {
++			panic(readErr)
++		}
++		if meta.CompletionReceipt == "" || meta.CompletionCommittedAt.IsZero() {
++			panic("v0.17 completion receipt missing before ack")
++		}
++		panic("v0.17 simulated crash after completion commit")
++	}
++	c.inbox.mu.Unlock()
++
++	crashed := false
++	func() {
++		defer func() {
++			if recover() != nil {
++				crashed = true
++			}
++		}()
++		c.onInboxTurnDone()
++	}()
++	if !crashed {
++		t.Fatal("simulated crash hook did not run")
++	}
++
++	// Simulate restart ownership loss. The committed turn must disappear from
++	// the inbox rather than becoming uncertain/retryable.
++	recovered, err := st.RecoverOrphanedInFlight(nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if recovered != 0 {
++		t.Fatalf("post-receipt crash became uncertain: %d", recovered)
++	}
++	if snap := st.Snapshot(); snap.Paused || len(snap.Items) != 0 {
++		t.Fatalf("post-receipt crash not finalized: %+v", snap)
++	}
++}
+diff --git a/internal/sessioninbox/completion_receipt.go b/internal/sessioninbox/completion_receipt.go
+new file mode 100644
+index 0000000..c55bffd
+--- /dev/null
++++ b/internal/sessioninbox/completion_receipt.go
+@@ -0,0 +1,132 @@
++package sessioninbox
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"fmt"
++	"strings"
++	"time"
++)
++
++const completionReceiptDomain = "reasonix-sessioninbox-completion-v1"
++
++// CommitCompletion atomically marks the whole active set as durably completed.
++// It must be called only after the transcript/activity snapshot is durable and
++// before AckDequeue. If any ID is missing or is not in an admitted state, no
++// item is marked: partial completion receipts are forbidden.
++func (s *Store) CommitCompletion(ids []string) error {
++	if s == nil {
++		return ErrClosed
++	}
++	wanted := make([]string, 0, len(ids))
++	seen := make(map[string]struct{}, len(ids))
++	for _, id := range ids {
++		id = strings.TrimSpace(id)
++		if id == "" {
++			return ErrNotFound
++		}
++		if _, ok := seen[id]; ok {
++			continue
++		}
++		seen[id] = struct{}{}
++		wanted = append(wanted, id)
++	}
++	if len(wanted) == 0 {
++		return nil
++	}
++
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	release, err := s.beginDiskTransactionLocked()
++	if err != nil {
++		return err
++	}
++	defer release()
++	if err := s.mutableLocked(); err != nil {
++		return err
++	}
++
++	// Validate the complete active set against the current transaction before
++	// mutating the clone. This is the all-or-nothing boundary.
++	for _, id := range wanted {
++		meta, ok := s.man.item(id)
++		if !ok {
++			return ErrNotFound
++		}
++		if !completionEligible(meta.State) {
++			return ErrInvalidState
++		}
++	}
++
++	next := s.man.clone()
++	now := time.Now().UTC()
++	for _, id := range wanted {
++		i := next.indexOf(id)
++		if i < 0 {
++			return ErrNotFound
++		}
++		if next.Items[i].CompletionReceipt == "" {
++			next.Items[i].CompletionReceipt = completionReceipt(next.Items[i])
++			next.Items[i].CompletionCommittedAt = now
++			next.Items[i].UpdatedAt = now
++		}
++	}
++	if err := s.commitManifestLocked(next); err != nil {
++		return err
++	}
++	s.notifyLocked(s.snapshotLocked())
++	return nil
++}
++
++func completionEligible(state InboxState) bool {
++	switch state {
++	case StateRunning, StateSteerAccepted, StateSteerConsumed:
++		return true
++	default:
++		return false
++	}
++}
++
++func completionReceipt(item InboxItemMeta) string {
++	h := sha256.New()
++	_, _ = fmt.Fprintf(h, "%s\n%s\n%d\n%s\n%s\n", completionReceiptDomain, item.ID, item.Revision, item.Checksum, item.RunID)
++	return hex.EncodeToString(h.Sum(nil))
++}
++
++func hasDurableCompletion(item InboxItemMeta) bool {
++	return item.CompletionReceipt != "" && !item.CompletionCommittedAt.IsZero() && validSHA256(item.CompletionReceipt)
++}
++
++// finalizeCommittedOrphans removes completed-but-unacknowledged active items
++// from a manifest clone. Existing client idempotency keys receive the same
++// acknowledged receipt AckDequeue would have created, so retries remain safe.
++// It returns removed blob stems for post-commit cleanup.
++func finalizeCommittedOrphans(m *manifest, ownedBy func(string) bool, now time.Time) []string {
++	if m == nil {
++		return nil
++	}
++	ids := make([]string, 0)
++	for _, item := range m.Items {
++		if ownedBy != nil && ownedBy(item.ID) {
++			continue
++		}
++		if hasDurableCompletion(item) {
++			ids = append(ids, item.ID)
++		}
++	}
++	blobs := make([]string, 0, len(ids))
++	for _, id := range ids {
++		meta, ok := m.item(id)
++		if !ok {
++			continue
++		}
++		keys := m.idempotencyKeysFor(id)
++		m.rememberReceipt(keys, id, Disposition("acknowledged"), now)
++		removed, ok := m.removeItem(id)
++		if ok {
++			blobs = append(blobs, blobNameFor(removed))
++		}
++	}
++	clearPauseIfEmpty(m)
++	return blobs
++}
+diff --git a/internal/sessioninbox/completion_receipt_test.go b/internal/sessioninbox/completion_receipt_test.go
+new file mode 100644
+index 0000000..60067ee
+--- /dev/null
++++ b/internal/sessioninbox/completion_receipt_test.go
+@@ -0,0 +1,202 @@
++package sessioninbox
++
++import (
++	"errors"
++	"path/filepath"
++	"testing"
++)
++
++func TestV017CommitCompletionIsAtomic(t *testing.T) {
++	s, err := Open(filepath.Join(t.TempDir(), "s.jsonl"), Limits{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer s.Close()
++
++	a, err := s.Enqueue(EnqueueRequest{Envelope: PromptEnvelope{SubmitText: "a"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	b, err := s.Enqueue(EnqueueRequest{Envelope: PromptEnvelope{SubmitText: "b"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := s.ClaimItem(a.ItemID); err != nil {
++		t.Fatal(err)
++	}
++	if err := s.ClaimItem(b.ItemID); err != nil {
++		t.Fatal(err)
++	}
++
++	if err := s.CommitCompletion([]string{a.ItemID, "missing-v017-item"}); !errors.Is(err, ErrNotFound) {
++		t.Fatalf("atomic invalid set error = %v, want ErrNotFound", err)
++	}
++	meta, _, err := s.ReadItem(a.ItemID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if meta.CompletionReceipt != "" || !meta.CompletionCommittedAt.IsZero() {
++		t.Fatalf("partial completion leaked after rejected set: %+v", meta)
++	}
++
++	if err := s.CommitCompletion([]string{a.ItemID, b.ItemID}); err != nil {
++		t.Fatal(err)
++	}
++	for _, id := range []string{a.ItemID, b.ItemID} {
++		meta, _, err := s.ReadItem(id)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !hasDurableCompletion(meta) {
++			t.Fatalf("item %s missing durable completion: %+v", id, meta)
++		}
++	}
++}
++
++func TestV017CrashBeforeCompletionReceiptBecomesUncertain(t *testing.T) {
++	session := filepath.Join(t.TempDir(), "s.jsonl")
++	s, err := Open(session, Limits{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	rec, err := s.Enqueue(EnqueueRequest{Envelope: PromptEnvelope{SubmitText: "unsafe to replay blindly"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := s.ClaimItem(rec.ItemID); err != nil {
++		t.Fatal(err)
++	}
++	forceV017ForeignRun(t, s)
++	s.Close()
++
++	reopened, err := Open(session, Limits{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer reopened.Close()
++	snap := reopened.Snapshot()
++	if !snap.Paused || !snap.Recovered || len(snap.Items) != 1 || snap.Items[0].State != StateUncertain {
++		t.Fatalf("pre-receipt crash recovery = %+v", snap)
++	}
++}
++
++func TestV017CrashAfterCompletionReceiptFinalizesWithoutReplay(t *testing.T) {
++	session := filepath.Join(t.TempDir(), "s.jsonl")
++	s, err := Open(session, Limits{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	first, err := s.Enqueue(EnqueueRequest{
++		Envelope:    PromptEnvelope{SubmitText: "write once"},
++		Idempotency: "v017-msg-1",
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := s.ClaimItem(first.ItemID); err != nil {
++		t.Fatal(err)
++	}
++	if err := s.CommitCompletion([]string{first.ItemID}); err != nil {
++		t.Fatal(err)
++	}
++	forceV017ForeignRun(t, s)
++	s.Close()
++
++	reopened, err := Open(session, Limits{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer reopened.Close()
++	snap := reopened.Snapshot()
++	if snap.Paused || len(snap.Items) != 0 {
++		t.Fatalf("post-receipt crash should finalize without pending replay: %+v", snap)
++	}
++
++	retry, err := reopened.Enqueue(EnqueueRequest{
++		Envelope:    PromptEnvelope{SubmitText: "write once"},
++		Idempotency: "v017-msg-1",
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !retry.Idempotent || retry.ItemID != first.ItemID || len(reopened.Snapshot().Items) != 0 {
++		t.Fatalf("completed retry = %+v snapshot=%+v", retry, reopened.Snapshot())
++	}
++}
++
++func TestV017SameProcessRecoveryFinalizesCommittedOrphan(t *testing.T) {
++	s, err := Open(filepath.Join(t.TempDir(), "s.jsonl"), Limits{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer s.Close()
++	rec, err := s.Enqueue(EnqueueRequest{Envelope: PromptEnvelope{SubmitText: "done"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := s.ClaimItem(rec.ItemID); err != nil {
++		t.Fatal(err)
++	}
++	if err := s.CommitCompletion([]string{rec.ItemID}); err != nil {
++		t.Fatal(err)
++	}
++	recovered, err := s.RecoverOrphanedInFlight(nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if recovered != 0 {
++		t.Fatalf("committed completion counted uncertain = %d", recovered)
++	}
++	if snap := s.Snapshot(); snap.Paused || len(snap.Items) != 0 {
++		t.Fatalf("committed orphan not finalized: %+v", snap)
++	}
++}
++
++func forceV017ForeignRun(t *testing.T, s *Store) {
++	t.Helper()
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	release, err := s.beginDiskTransactionLocked()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer release()
++	next := s.man.clone()
++	next.RunID = "v017-simulated-crashed-process"
++	if next.RunID == s.runID {
++		t.Fatal("test foreign run unexpectedly matches current run")
++	}
++	if err := s.commitManifestLocked(next); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestV017CommittedUncertainItemCannotBeRetriedAndRecoveryFinalizesIt(t *testing.T) {
++	s, err := Open(filepath.Join(t.TempDir(), "s.jsonl"), Limits{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer s.Close()
++	rec, err := s.Enqueue(EnqueueRequest{Envelope: PromptEnvelope{SubmitText: "completed"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := s.ClaimItem(rec.ItemID); err != nil {
++		t.Fatal(err)
++	}
++	if err := s.CommitCompletion([]string{rec.ItemID}); err != nil {
++		t.Fatal(err)
++	}
++	if err := s.SetState(rec.ItemID, StateUncertain, "simulated ack failure"); err != nil {
++		t.Fatal(err)
++	}
++	if err := s.RetryItem(rec.ItemID); !errors.Is(err, ErrInvalidState) {
++		t.Fatalf("retry of completed item error = %v, want ErrInvalidState", err)
++	}
++	if recovered, err := s.RecoverOrphanedInFlight(nil); err != nil || recovered != 0 {
++		t.Fatalf("finalize committed uncertain: recovered=%d err=%v", recovered, err)
++	}
++	if items := s.Snapshot().Items; len(items) != 0 {
++		t.Fatalf("committed uncertain item survived recovery: %+v", items)
++	}
++}
+diff --git a/internal/sessioninbox/manifest.go b/internal/sessioninbox/manifest.go
+index 122c359..bf753e9 100644
+--- a/internal/sessioninbox/manifest.go
++++ b/internal/sessioninbox/manifest.go
+@@ -215,6 +215,14 @@ func validateManifest(m *manifest, allowUnknownEnums bool) error {
+ 		if item.Checksum != "" && !validSHA256(item.Checksum) {
+ 			return fmt.Errorf("invalid inbox item checksum")
+ 		}
++		hasCompletionReceipt := item.CompletionReceipt != ""
++		hasCompletionTime := !item.CompletionCommittedAt.IsZero()
++		if hasCompletionReceipt != hasCompletionTime {
++			return fmt.Errorf("incomplete inbox completion receipt")
++		}
++		if hasCompletionReceipt && !validSHA256(item.CompletionReceipt) {
++			return fmt.Errorf("invalid inbox completion receipt")
++		}
+ 	}
+ 	if allowUnknownEnums {
+ 		return nil
+diff --git a/internal/sessioninbox/ops.go b/internal/sessioninbox/ops.go
+index d51e817..c939c28 100644
+--- a/internal/sessioninbox/ops.go
++++ b/internal/sessioninbox/ops.go
+@@ -478,6 +478,9 @@ func (s *Store) RetryItem(id string) error {
+ 	if i < 0 {
+ 		return ErrNotFound
+ 	}
++	if hasDurableCompletion(next.Items[i]) {
++		return ErrInvalidState
++	}
+ 	switch next.Items[i].State {
+ 	case StateUncertain, StateBlocked:
+ 		next.Items[i].State = StateQueued
+diff --git a/internal/sessioninbox/recovery.go b/internal/sessioninbox/recovery.go
+index 4b82806..b4e3737 100644
+--- a/internal/sessioninbox/recovery.go
++++ b/internal/sessioninbox/recovery.go
+@@ -3,8 +3,9 @@ package sessioninbox
+ import "time"
+ 
+ // RecoverOrphanedInFlight converts admitted items that no live Controller owns
+-// into reviewable pending work. The transition is atomic so a crash cannot
+-// leave only part of a multi-item active set recoverable.
++// into reviewable pending work. A completed item carrying a durable completion
++// receipt is finalized instead of replayed. The transition is atomic across the
++// whole manifest transaction.
+ func (s *Store) RecoverOrphanedInFlight(ownedIDs []string) (int, error) {
+ 	owned := make(map[string]struct{}, len(ownedIDs))
+ 	for _, id := range ownedIDs {
+@@ -37,6 +38,10 @@ func (s *Store) RecoverOrphanedInFlightOwnedBy(ownedBy func(string) bool) (int,
+ 		if isOwned(s.man.Items[i].ID) {
+ 			continue
+ 		}
++		if hasDurableCompletion(s.man.Items[i]) {
++			needsRecovery = true
++			continue
++		}
+ 		switch s.man.Items[i].State {
+ 		case StateRunning, StateSteerAccepted, StateSteerConsumed:
+ 			needsRecovery = true
+@@ -56,6 +61,7 @@ func (s *Store) RecoverOrphanedInFlightOwnedBy(ownedBy func(string) bool) (int,
+ 
+ 	next := s.man.clone()
+ 	now := time.Now().UTC()
++	completedBlobs := finalizeCommittedOrphans(next, isOwned, now)
+ 	recovered := 0
+ 	for i := range next.Items {
+ 		if isOwned(next.Items[i].ID) {
+@@ -69,15 +75,22 @@ func (s *Store) RecoverOrphanedInFlightOwnedBy(ownedBy func(string) bool) (int,
+ 			recovered++
+ 		}
+ 	}
+-	if recovered == 0 {
++	if recovered == 0 && len(completedBlobs) == 0 {
+ 		return 0, nil
+ 	}
+-	next.Paused = true
+-	next.Recovered = true
+-	next.RecoveredN = min(len(next.Items), next.RecoveredN+recovered)
++	if recovered > 0 {
++		next.Paused = true
++		next.Recovered = true
++		next.RecoveredN = min(len(next.Items), next.RecoveredN+recovered)
++	} else {
++		clearPauseIfEmpty(next)
++	}
+ 	if err := s.commitManifestLocked(next); err != nil {
+ 		return 0, err
+ 	}
++	for _, blob := range completedBlobs {
++		s.removeBlobLocked(blob)
++	}
+ 	s.notifyLocked(s.snapshotLocked())
+ 	return recovered, nil
+ }
+diff --git a/internal/sessioninbox/store.go b/internal/sessioninbox/store.go
+index 13fe479..307cc61 100644
+--- a/internal/sessioninbox/store.go
++++ b/internal/sessioninbox/store.go
+@@ -209,14 +209,21 @@ func (s *Store) loadOrInitLocked() error {
+ 		}
+ 		man.SchemaVersion = SchemaVersion
+ 	}
+-	// Cross-process recovery: another run left in-flight items.
++	// Cross-process recovery: another run left in-flight items. A durable
++	// completion receipt proves that SnapshotActivity crossed its commit
++	// boundary, so such an orphan is finalized without replay. Uncommitted
++	// in-flight work remains fail-closed as uncertain.
+ 	recovered := 0
++	completedBlobs := []string{}
+ 	if man.RunID != "" && man.RunID != s.runID {
++		now := time.Now().UTC()
++		completedBlobs = finalizeCommittedOrphans(man, nil, now)
+ 		for i := range man.Items {
+ 			switch man.Items[i].State {
+ 			case StateRunning, StateSteerAccepted, StateSteerConsumed:
+ 				man.Items[i].State = StateUncertain
+-				man.Items[i].UpdatedAt = time.Now().UTC()
++				man.Items[i].BlockReason = "in-flight owner was lost before durable completion receipt"
++				man.Items[i].UpdatedAt = now
+ 				recovered++
+ 			case StateQueued, StateBlocked, StateUncertain:
+ 				recovered++
+@@ -226,13 +233,21 @@ func (s *Store) loadOrInitLocked() error {
+ 			man.Paused = true
+ 			man.Recovered = true
+ 			man.RecoveredN = recovered
++		} else {
++			clearPauseIfEmpty(man)
+ 		}
+ 	}
+ 	man.RunID = s.runID
+ 	s.man = man
+ 	s.readonly = false
+-	if recovered > 0 || migrated {
+-		return s.commitManifestLocked(man)
++	if recovered > 0 || migrated || len(completedBlobs) > 0 {
++		if err := s.commitManifestLocked(man); err != nil {
++			return err
++		}
++		for _, blob := range completedBlobs {
++			s.removeBlobLocked(blob)
++		}
++		return nil
+ 	}
+ 	// GC orphan blobs without holding callers longer than needed.
+ 	s.gcOrphansLocked()
+diff --git a/internal/sessioninbox/types.go b/internal/sessioninbox/types.go
+index c5d5c83..eeab68b 100644
+--- a/internal/sessioninbox/types.go
++++ b/internal/sessioninbox/types.go
+@@ -7,7 +7,7 @@ import (
+ 
+ // SchemaVersion is the on-disk format version. Unknown higher versions load
+ // read-only and force pause; they never auto-execute.
+-const SchemaVersion = 2
++const SchemaVersion = 3
+ 
+ // Default capacity limits.
+ const (
+@@ -87,6 +87,11 @@ type InboxItemMeta struct {
+ 	Refs        []RefSummary `json:"refs,omitempty"`
+ 	BlockReason string       `json:"blockReason,omitempty"`
+ 	RunID       string       `json:"runId,omitempty"`
++	// CompletionReceipt is a durable task-level marker written only after the
++	// controller has committed the transcript/activity snapshot for this turn.
++	// Recovery may finalize an orphan carrying this marker without replaying it.
++	CompletionReceipt     string    `json:"completionReceipt,omitempty"`
++	CompletionCommittedAt time.Time `json:"completionCommittedAt,omitempty"`
+ }
+ 
+ // RefSummary is a short reference summary stored in the manifest.
+diff --git a/scripts/balance_mod_smoke_quick_v017.sh b/scripts/balance_mod_smoke_quick_v017.sh
+new file mode 100755
+index 0000000..09f6d6b
+--- /dev/null
++++ b/scripts/balance_mod_smoke_quick_v017.sh
+@@ -0,0 +1,9 @@
++#!/usr/bin/env bash
++set -euo pipefail
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++cd "$ROOT"
++
++./scripts/balance_mod_smoke_quick.sh
++./scripts/balance_mod_v017_targeted.sh
++
++echo "BALANCE_MOD_V17_QUICK_PASS"
+diff --git a/scripts/balance_mod_smoke_v017.sh b/scripts/balance_mod_smoke_v017.sh
+new file mode 100755
+index 0000000..bf32b30
+--- /dev/null
++++ b/scripts/balance_mod_smoke_v017.sh
+@@ -0,0 +1,9 @@
++#!/usr/bin/env bash
++set -euo pipefail
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++cd "$ROOT"
++
++./scripts/balance_mod_smoke.sh
++./scripts/balance_mod_v017_targeted.sh
++
++echo "BALANCE_MOD_V17_SMOKE_PASS"
+diff --git a/scripts/balance_mod_v017_targeted.sh b/scripts/balance_mod_v017_targeted.sh
+new file mode 100755
+index 0000000..a3f3895
+--- /dev/null
++++ b/scripts/balance_mod_v017_targeted.sh
+@@ -0,0 +1,15 @@
++#!/usr/bin/env bash
++set -euo pipefail
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++cd "$ROOT"
++
++: "${GOTOOLCHAIN:=local}"
++export GOTOOLCHAIN
++
++echo "[v0.17 1/2] durable completion receipt + crash recovery"
++go test ./internal/sessioninbox -run '^TestV017' -count=1
++
++echo "[v0.17 2/2] controller snapshot -> receipt -> ack ordering"
++go test ./internal/control -run '^TestV017ControllerCommitsCompletionBeforeAck$' -count=1
++
++echo "BALANCE_MOD_V17_TARGETED_PASS"

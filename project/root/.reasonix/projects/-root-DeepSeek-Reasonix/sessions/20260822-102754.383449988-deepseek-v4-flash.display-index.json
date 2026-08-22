@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "revision": 6,
+  "revision_known": true,
+  "content_digest": "065b2fb0336b1f5a91d24da6e6f1b682f8cf5eaf2cd17b21843f48e743f83365",
+  "transcript_size": 109864,
+  "message_count": 13,
+  "authored_turns": 6,
+  "entries": [
+    {
+      "index": 0,
+      "offset": 0,
+      "length": 39612,
+      "role": "system",
+      "authored_turn": 0
+    },
+    {
+      "index": 1,
+      "offset": 39612,
+      "length": 42303,
+      "role": "user",
+      "authored_turn": 1,
+      "starts_turn": true
+    },
+    {
+      "index": 2,
+      "offset": 81915,
+      "length": 8038,
+      "role": "assistant",
+      "authored_turn": 1
+    },
+    {
+      "index": 3,
+      "offset": 89953,
+      "length": 495,
+      "role": "user",
+      "authored_turn": 2,
+      "starts_turn": true
+    },
+    {
+      "index": 4,
+      "offset": 90448,
+      "length": 1723,
+      "role": "assistant",
+      "authored_turn": 2
+    },
+    {
+      "index": 5,
+      "offset": 92171,
+      "length": 547,
+      "role": "user",
+      "authored_turn": 3,
+      "starts_turn": true
+    },
+    {
+      "index": 6,
+      "offset": 92718,
+      "length": 6384,
+      "role": "assistant",
+      "authored_turn": 3
+    },
+    {
+      "index": 7,
+      "offset": 99102,
+      "length": 451,
+      "role": "user",
+      "authored_turn": 4,
+      "starts_turn": true
+    },
+    {
+      "index": 8,
+      "offset": 99553,
+      "length": 2377,
+      "role": "assistant",
+      "authored_turn": 4
+    },
+    {
+      "index": 9,
+      "offset": 101930,
+      "length": 417,
+      "role": "user",
+      "authored_turn": 5,
+      "starts_turn": true
+    },
+    {
+      "index": 10,
+      "offset": 102347,
+      "length": 4364,
+      "role": "assistant",
+      "authored_turn": 5
+    },
+    {
+      "index": 11,
+      "offset": 106711,
+      "length": 687,
+      "role": "user",
+      "authored_turn": 6,
+      "starts_turn": true
+    },
+    {
+      "index": 12,
+      "offset": 107398,
+      "length": 2466,
+      "role": "assistant",
+      "authored_turn": 6
+    }
+  ],
+  "updated_at": "2026-08-22T10:32:02.132343734Z"
+}

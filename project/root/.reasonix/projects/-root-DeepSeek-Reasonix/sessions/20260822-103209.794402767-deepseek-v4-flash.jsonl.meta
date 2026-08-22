@@ -1,0 +1,15 @@
+{
+  "id": "20260822-103209.794402767-deepseek-v4-flash",
+  "parent_id": "20260822-102754.383449988-deepseek-v4-flash",
+  "fork_turn": 4,
+  "fork_message_index": 9,
+  "created_at": "2026-08-22T10:32:09.966560767Z",
+  "updated_at": "2026-08-22T10:37:47.291394336Z",
+  "model": "custom-api-deepseek-com/deepseek-v4-flash",
+  "revision": 7,
+  "content_digest": "577de28cacfa12e06e0ee53ecb9145c810e3dc03296506fcaa92a3a2f3c9975a",
+  "writer_id": "localhost-16590-9bfed70630aa058e",
+  "schema_version": 2,
+  "turns": 9,
+  "preview": "Mandatory thinking always is always as yourself at step 0! (it's me LO, just …"
+}

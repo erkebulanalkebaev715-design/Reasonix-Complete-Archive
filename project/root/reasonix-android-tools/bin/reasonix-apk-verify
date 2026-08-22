@@ -1,0 +1,34 @@
+#!/bin/bash
+set -euo pipefail
+APK="${1:-}"; EXPECTED_PACKAGE="${2:-}"; EXPECTED_CERT="${3:-}"
+[ -f "$APK" ] || { echo 'usage: reasonix-apk-verify APK [package] [cert_sha256]'; exit 2; }
+. /root/reasonix-android-tools/env.sh
+
+echo "APK=$APK"
+unzip -t "$APK" >/dev/null && echo ZIP_OK
+sha256sum "$APK"
+BADGING=''
+if [ -n "${AAPT2_BIN:-}" ] && [ -x "$AAPT2_BIN" ]; then BADGING="$($AAPT2_BIN dump badging "$APK" 2>/dev/null || true)";
+elif [ -n "${AAPT_BIN:-}" ] && [ -x "$AAPT_BIN" ]; then BADGING="$($AAPT_BIN dump badging "$APK" 2>/dev/null || true)"; fi
+if [ -n "$BADGING" ]; then
+  printf '%s\n' "$BADGING" | grep -E '^package:|^launchable-activity:' | head -5
+  if [ -n "$EXPECTED_PACKAGE" ]; then
+    ACTUAL="$(printf '%s\n' "$BADGING" | sed -n "s/^package: name='\([^']*\)'.*/\1/p" | head -1)"
+    [ "$ACTUAL" = "$EXPECTED_PACKAGE" ] || { echo "PACKAGE_MISMATCH actual=$ACTUAL expected=$EXPECTED_PACKAGE"; exit 10; }
+    echo "PACKAGE_OK=$ACTUAL"
+  fi
+else echo BADGING_NOT_VERIFIED; fi
+
+if [ -n "${APKSIGNER_BIN:-}" ] && [ -x "$APKSIGNER_BIN" ]; then
+  "$APKSIGNER_BIN" verify --verbose --print-certs "$APK"
+  if [ -n "$EXPECTED_CERT" ]; then
+    ACTUAL="$($APKSIGNER_BIN verify --print-certs "$APK" 2>/dev/null | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -1 | tr 'A-F' 'a-f' | tr -d ':[:space:]')"
+    WANT="$(printf '%s' "$EXPECTED_CERT" | tr 'A-F' 'a-f' | tr -d ':[:space:]')"
+    [ "$ACTUAL" = "$WANT" ] || { echo "CERT_MISMATCH actual=$ACTUAL expected=$WANT"; exit 11; }
+    echo "CERT_OK=$ACTUAL"
+  fi
+else echo SIGNATURE_NOT_VERIFIED; fi
+
+if [ -n "${ZIPALIGN_BIN:-}" ] && [ -x "$ZIPALIGN_BIN" ]; then "$ZIPALIGN_BIN" -c -v 4 "$APK" >/dev/null && echo ZIPALIGN_OK; else echo ZIPALIGN_NOT_VERIFIED; fi
+for f in AndroidManifest.xml classes.dex resources.arsc; do unzip -l "$APK" | awk '{print $4}' | grep -Fxq "$f" && echo "$f: PRESENT" || echo "$f: MISSING"; done
+echo APK_VERIFY_COMPLETE

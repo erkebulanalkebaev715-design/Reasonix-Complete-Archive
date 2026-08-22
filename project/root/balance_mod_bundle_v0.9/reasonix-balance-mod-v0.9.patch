@@ -1,0 +1,1030 @@
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+index a2ffcc2..543f2d6 100644
+--- a/docs/BALANCE_MOD.md
++++ b/docs/BALANCE_MOD.md
+@@ -365,3 +365,68 @@ Added:
+ 
+ The v0.8 offline gate must end with `BALANCE_MOD_V08_SMOKE_PASS`. No real
+ provider key is required or used.
++
++
++## v0.9 — Project registry + native task catalog for the APK
++
++v0.9 adds the minimum project/task management layer needed by a real Android
++frontend without creating a second scheduler, session format or agent runtime.
++
++### Global project registry
++
++`GET /mod/projects` exposes a small registry stored under the Reasonix home.
++Projects are identified by a deterministic hash of their canonical workspace
++path, so registering the same workspace twice updates one record instead of
++creating duplicates. The registry stores only project metadata (name/path and
++local timestamps); it contains no API keys, prompts, source contents or hidden
++reasoning.
++
++Project registration validates that the target is an existing directory.
++Registry reads remain tolerant when a previously registered directory later
++moves/disappears: the entry is returned with `available:false` instead of
++corrupting the whole registry.
++
++`POST /mod/projects/open` deliberately does **not** call process-wide `chdir` or
++build a second controller. It returns a typed supervisor handoff:
++
++`{restartRequired, supervisor:{action:"restart", workspace:"..."}}`
++
++The future APK passes that workspace to the Debian supervisor from v0.8, which
++restarts the same `reasonix serve` process in the selected project. Per-project
++budget/tool/profile state continues to come from v0.8's workspace-scoped state,
++so switching projects also switches to the correct preserved KZT ledger.
++
++Project removal only unregisters metadata; it never deletes the user's project
++files.
++
++### Native task/session catalog
++
++`GET /mod/tasks` is an APK-friendly view over `agent.ListSessions`. It performs
++no LLM title request and therefore cannot spend provider tokens merely to draw
++the history screen. It returns local titles/previews, turn counts, recovery
++state and the native session path needed by Reasonix's existing resume route.
++
++Task lifecycle intentionally stays native:
++
++- create: `POST /new`
++- resume: `POST /resume`
++- delete: `POST /delete-session`
++- run/stop: existing v0.8 `/mod/app/task/start|stop`
++
++v0.9 adds only `POST /mod/tasks/rename`, which uses Reasonix's native
++`agent.RenameSession` metadata ledger after validating that the target remains
++inside the current session directory.
++
++### v0.9 APK endpoints
++
++Added:
++
++- `GET /mod/projects`
++- `POST /mod/projects/register`
++- `POST /mod/projects/remove`
++- `POST /mod/projects/open`
++- `GET /mod/tasks`
++- `POST /mod/tasks/rename`
++
++The v0.9 offline gate must end with `BALANCE_MOD_V09_SMOKE_PASS`. No real
++provider key is required or used.
+diff --git a/internal/serve/mod_app.go b/internal/serve/mod_app.go
+index 9a5791e..b953034 100644
+--- a/internal/serve/mod_app.go
++++ b/internal/serve/mod_app.go
+@@ -404,12 +404,17 @@ func (s *Server) modAppBootstrap(w http.ResponseWriter, r *http.Request) {
+ 		"tools":           s.modToolViews(),
+ 		"skills":          s.modSkillViews(),
+ 		"persistence":     s.modPersistenceStatus(),
++		"projectManager":  map[string]any{"registryScope": "reasonix-home", "budgetScope": "workspace", "switchMethod": "supervisor-restart"},
+ 		"transport":       map[string]any{"http": true, "sse": true, "hiddenReasoningExported": false},
+ 		"endpoints": map[string]string{
+ 			"bootstrap": "/mod/app/bootstrap", "apply": "/mod/app/apply",
+ 			"startTask": "/mod/app/task/start", "stopTask": "/mod/app/task/stop",
+ 			"events": "/mod/events", "history": "/mod/live/history",
+ 			"approve": "/approve", "workspaceValidate": "/mod/workspace/validate",
++			"projects": "/mod/projects", "registerProject": "/mod/projects/register",
++			"openProject": "/mod/projects/open", "removeProject": "/mod/projects/remove",
++			"tasks": "/mod/tasks", "renameTask": "/mod/tasks/rename",
++			"newTask": "/new", "resumeTask": "/resume", "deleteTask": "/delete-session",
+ 		},
+ 		"workspaceSwitch": map[string]any{
+ 			"live":   false,
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index 6cb5587..f3278ec 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -16,7 +16,7 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.8"
++const balanceModVersion = "balance-mod-v0.9"
+ 
+ // modEvent is a typed machine event for the Android client. Most Balance Mod
+ // telemetry is content-free; v0.7 live.* events may additionally carry bounded,
+@@ -215,6 +215,8 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 			"liveProtocol":         "typed-actions-diff-results-no-hidden-reasoning-v0.7",
+ 			"apkControlPlane":      "bootstrap+atomic-apply+native-task-aliases-v0.8",
+ 			"apkStatePersistence":  "workspace-scoped-atomic+budget-ledger-v0.8",
++			"projectManager":       "global-registry+supervisor-handoff-v0.9",
++			"taskManager":          "native-session-catalog-no-provider-v0.9",
+ 			"androidSupervisor":    "debian-process-wrapper-v0.8",
+ 		},
+ 	})
+diff --git a/internal/serve/mod_projects.go b/internal/serve/mod_projects.go
+new file mode 100644
+index 0000000..83bf688
+--- /dev/null
++++ b/internal/serve/mod_projects.go
+@@ -0,0 +1,561 @@
++package serve
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"time"
++	"unicode"
++	"unicode/utf8"
++
++	"reasonix/internal/agent"
++	"reasonix/internal/config"
++	"reasonix/internal/store"
++)
++
++const modProjectRegistrySchema = 1
++const modProjectRegistryMax = 128
++
++type modProjectRecord struct {
++	ID               string `json:"id"`
++	Name             string `json:"name"`
++	Workspace        string `json:"workspace"`
++	CreatedAtUnixMS  int64  `json:"createdAtUnixMs"`
++	UpdatedAtUnixMS  int64  `json:"updatedAtUnixMs"`
++	LastOpenedUnixMS int64  `json:"lastOpenedUnixMs,omitempty"`
++}
++
++type modProjectRegistryState struct {
++	SchemaVersion int                `json:"schemaVersion"`
++	Projects      []modProjectRecord `json:"projects"`
++}
++
++type modProjectView struct {
++	modProjectRecord
++	Current    bool `json:"current"`
++	Registered bool `json:"registered"`
++	Available  bool `json:"available"`
++}
++
++func modProjectRegistryPath() string {
++	base := strings.TrimSpace(config.ReasonixHomeDir())
++	if base == "" {
++		return ""
++	}
++	return filepath.Join(base, "balance", "projects.json")
++}
++
++func modProjectID(workspace string) string {
++	sum := sha256.Sum256([]byte(canonicalModWorkspace(workspace)))
++	return hex.EncodeToString(sum[:12])
++}
++
++func validateModProjectName(name string) (string, error) {
++	name = strings.TrimSpace(name)
++	if name == "" {
++		return "", fmt.Errorf("project name is required")
++	}
++	if utf8.RuneCountInString(name) > 128 {
++		return "", fmt.Errorf("project name is too long")
++	}
++	for _, r := range name {
++		if unicode.IsControl(r) {
++			return "", fmt.Errorf("project name contains control characters")
++		}
++	}
++	return name, nil
++}
++
++func validateModProjectWorkspace(raw string) (string, error) {
++	raw = strings.TrimSpace(raw)
++	if raw == "" {
++		return "", fmt.Errorf("workspace is required")
++	}
++	abs, err := filepath.Abs(raw)
++	if err != nil {
++		return "", fmt.Errorf("invalid workspace")
++	}
++	real, err := filepath.EvalSymlinks(abs)
++	if err != nil {
++		return "", fmt.Errorf("workspace not found")
++	}
++	st, err := os.Stat(real)
++	if err != nil || !st.IsDir() {
++		return "", fmt.Errorf("workspace must be an existing directory")
++	}
++	return filepath.Clean(real), nil
++}
++
++func readModProjectRegistry(path string) (modProjectRegistryState, error) {
++	state := modProjectRegistryState{SchemaVersion: modProjectRegistrySchema, Projects: []modProjectRecord{}}
++	if path == "" {
++		return state, nil
++	}
++	data, err := os.ReadFile(path)
++	if os.IsNotExist(err) {
++		return state, nil
++	}
++	if err != nil {
++		return state, err
++	}
++	if len(data) > 2<<20 {
++		return state, fmt.Errorf("project registry is too large")
++	}
++	if err := json.Unmarshal(data, &state); err != nil {
++		return state, fmt.Errorf("decode project registry: %w", err)
++	}
++	if state.SchemaVersion != modProjectRegistrySchema {
++		return state, fmt.Errorf("unsupported project registry schema %d", state.SchemaVersion)
++	}
++	seen := make(map[string]struct{}, len(state.Projects))
++	for i := range state.Projects {
++		p := &state.Projects[i]
++		workspace := canonicalModWorkspace(p.Workspace)
++		if strings.TrimSpace(workspace) == "" {
++			return state, fmt.Errorf("project %q has empty workspace", p.ID)
++		}
++		p.Workspace = workspace
++		if p.ID != modProjectID(workspace) {
++			return state, fmt.Errorf("project %q has mismatched workspace identity", p.ID)
++		}
++		if _, ok := seen[p.ID]; ok {
++			return state, fmt.Errorf("duplicate project id %q", p.ID)
++		}
++		seen[p.ID] = struct{}{}
++		if _, err := validateModProjectName(p.Name); err != nil {
++			return state, fmt.Errorf("project %q: %w", p.ID, err)
++		}
++	}
++	return state, nil
++}
++
++func writeModProjectRegistry(path string, state modProjectRegistryState) error {
++	if path == "" {
++		return fmt.Errorf("Reasonix home is unavailable")
++	}
++	if len(state.Projects) > modProjectRegistryMax {
++		return fmt.Errorf("project registry limit exceeded")
++	}
++	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
++		return err
++	}
++	data, err := json.MarshalIndent(state, "", "  ")
++	if err != nil {
++		return err
++	}
++	tmp, err := os.CreateTemp(filepath.Dir(path), ".projects-*.tmp")
++	if err != nil {
++		return err
++	}
++	name := tmp.Name()
++	ok := false
++	defer func() {
++		_ = tmp.Close()
++		if !ok {
++			_ = os.Remove(name)
++		}
++	}()
++	if err := tmp.Chmod(0o600); err != nil {
++		return err
++	}
++	if _, err := tmp.Write(data); err != nil {
++		return err
++	}
++	if err := tmp.Sync(); err != nil {
++		return err
++	}
++	if err := tmp.Close(); err != nil {
++		return err
++	}
++	if err := os.Rename(name, path); err != nil {
++		return err
++	}
++	ok = true
++	if dir, err := os.Open(filepath.Dir(path)); err == nil {
++		_ = dir.Sync()
++		_ = dir.Close()
++	}
++	return nil
++}
++
++func (s *Server) modProjectViews() ([]modProjectView, error) {
++	s.modProjectsMu.Lock()
++	defer s.modProjectsMu.Unlock()
++	state, err := readModProjectRegistry(modProjectRegistryPath())
++	if err != nil {
++		return nil, err
++	}
++	current := canonicalModWorkspace(s.modWorkspacePath())
++	out := make([]modProjectView, 0, len(state.Projects)+1)
++	foundCurrent := false
++	for _, p := range state.Projects {
++		isCurrent := canonicalModWorkspace(p.Workspace) == current
++		foundCurrent = foundCurrent || isCurrent
++		st, statErr := os.Stat(p.Workspace)
++		available := statErr == nil && st.IsDir()
++		out = append(out, modProjectView{modProjectRecord: p, Current: isCurrent, Registered: true, Available: available})
++	}
++	if !foundCurrent && current != "" {
++		name := filepath.Base(current)
++		if name == "." || name == string(filepath.Separator) || strings.TrimSpace(name) == "" {
++			name = "Current project"
++		}
++		st, statErr := os.Stat(current)
++		available := statErr == nil && st.IsDir()
++		out = append(out, modProjectView{modProjectRecord: modProjectRecord{ID: modProjectID(current), Name: name, Workspace: current}, Current: true, Registered: false, Available: available})
++	}
++	sort.SliceStable(out, func(i, j int) bool {
++		if out[i].Current != out[j].Current {
++			return out[i].Current
++		}
++		ai := out[i].LastOpenedUnixMS
++		if ai == 0 {
++			ai = out[i].UpdatedAtUnixMS
++		}
++		aj := out[j].LastOpenedUnixMS
++		if aj == 0 {
++			aj = out[j].UpdatedAtUnixMS
++		}
++		if ai != aj {
++			return ai > aj
++		}
++		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
++	})
++	return out, nil
++}
++
++func (s *Server) modProjectsGet(w http.ResponseWriter, _ *http.Request) {
++	projects, err := s.modProjectViews()
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++		return
++	}
++	writeJSON(w, map[string]any{
++		"projects":         projects,
++		"count":            len(projects),
++		"currentWorkspace": canonicalModWorkspace(s.modWorkspacePath()),
++		"budgetScope":      "workspace",
++		"workspaceSwitch":  "supervisor-restart",
++	})
++}
++
++func (s *Server) modProjectsRegister(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot change project registry while a turn is running", http.StatusConflict)
++		return
++	}
++	var req struct {
++		Name      string `json:"name"`
++		Workspace string `json:"workspace"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&req); err != nil {
++		http.Error(w, "invalid project: "+err.Error(), http.StatusBadRequest)
++		return
++	}
++	workspace, err := validateModProjectWorkspace(req.Workspace)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	name := strings.TrimSpace(req.Name)
++	if name == "" {
++		name = filepath.Base(workspace)
++	}
++	name, err = validateModProjectName(name)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++
++	s.modProjectsMu.Lock()
++	defer s.modProjectsMu.Unlock()
++	path := modProjectRegistryPath()
++	state, err := readModProjectRegistry(path)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++		return
++	}
++	id := modProjectID(workspace)
++	now := time.Now().UnixMilli()
++	found := false
++	for i := range state.Projects {
++		if state.Projects[i].ID == id {
++			state.Projects[i].Name = name
++			state.Projects[i].Workspace = workspace
++			state.Projects[i].UpdatedAtUnixMS = now
++			found = true
++			break
++		}
++	}
++	if !found {
++		if len(state.Projects) >= modProjectRegistryMax {
++			http.Error(w, "project registry limit reached", http.StatusConflict)
++			return
++		}
++		state.Projects = append(state.Projects, modProjectRecord{ID: id, Name: name, Workspace: workspace, CreatedAtUnixMS: now, UpdatedAtUnixMS: now})
++	}
++	if err := writeModProjectRegistry(path, state); err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++		return
++	}
++	s.modHub.Emit("project.registered", map[string]any{"id": id, "workspace": workspace})
++	writeJSON(w, map[string]any{"id": id, "name": name, "workspace": workspace, "current": canonicalModWorkspace(s.modWorkspacePath()) == workspace})
++}
++
++func (s *Server) modProjectsRemove(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "cannot change project registry while a turn is running", http.StatusConflict)
++		return
++	}
++	var req struct {
++		ID string `json:"id"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&req); err != nil || strings.TrimSpace(req.ID) == "" {
++		http.Error(w, "project id is required", http.StatusBadRequest)
++		return
++	}
++	id := strings.TrimSpace(req.ID)
++	s.modProjectsMu.Lock()
++	defer s.modProjectsMu.Unlock()
++	path := modProjectRegistryPath()
++	state, err := readModProjectRegistry(path)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++		return
++	}
++	out := state.Projects[:0]
++	found := false
++	for _, p := range state.Projects {
++		if p.ID == id {
++			found = true
++			continue
++		}
++		out = append(out, p)
++	}
++	if !found {
++		http.Error(w, "project not found", http.StatusNotFound)
++		return
++	}
++	state.Projects = out
++	if err := writeModProjectRegistry(path, state); err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++		return
++	}
++	s.modHub.Emit("project.unregistered", map[string]any{"id": id})
++	w.WriteHeader(http.StatusNoContent)
++}
++
++func (s *Server) modProjectsOpen(w http.ResponseWriter, r *http.Request) {
++	if s.ctl().Running() {
++		http.Error(w, "stop the current turn before switching projects", http.StatusConflict)
++		return
++	}
++	var req struct {
++		ID string `json:"id"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&req); err != nil || strings.TrimSpace(req.ID) == "" {
++		http.Error(w, "project id is required", http.StatusBadRequest)
++		return
++	}
++	id := strings.TrimSpace(req.ID)
++	s.modProjectsMu.Lock()
++	path := modProjectRegistryPath()
++	state, err := readModProjectRegistry(path)
++	if err != nil {
++		s.modProjectsMu.Unlock()
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++		return
++	}
++	var selected *modProjectRecord
++	now := time.Now().UnixMilli()
++	for i := range state.Projects {
++		if state.Projects[i].ID == id {
++			state.Projects[i].LastOpenedUnixMS = now
++			state.Projects[i].UpdatedAtUnixMS = now
++			copy := state.Projects[i]
++			selected = &copy
++			break
++		}
++	}
++	if selected == nil {
++		s.modProjectsMu.Unlock()
++		http.Error(w, "project not found", http.StatusNotFound)
++		return
++	}
++	workspace, validateErr := validateModProjectWorkspace(selected.Workspace)
++	if validateErr != nil {
++		s.modProjectsMu.Unlock()
++		http.Error(w, "project workspace unavailable: "+validateErr.Error(), http.StatusConflict)
++		return
++	}
++	selected.Workspace = workspace
++	if err := writeModProjectRegistry(path, state); err != nil {
++		s.modProjectsMu.Unlock()
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++		return
++	}
++	s.modProjectsMu.Unlock()
++	current := canonicalModWorkspace(s.modWorkspacePath())
++	restart := selected.Workspace != current
++	s.modHub.Emit("project.open.requested", map[string]any{"id": selected.ID, "workspace": selected.Workspace, "restartRequired": restart})
++	writeJSON(w, map[string]any{
++		"id": selected.ID, "name": selected.Name, "workspace": selected.Workspace,
++		"currentWorkspace": current, "restartRequired": restart,
++		"supervisor": map[string]any{"action": "restart", "workspace": selected.Workspace},
++	})
++}
++
++type modTaskView struct {
++	ID              string `json:"id"`
++	Path            string `json:"path"`
++	Title           string `json:"title"`
++	Preview         string `json:"preview,omitempty"`
++	Turns           int    `json:"turns"`
++	CountsKnown     bool   `json:"countsKnown"`
++	Current         bool   `json:"current"`
++	CreatedAtUnixMS int64  `json:"createdAtUnixMs,omitempty"`
++	UpdatedAtUnixMS int64  `json:"updatedAtUnixMs,omitempty"`
++	Recovered       bool   `json:"recovered,omitempty"`
++	RecoveryReason  string `json:"recoveryReason,omitempty"`
++}
++
++func (s *Server) modTaskViews() ([]modTaskView, error) {
++	dir := strings.TrimSpace(s.ctl().SessionDir())
++	if dir == "" {
++		return []modTaskView{}, nil
++	}
++	items, err := agent.ListSessions(dir)
++	if err != nil {
++		return nil, err
++	}
++	current := filepath.Clean(s.ctl().SessionPath())
++	out := make([]modTaskView, 0, len(items))
++	for _, item := range items {
++		if item.WorkspaceRoot != "" && canonicalModWorkspace(item.WorkspaceRoot) != canonicalModWorkspace(s.modWorkspacePath()) {
++			continue
++		}
++		id := strings.TrimSuffix(filepath.Base(item.Path), filepath.Ext(item.Path))
++		title := strings.TrimSpace(item.CustomTitle)
++		if title == "" {
++			title = strings.TrimSpace(item.TopicTitle)
++		}
++		preview := modBoundedRedacted(strings.TrimSpace(item.Preview), 512)
++		if title == "" {
++			title = preview
++		}
++		if title == "" {
++			title = id
++		}
++		createdMS, updatedMS := int64(0), int64(0)
++		if !item.CreatedAt.IsZero() {
++			createdMS = item.CreatedAt.UnixMilli()
++		}
++		if !item.LastActivityAt.IsZero() {
++			updatedMS = item.LastActivityAt.UnixMilli()
++		}
++		out = append(out, modTaskView{
++			ID: id, Path: item.Path, Title: modBoundedRedacted(title, 256), Preview: preview,
++			Turns: item.Turns, CountsKnown: item.CountsKnown, Current: filepath.Clean(item.Path) == current,
++			CreatedAtUnixMS: createdMS, UpdatedAtUnixMS: updatedMS,
++			Recovered: item.Recovered, RecoveryReason: modBoundedRedacted(item.RecoveryReason, 256),
++		})
++	}
++	return out, nil
++}
++
++func (s *Server) modTasksGet(w http.ResponseWriter, _ *http.Request) {
++	tasks, err := s.modTaskViews()
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++		return
++	}
++	writeJSON(w, map[string]any{
++		"tasks": tasks, "count": len(tasks), "running": s.ctl().Running(),
++		"nativeLifecycle":         map[string]string{"new": "/new", "resume": "/resume", "delete": "/delete-session"},
++		"providerCallsForListing": false,
++	})
++}
++
++func validateModTaskTitle(title string) (string, error) {
++	title = strings.TrimSpace(title)
++	if title == "" {
++		return "", fmt.Errorf("title is required")
++	}
++	if utf8.RuneCountInString(title) > 160 {
++		return "", fmt.Errorf("title is too long")
++	}
++	for _, r := range title {
++		if unicode.IsControl(r) {
++			return "", fmt.Errorf("title contains control characters")
++		}
++	}
++	return title, nil
++}
++
++func modTaskPathWithinDir(dir, raw string) (string, error) {
++	if strings.TrimSpace(dir) == "" || strings.TrimSpace(raw) == "" {
++		return "", fmt.Errorf("invalid task path")
++	}
++	absDir, err := filepath.Abs(dir)
++	if err != nil {
++		return "", fmt.Errorf("invalid session directory")
++	}
++	realDir, err := filepath.EvalSymlinks(absDir)
++	if err != nil {
++		return "", fmt.Errorf("invalid session directory")
++	}
++	absPath, err := filepath.Abs(strings.TrimSpace(raw))
++	if err != nil || !store.IsSessionTranscriptName(filepath.Base(absPath)) {
++		return "", fmt.Errorf("invalid task path")
++	}
++	realPath, err := filepath.EvalSymlinks(absPath)
++	if err != nil {
++		return "", fmt.Errorf("task not found")
++	}
++	rel, err := filepath.Rel(realDir, realPath)
++	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
++		return "", fmt.Errorf("task path outside session directory")
++	}
++	return realPath, nil
++}
++
++func (s *Server) modTasksRename(w http.ResponseWriter, r *http.Request) {
++	var req struct {
++		Path  string `json:"path"`
++		Title string `json:"title"`
++	}
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&req); err != nil {
++		http.Error(w, "invalid task rename: "+err.Error(), http.StatusBadRequest)
++		return
++	}
++	path, err := modTaskPathWithinDir(s.ctl().SessionDir(), req.Path)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	title, err := validateModTaskTitle(req.Title)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++		return
++	}
++	if err := agent.RenameSession(path, title); err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++		return
++	}
++	s.modHub.Emit("task.renamed", map[string]any{"id": strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), "title": title})
++	writeJSON(w, map[string]any{"path": path, "title": title})
++}
+diff --git a/internal/serve/mod_projects_test.go b/internal/serve/mod_projects_test.go
+new file mode 100644
+index 0000000..4c1b3e2
+--- /dev/null
++++ b/internal/serve/mod_projects_test.go
+@@ -0,0 +1,153 @@
++package serve
++
++import (
++	"encoding/json"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"reasonix/internal/agent"
++	"reasonix/internal/provider"
++)
++
++func TestModProjectRegistryAndSupervisorHandoff(t *testing.T) {
++	home := t.TempDir()
++	t.Setenv("REASONIX_HOME", home)
++	rootA := t.TempDir()
++	rootB := t.TempDir()
++	ts, _ := newPersistentModServer(t, rootA)
++	defer ts.Close()
++
++	resp := postJSON(t, ts.URL+"/mod/projects/register", `{"name":"Alpha","workspace":`+jsonQuote(rootA)+`}`)
++	body, _ := io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("register A=%d %s", resp.StatusCode, body)
++	}
++	var a struct {
++		ID string `json:"id"`
++	}
++	if err := json.Unmarshal(body, &a); err != nil || a.ID == "" {
++		t.Fatalf("register A response=%s err=%v", body, err)
++	}
++
++	resp = postJSON(t, ts.URL+"/mod/projects/register", `{"name":"Beta","workspace":`+jsonQuote(rootB)+`}`)
++	body, _ = io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("register B=%d %s", resp.StatusCode, body)
++	}
++	var b struct {
++		ID string `json:"id"`
++	}
++	if err := json.Unmarshal(body, &b); err != nil || b.ID == "" || b.ID == a.ID {
++		t.Fatalf("register B response=%s err=%v", body, err)
++	}
++
++	resp, err := http.Get(ts.URL + "/mod/projects")
++	if err != nil {
++		t.Fatal(err)
++	}
++	body, _ = io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"budgetScope":"workspace"`) || !strings.Contains(string(body), `"current":true`) {
++		t.Fatalf("projects=%d %s", resp.StatusCode, body)
++	}
++
++	resp = postJSON(t, ts.URL+"/mod/projects/open", `{"id":`+jsonQuote(b.ID)+`}`)
++	body, _ = io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("open B=%d %s", resp.StatusCode, body)
++	}
++	var handoff struct {
++		RestartRequired bool   `json:"restartRequired"`
++		Workspace       string `json:"workspace"`
++		Supervisor      struct {
++			Action    string `json:"action"`
++			Workspace string `json:"workspace"`
++		} `json:"supervisor"`
++	}
++	if err := json.Unmarshal(body, &handoff); err != nil {
++		t.Fatal(err)
++	}
++	if !handoff.RestartRequired || canonicalModWorkspace(handoff.Workspace) != canonicalModWorkspace(rootB) || handoff.Supervisor.Action != "restart" {
++		t.Fatalf("handoff=%+v", handoff)
++	}
++	if got := canonicalModWorkspace(rootA); got != canonicalModWorkspace(rootA) {
++		t.Fatal("unreachable")
++	}
++
++	resp = postJSON(t, ts.URL+"/mod/projects/remove", `{"id":`+jsonQuote(b.ID)+`}`)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusNoContent {
++		t.Fatalf("remove B=%d", resp.StatusCode)
++	}
++	if st, err := os.Stat(rootB); err != nil || !st.IsDir() {
++		t.Fatalf("registry removal must not delete workspace: %v", err)
++	}
++}
++
++func TestModTaskCatalogUsesNativeSessionsAndRename(t *testing.T) {
++	home := t.TempDir()
++	t.Setenv("REASONIX_HOME", home)
++	root := t.TempDir()
++	dir := filepath.Join(root, ".sessions")
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	path := agent.NewSessionPath(dir, "apk-task")
++	sess := agent.NewSession("sys")
++	sess.Add(provider.Message{Role: provider.RoleUser, Content: "Fix the offline test project"})
++	sess.Add(provider.Message{Role: provider.RoleAssistant, Content: "Working"})
++	if err := sess.Save(path); err != nil {
++		t.Fatal(err)
++	}
++
++	ts, _ := newPersistentModServer(t, root)
++	defer ts.Close()
++	resp, err := http.Get(ts.URL + "/mod/tasks")
++	if err != nil {
++		t.Fatal(err)
++	}
++	body, _ := io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("tasks=%d %s", resp.StatusCode, body)
++	}
++	if !strings.Contains(string(body), `"providerCallsForListing":false`) || !strings.Contains(string(body), "Fix the offline test project") {
++		t.Fatalf("tasks body=%s", body)
++	}
++
++	resp = postJSON(t, ts.URL+"/mod/tasks/rename", `{"path":`+jsonQuote(path)+`,"title":"APK task"}`)
++	body, _ = io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("rename=%d %s", resp.StatusCode, body)
++	}
++	items, err := agent.ListSessions(dir)
++	if err != nil || len(items) != 1 || items[0].CustomTitle != "APK task" {
++		t.Fatalf("renamed sessions=%+v err=%v", items, err)
++	}
++
++	outsideDir := t.TempDir()
++	outside := agent.NewSessionPath(outsideDir, "outside")
++	other := agent.NewSession("sys")
++	other.Add(provider.Message{Role: provider.RoleUser, Content: "outside"})
++	if err := other.Save(outside); err != nil {
++		t.Fatal(err)
++	}
++	resp = postJSON(t, ts.URL+"/mod/tasks/rename", `{"path":`+jsonQuote(outside)+`,"title":"Nope"}`)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusBadRequest {
++		t.Fatalf("outside rename=%d", resp.StatusCode)
++	}
++}
++
++func jsonQuote(s string) string {
++	b, _ := json.Marshal(s)
++	return string(b)
++}
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index fc3bd48..075f503 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -71,6 +71,7 @@ type Server struct {
+ 	// v0.8 persists APK-owned policy per workspace so backend restarts/workspace
+ 	// supervisor handoffs do not reset the user budget or tool/profile policy.
+ 	modPersistMu   sync.Mutex
++	modProjectsMu  sync.Mutex
+ 	modPersistPath string
+ 	modPersistErr  string
+ 	// modToolDecisions persists APK/session tool overrides across native model rebuilds.
+@@ -613,6 +614,14 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("POST /mod/app/task/stop", s.cancel)
+ 	mux.HandleFunc("GET /mod/app/persistence", s.modAppPersistenceGet)
+ 	mux.HandleFunc("POST /mod/app/persistence/save", s.modAppPersistenceSave)
++	// v0.9 project/task manager. Project switching remains supervisor-owned;
++	// task history reuses native Reasonix sessions and never calls a provider.
++	mux.HandleFunc("GET /mod/projects", s.modProjectsGet)
++	mux.HandleFunc("POST /mod/projects/register", s.modProjectsRegister)
++	mux.HandleFunc("POST /mod/projects/remove", s.modProjectsRemove)
++	mux.HandleFunc("POST /mod/projects/open", s.modProjectsOpen)
++	mux.HandleFunc("GET /mod/tasks", s.modTasksGet)
++	mux.HandleFunc("POST /mod/tasks/rename", s.modTasksRename)
+ 	mux.HandleFunc("GET /sessions", s.sessions)
+ 	mux.HandleFunc("GET /skills", s.skills)
+ 	mux.HandleFunc("GET /todos", s.todos)
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index c9af18a..b04e563 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,70 +5,76 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/28] Unit tests: Balance Mod core + APK bridge"
++echo "[1/30] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/28] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++echo "[2/30] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
+ 
+-echo "[3/28] Failure cache: verified-only persistence + corruption recovery"
++echo "[3/30] Failure cache: verified-only persistence + corruption recovery"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
+ 
+-echo "[4/28] Context/patch economy: log reducer + patch governor"
++echo "[4/30] Context/patch economy: log reducer + patch governor"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
+ 
+-echo "[5/28] Unified repair cycle: verifier -> router -> cache"
++echo "[5/30] Unified repair cycle: verifier -> router -> cache"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestVerificationReceiptRequiresHostEvidence|TestRepairCycleFlashFlashProFlashAndVerifiedCache)$' -count=1
+ 
+-echo "[6/28] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
++echo "[6/30] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleDrivenByOfflineMockProvider$' -count=1
+ 
+-echo "[7/28] Recovery policy: regression/oversize rollback + fail-closed conflict"
++echo "[7/30] Recovery policy: regression/oversize rollback + fail-closed conflict"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleRollback' -count=1
+ 
+-echo "[8/28] APK cycle/recovery API integration"
++echo "[8/30] APK cycle/recovery API integration"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModCycleAPIAndHostRepairWiring|TestModRecoveryAPIIsFailClosedWithoutCheckpoint)$' -count=1
+ 
+-echo "[9/28] Execution router: model slots + immediate KZT admission re-check"
++echo "[9/30] Execution router: model slots + immediate KZT admission re-check"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouter' -count=1
+ 
+-echo "[10/28] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
++echo "[10/30] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModExecutionRouterUsesNativeServeModelSwitch$' -count=1
+ 
+-echo "[11/28] APK execution config/status contract"
++echo "[11/30] APK execution config/status contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModExecutionAPIIsStrictAndAPKVisible|TestModStatusExposesTypedAPKSurface)$' -count=1
+ 
+-echo "[12/28] Universal agent control: native per-tool allow/ask/deny + schema trim"
++echo "[12/30] Universal agent control: native per-tool allow/ask/deny + schema trim"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control ./internal/tool -run '^(TestSessionToolDecisions|TestSessionHiddenTools)' -count=1
+ 
+-echo "[13/28] APK agent/tools API contract"
++echo "[13/30] APK agent/tools API contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAgentToolsAPIUsesNativeRuntimePolicy$' -count=1
+ 
+-echo "[14/28] APK instructions + workspace file bridge"
++echo "[14/30] APK instructions + workspace file bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModInstructionsAndWorkspaceFileAPI|TestModWorkspaceFileRejectsTraversal)$' -count=1
+ 
+-echo "[15/28] Provider-agnostic project profile"
++echo "[15/30] Provider-agnostic project profile"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestProjectProfile' -count=1
+ 
+-echo "[16/28] Capability Registry + Chat/Agent mode + Tool Packs"
++echo "[16/30] Capability Registry + Chat/Agent mode + Tool Packs"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProjectChatModeHidesMutatingToolsAndRestoresAgentMode|TestModProjectToolPackRestrictsSurfaceAndManualDenySurvives|TestModEnvironmentAndProjectContract)$' -count=1
+ 
+-echo "[17/28] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
++echo "[17/30] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModLive' -count=1
+ 
+-echo "[18/28] Restart-safe KZT ledger persistence"
++echo "[18/30] Restart-safe KZT ledger persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestBudgetPersistentState' -count=1
+ 
+-echo "[19/28] APK bootstrap + atomic apply + restart persistence"
++echo "[19/30] APK bootstrap + atomic apply + restart persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModApp' -count=1
+ 
+-echo "[20/28] Debian Android backend supervisor syntax"
++echo "[20/30] APK project registry + supervisor handoff"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModProjectRegistryAndSupervisorHandoff$' -count=1
++
++echo "[21/30] Native task catalog + local rename (no provider listing call)"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModTaskCatalogUsesNativeSessionsAndRename$' -count=1
++
++echo "[22/30] Debian Android backend supervisor syntax"
+ bash -n ./scripts/reasonix_android_backend.sh
+ 
+-echo "[21/28] Native Reasonix completion gate regression test"
++echo "[23/30] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[22/28] Build CLI only (skip example plugin)"
++echo "[24/30] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -94,7 +100,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[23/28] Offline normal tool-loop"
++echo "[25/30] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+@@ -121,7 +127,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[24/28] Offline anti-loop intervention"
++echo "[26/30] Offline anti-loop intervention"
+ LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+@@ -129,27 +135,27 @@ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+   exit 1
+ fi
+ 
+-echo "[25/28] Universal agent-control contract summary"
++echo "[27/30] Universal agent-control contract summary"
+ echo "  - workspace root + confined file browser: PASS"
+ echo "  - per-tool allow/ask/deny via native gate: PASS"
+ echo "  - instruction editor via native memory docs: PASS"
+ echo "  - skill management surface: compiled in core serve tests"
+ 
+-echo "[26/28] Universal APK protocol summary"
++echo "[28/30] Universal APK protocol summary"
+ echo "  - dynamic Capability Registry + Tool Packs: PASS"
+ echo "  - Chat mode denies mutating tools without creating a second agent: PASS"
+ echo "  - APK environment endpoint reuses Reasonix native probes/cache + project markers: PASS"
+ echo "  - project profile is provider-agnostic and APK-replayable: PASS"
+ echo "  - live event history exposes actions/diffs/results but not hidden reasoning: PASS"
+ 
+-echo "[27/28] APK supervisor/control-plane summary"
++echo "[29/30] APK supervisor/control-plane summary"
+ echo "  - bootstrap + atomic settings apply: PASS"
+ echo "  - task start/stop aliases reuse native submit/cancel: PASS"
+ echo "  - workspace-scoped policy survives backend restart: PASS"
+ echo "  - KZT/Pro spend ledger survives restart: PASS"
+ echo "  - Debian Android supervisor wrapper syntax: PASS"
+ 
+-echo "[28/28] PASS — no provider API key/network was used"
++echo "[30/30] PASS — no provider API key/network was used"
+ echo "  - v0.1 KZT budget/resource telemetry: PASS"
+ echo "  - v0.2 native anti-loop/completion telemetry: PASS"
+ echo "  - v0.3 router/cache/log/patch modules: PASS"
+@@ -158,4 +164,5 @@ echo "  - v0.5 provider-agnostic execution router + native model switching: PASS
+ echo "  - v0.6 universal APK agent control + workspace bridge: PASS"
+ echo "  - v0.7 capability/environment/project/live APK protocol: PASS"
+ echo "  - v0.8 APK control plane + restart-safe persistence + supervisor: PASS"
+-echo "BALANCE_MOD_V08_SMOKE_PASS"
++echo "  - v0.9 project registry + native task catalog: PASS"
++echo "BALANCE_MOD_V09_SMOKE_PASS"

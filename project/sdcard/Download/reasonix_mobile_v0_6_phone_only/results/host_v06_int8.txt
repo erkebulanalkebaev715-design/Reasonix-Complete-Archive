@@ -1,0 +1,6 @@
+model_bytes=248576
+mapped_bytes=248576
+fast_tokens_per_s=58766.1
+standard_tokens_per_s=41523.6
+deep_tokens_per_s=26825.7
+max_rss_kb=4244

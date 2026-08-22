@@ -1,0 +1,1 @@
+{"schemaVersion":3,"turn":1,"time":"2026-08-18T19:09:53.736246584Z","prompt":"Ты какая модель\n\n[AUTONOMY]\nРаботай автономно в пределах уже выданных Reasonix permissions. Не проси подтверждение там, где backend уже разрешил действие.","msgIndex":3,"files":[],"coverage":"none"}

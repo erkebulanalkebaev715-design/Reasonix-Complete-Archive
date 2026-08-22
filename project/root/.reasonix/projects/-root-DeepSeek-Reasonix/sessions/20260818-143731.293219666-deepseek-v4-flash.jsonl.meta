@@ -1,0 +1,12 @@
+{
+  "id": "20260818-143731.293219666-deepseek-v4-flash",
+  "created_at": "2026-08-18T14:38:05.260133757Z",
+  "updated_at": "2026-08-18T14:41:09.637186202Z",
+  "model": "custom-api-deepseek-com/deepseek-v4-flash",
+  "revision": 2,
+  "content_digest": "6a481353fa52479f73dfd39aa211592584337feef56d8924f1e943225a9f2f0f",
+  "writer_id": "localhost-11472-f3305e91fdf34aab",
+  "schema_version": 2,
+  "turns": 2,
+  "preview": "Полностью проанализируй текущий проект. Найди реальные баги и архитектурные п…"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "20260821-181217.208465934-deepseek-v4-flash",
+  "created_at": "2026-08-21T18:12:21.7665207Z",
+  "updated_at": "2026-08-21T18:27:05.930414799Z",
+  "model": "custom-api-deepseek-com/deepseek-v4-flash",
+  "revision": 11,
+  "content_digest": "71245efe4e113f63e3f3c9963186ff0aec399502509de61edd85da171293d421",
+  "writer_id": "localhost-21298-63ee8a1a9f532a00",
+  "schema_version": 2,
+  "turns": 7,
+  "preview": "[Project: UI-QA-TEST]\n\nКакой проект стоит сейчас"
+}

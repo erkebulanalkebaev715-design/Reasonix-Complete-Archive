@@ -1,0 +1,1 @@
+{"schemaVersion":3,"turn":4,"time":"2026-08-18T19:10:25.112686023Z","prompt":"Ну просто напиши\n\n[AUTONOMY]\nРаботай автономно в пределах уже выданных Reasonix permissions. Не проси подтверждение там, где backend уже разрешил действие.","msgIndex":9,"files":[],"coverage":"none"}

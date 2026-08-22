@@ -1,0 +1,152 @@
+# Reasonix configuration.
+# Resolution order: flag > ./reasonix.toml > ~/.reasonix/config.toml > built-in defaults.
+# Fields marked user/global only are not overridden by ./reasonix.toml.
+# Secrets are named via api_key_env and stored in Reasonix's global .env; never put keys here.
+
+config_version = 6   # schema marker for diagnostics; old versions may ignore it
+default_model = "custom-api-deepseek-com"
+language      = "en"   # ui/model language; empty = auto-detect from $LANG / $REASONIX_LANG
+
+[desktop]
+provider_access = ["custom-api-deepseek-com"]   # providers available to this workspace in the desktop model switcher
+
+[agent]
+# system_prompt = """..."""   # omit to use the built-in prompt for this version
+# system_prompt_file = "prompts/system.md"   # project paths stay in <workspace>; user paths may fall back to <reasonix home>
+temperature       = 0.0
+# recovery_model = "deepseek-pro"   # optional; falls back to guardian then main model
+# reasoning_language = "zh"   # visible reasoning language: auto|zh|en
+compact_ratio       = 0.8   # sole auto trigger; presets 0.70/0.80/0.85 (default 0.80)
+# keep                = ["errors"]   # deprecated compatibility field; ignored at runtime
+# recent_keep         = 2   # deprecated compatibility field; ignored at runtime
+# plan_mode_read_only_commands = ["gh issue view"]   # legacy compatibility only; Plan bash uses Permissions
+# planner_model = "deepseek-pro"   # optional: enable two-model collaboration
+# subagent_model = "deepseek-pro"   # optional default for runAs=subagent skills
+# subagent_models = { review = "deepseek-pro", security_review = "deepseek-pro" }   # per-skill overrides
+# subagent_effort = "high"   # optional default effort for subagents
+# subagent_efforts = { review = "max", task = "high" }   # per-tool/skill effort overrides
+# max_subagent_depth = 2   # nested subagent delegation depth; set 1 to disable nested delegation
+# max_subagent_concurrency = 6   # session-wide sub-agent concurrency (task/fleet/skills)
+# max_parallel_writers = 3   # concurrent writers with non-overlapping write_paths
+# output_style = "explanatory"   # explanatory | learning | concise | custom; empty = default
+
+[[providers]]
+name        = "deepseek-flash"
+kind        = "anthropic"
+base_url    = ".. \"?q=\""
+models      = [".. encode(GAME_NAME)"]
+default     = ".. encode(GAME_NAME)"
+api_key_env = "name"
+balance_url = "https://api.deepseek.com/user/balance"   # optional; wallet-balance endpoint shown in the status bar
+context_window = 1000000   # tokens; compaction triggers near this limit
+# max_output_tokens = 0       # recommended: official DeepSeek omits the field (server 384K ceiling)
+# max_output_tokens = 32768   # optional cost cap
+# max_output_tokens = 65536   # optional cost cap
+# max_output_tokens = 131072  # optional cost cap
+price       = { cache_hit = 0.0028, input = 0.14, output = 0.28, currency = "$" }   # provider-wide fallback, per 1M tokens
+billing_currency = "USD"   # frozen list-price currency; independent of display_currency
+thinking    = "enabled"
+web_search  = true   # provider-executed web_search tool; omitted defaults on for supported official DeepSeek APIs
+supported_efforts = ["disabled", "low", "high", "max"]   # custom /effort levels exposed by this provider; overrides the built-in Kind/BaseURL default
+default_effort    = "high"   # used when /effort is auto or unset; must be one of supported_efforts
+
+[[providers]]
+name        = "deepseek-pro"
+kind        = "anthropic"
+base_url    = "https://api.deepseek.com/anthropic"
+model       = "deepseek-v4-pro"
+api_key_env = "DEEPSEEK_API_KEY"
+balance_url = "https://api.deepseek.com/user/balance"   # optional; wallet-balance endpoint shown in the status bar
+context_window = 1000000   # tokens; compaction triggers near this limit
+# max_output_tokens = 0       # recommended: official DeepSeek omits the field (server 384K ceiling)
+# max_output_tokens = 32768   # optional cost cap
+# max_output_tokens = 65536   # optional cost cap
+# max_output_tokens = 131072  # optional cost cap
+price       = { cache_hit = 0.003625, input = 0.435, output = 0.87, currency = "$" }   # provider-wide fallback, per 1M tokens
+billing_currency = "USD"   # frozen list-price currency; independent of display_currency
+thinking    = "enabled"
+web_search  = true   # provider-executed web_search tool; omitted defaults on for supported official DeepSeek APIs
+supported_efforts = ["disabled", "high", "max"]   # custom /effort levels exposed by this provider; overrides the built-in Kind/BaseURL default
+default_effort    = "high"   # used when /effort is auto or unset; must be one of supported_efforts
+
+[[providers]]
+name        = "custom-api-deepseek-com"
+kind        = "openai"
+base_url    = "https://api.deepseek.com"
+models      = ["deepseek-v4-flash"]
+default     = "deepseek-v4-flash"
+api_key_env = "CUSTOM_API_DEEPSEEK_COM_API_KEY"
+context_window = 128000   # tokens; compaction triggers near this limit
+# max_output_tokens = 0       # recommended: official DeepSeek omits the field (server 384K ceiling)
+# max_output_tokens = 32768   # optional cost cap
+# max_output_tokens = 65536   # optional cost cap
+# max_output_tokens = 131072  # optional cost cap
+
+[tools]
+enabled = []   # empty = all built-in tools
+bash_timeout_seconds = 120   # foreground safety cap; set 0 for no tool-local cap
+mcp_startup_timeout_seconds = 30   # background initialize + tools/list safety cap; per-plugin overrides may raise it
+mcp_call_timeout_seconds = 300   # default MCP call safety cap; per-plugin/tool overrides may raise it
+
+[tools.background_jobs]
+stalled_warning_seconds = 900   # warn once per background job after this many quiet seconds; 0 disables
+
+[tools.shell]
+# prefer = "auto"   # auto|bash|powershell|pwsh; empty/default = auto-detect
+# path   = "/opt/homebrew/bin/bash"   # absolute path to the shell executable; empty = PATH lookup
+
+[lsp]
+enabled = true   # language server tools; servers launch lazily when used
+# [lsp.servers.go]
+# command = "gopls"
+# args = []
+# extensions = [".go"]
+
+[skills]
+# paths = ["~/my-skills", "../shared/skills"]   # extra custom skill roots
+# excluded_paths = ["~/.agents/skills"]   # hide convention roots without deleting folders
+# disable_implicit_invocation = false   # keep skills available for automatic model invocation
+# max_depth = 3   # nested scan depth; set 1 for legacy root-only discovery
+# disabled_skills = ["review"]   # hide noisy or unwanted skills
+
+[permissions]
+# Per-call gating. mode = writer fallback when no rule matches: ask|allow|deny.
+# Readers always default to allow. Precedence: deny > ask > allow > fallback.
+# Rules are "Tool" or "Tool(specifier)"; e.g. Bash(go test:*), Edit(src/**).
+mode  = "ask"
+# allow_dynamic_bash = false   # advanced opt-in; deny/ask and exact rules still take precedence
+# deny = ["Bash(rm -rf*)", "Bash(git push*)"]   # hard-blocked in every mode
+# allow = ["Bash(go test:*)", "Bash(git status:*)"]   # never prompted
+# ask = ["Edit(src/**)"]   # force a prompt even if otherwise allowed
+
+[sandbox]
+# Confine tool blast radius. File-writers (write_file/edit_file/multi_edit/move_file)
+# may only write under workspace_root (empty = current dir) and allow_write extras.
+# bash = "enforce" jails each command in an OS sandbox when available;
+# without one, bash execution is refused. Empty defaults to enforce on macOS/Linux.
+# Windows has no OS-level Bash sandbox and fixes bash = "off".
+# network allows sandboxed bash egress.
+# workspace_root = ""            # default: current working directory
+# allow_write = ["/tmp"]          # extra dirs writers may also modify
+# forbid_read = []                  # dirs the agent cannot read or list
+bash    = "enforce"
+network = true
+
+[statusline]
+# A custom status line: a command whose first stdout line replaces the built-in
+# data row. It receives {"model","contextUsed","contextWindow","cwd"} as JSON on stdin.
+# command = "my-statusline.sh"
+
+# External MCP servers. type: "stdio" (default, a subprocess) | "http" | "sse".
+# ${VAR} / ${VAR:-default} are expanded from the environment in command/args/env/url/headers.
+# [[plugins]]
+# name    = "example"
+# command = "reasonix-plugin-example"
+# startup_timeout_seconds = 60    # optional initialize + tools/list cap
+# call_timeout_seconds = 600       # optional per-server MCP call timeout
+# tool_timeout_seconds = { "generate_video" = 1800 }   # raw MCP tool names
+# [[plugins]]                                  # a remote server over Streamable HTTP
+# name    = "stripe"
+# type    = "http"
+# url     = "https://mcp.stripe.com"
+# headers = { Authorization = "Bearer ${STRIPE_KEY}" }

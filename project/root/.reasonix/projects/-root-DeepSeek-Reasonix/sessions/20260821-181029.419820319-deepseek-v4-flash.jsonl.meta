@@ -1,0 +1,12 @@
+{
+  "id": "20260821-181029.419820319-deepseek-v4-flash",
+  "created_at": "2026-08-21T18:10:31.543692125Z",
+  "updated_at": "2026-08-21T18:10:38.562426236Z",
+  "model": "custom-api-deepseek-com/deepseek-v4-flash",
+  "revision": 1,
+  "content_digest": "4e873c070dec5f0eaaaedfc13b5842f8c0a76b4aaa342c1828ca06fe03528c9b",
+  "writer_id": "localhost-20805-6206b4f0d7e7a284",
+  "schema_version": 2,
+  "turns": 1,
+  "preview": "Посчитай 123 * 456 и проверь результат самостоятельно."
+}

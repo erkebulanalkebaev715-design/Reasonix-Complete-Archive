@@ -1,0 +1,26 @@
+Reasonix Mobile v1.2 backend
+
+This archive is intentionally FLAT. After extracting, these files are in the current folder.
+
+Upgrade/start:
+  bash ./upgrade_backend.sh
+
+Status:
+  bash ./reasonix_mobile_backend.sh status
+
+Token (only if APK Settings asks for it):
+  bash ./reasonix_mobile_backend.sh token
+
+Full diagnosis:
+  bash ./reasonix_mobile_backend.sh diagnose
+
+Logs:
+  bash ./reasonix_mobile_backend.sh log
+
+Install/refresh Android MCP tools manually:
+  bash ./reasonix_mobile_backend.sh install-android-tools
+
+Default bridge URL:
+  http://127.0.0.1:37914
+
+The v1.2 backend reuses ~/.reasonix-mobile-v1 state/token/model from v1.0.

@@ -1,0 +1,635 @@
+REASONIX 3.0.1 NIGHT QA REPAIR MASTER PROMPT
+Date: 2026-08-21
+Repo: /root/DeepSeek-Reasonix
+Backend: /root/reasonix-mobile-v1.5.1-backend
+Current APK: Reasonix Mobile 3.0.0
+Target: signed update-compatible Reasonix Mobile 3.0.1 NIGHT
+
+MISSION
+Repair the existing project from real on-device QA. Do not restart or replace it with a toy rewrite. Find root causes, fix owning layers, add regression tests, preserve working behavior, rebuild the signed APK, and write evidence.
+
+CORE INVARIANT
+POWER = ECONOMY = STABILITY = LOW DEVICE LOAD.
+More power means more useful result per token/request/second/RAM/CPU/battery/thermal cost, not brute-force concurrency.
+
+NIGHT BUDGET RULES
+- OpenCode subagents: FORBIDDEN.
+- DeepSeek Flash only. No Pro. No Kimi.
+- Local grep/read/tests/build first.
+- Do not repeatedly run paid real-provider tests.
+- After local gates, max TWO minimal real Reasonix API smoke calls, only if changed code requires them.
+- Do not work merely to consume the night. Finish/report/STOP when done or blocked.
+- Keep narration concise and tool-driven.
+- Never weaken/reset hard budget to make a test pass.
+- Device-only behavior = READY_FOR_DEVICE_TEST until physically observed.
+
+LINEAGE
+- Existing architecture only.
+- Preserve package and signing/update lineage.
+- Ordinary Android Activity + WebView only. No NativeActivity. No manual DEX hacks.
+- Preserve loopback authenticated bridge and current working backend contracts.
+- Do not expose/commit secrets.
+- No decorative/fake features and no false PASS.
+
+REAL QA TO FIX
+
+QA1 CHAT LATENCY + ASSISTANT ACTIONS
+Chat works but UI has delay. Assistant messages lack Retry and Search web.
+Fix measured root cause, not sleeps.
+Add compact Retry: rerun associated user turn exactly once, same chat/project/mode/budget, no duplicate history.
+Add Search web only if a real callable web capability exists; never fake it. Hide or truthfully mark unavailable otherwise.
+Test double-tap/request dedupe and responsive touch targets.
+
+QA2 SIMPLE CHAT
+PASS. Preserve.
+
+QA3 REASONING + MASKED OUTPUT
+Sometimes UI says provider did not return reasoning; older messages did show it. A 17*24 answer appeared as ********.
+Trace raw provider -> Reasonix event -> bridge -> frontend.
+If provider truly omitted reasoning, show that honestly; never invent hidden chain-of-thought.
+Reproduce masking and locate exact layer (redaction/serializer/renderer/sanitizer/upstream). Ordinary numeric output like 408 must not be masked.
+Tests: reasoning present, reasoning absent, normal numeric output unmasked.
+
+QA4 LONG RESPONSE
+PASS. Preserve.
+
+QA5 COPY
+PASS. Preserve exact content, comfortable touch target, lightweight feedback.
+
+QA6 + QA28 AGENT ACTIVITY
+Current activity/reasoning is too flat and mixed.
+Build one deterministic chronological Turn Activity Timeline with stable IDs and parent/child relationships:
+Turn
+ -> provider-visible reasoning
+ -> agent round/plan
+    -> Tool: call -> result -> retries
+    -> Skill: invocation -> result
+    -> Plugin/MCP: invocation -> result
+    -> Verification: checks -> evidence
+ -> final response
+Requirements:
+- One source of truth; no duplicate tool event in multiple sections.
+- Repeated operations may compact visually (e.g. Read x7) but expand to real ordered events.
+- Distinct visual types for tool/skill/plugin/MCP/retry/verification.
+- Large outputs preview/lazy-load.
+- running/failed/succeeded/cancelled states.
+- raw tool JSON not mixed into reasoning text.
+- deterministic ordering from backend sequence/timestamp IDs.
+Tests: interleaved events, retries as children, duplicate ID dedupe, large output bounded.
+
+QA7/8 APPROVAL
+No approval dialog appeared because policy was AUTO; mutation succeeded. This can be correct.
+Do NOT force dialogs in AUTO.
+Make approval mode obvious. ASK must produce real deny/allow round-trip. AUTO only auto-allows operations policy permits.
+Tests:
+ASK deny -> no mutation.
+ASK allow -> mutation -> read-back.
+AUTO allowed op -> no unnecessary dialog.
+No accidental state leakage across chats/projects.
+
+QA9 ROUNDS + DEAD PLUS PANELS
+Rounds did not expose real selection/config. Plus opens with delay. System Prompt / Verification / Rounds items do not open or do nothing.
+Audit EVERY plus action. Wire end-to-end or remove dead controls.
+Rounds must alter actual backend/agent execution, not only UI state.
+System Prompt editor must load/save real scoped prompt.
+Verification settings must alter real verification.
+Opening plus must not trigger expensive audit/network waterfall/full rerender.
+Tests: static dead-action scan; UI -> backend -> read-back; persisted values; rounds visible in activity/evidence.
+
+QA10 VERIFICATION
+Appears nonfunctional; two answers appeared but no visible verification.
+Find whether backend verification failed to invoke, events are hidden, or UI state is disconnected.
+ON = real verification + typed verification evidence.
+OFF = no unnecessary duplicate verification.
+AUTO/adaptive = truthful actual mode.
+Tests: known-answer, verifier catches wrong candidate, no duplicate final.
+
+QA11 PROJECT BINDING
+Project persists but model/agent does not actually see/use it. Project creation had no path.
+Chat bound to project must inject real project identity/root into agent/tool layer; cwd/path resolution project-scoped.
+Creation must support coherent root semantics: existing path, entered path, or managed directory; do not silently create a useless named shell.
+Show project root in project details.
+Tests: bound agent reads known project file without full path; switch project changes context; reopen persists; no cross-project leakage.
+
+QA12 EMPTY CHAT + GLOBAL STOP LEAK + BACKGROUND STATUS
+Untouched New Chat is saved. If another chat has a running agent, fresh empty chat incorrectly shows Stop. Sidebar does not show which other chat is running.
+Fix with authoritative per-chat/per-session/per-turn state, NOT one global running boolean.
+Untouched empty draft should not persist.
+Chat A running -> Chat B shows Send, not Stop.
+Sidebar/history marks A running/progress.
+Switching away does not cancel A.
+Returning restores live activity.
+Cancel A affects only A.
+Add regression tests for all of these.
+
+QA13 MODEL SELECTOR LATENCY
+Works but delayed.
+Cache lightweight metadata; no full integration audit every open; lazy heavy details; invalidation when backend changes.
+Repeated open/close responsive.
+
+QA14 ANDROID BACK
+System Back must:
+1 close top modal/dropdown
+2 close plus sheet
+3 settings/detail -> previous app screen
+4 close sidebar
+5 only then app/browser exit behavior
+Use proper Android OnBackPressed/WebView navigation. Avoid duplicate browser history.
+Tests for settings, modal, sidebar, repeated Back.
+
+QA15-18 SWARM
+Current swarm is mainly goal field + start, currently unreliable, and running state leaks into other chats.
+User-facing modes:
+OFF = single agent only
+AUTO = agent may escalate to swarm only when marginal value/parallelizable work justifies
+ON = swarm allowed/requested, but scheduler still chooses minimum useful workers
+Manual “start swarm with goal” may remain advanced, not sole entry point.
+Repair real APK -> bridge -> /mod/swarm wiring first.
+Per-chat swarm state; live orchestrator/tasks/workers/progress/evidence/cost; read-back; persistence; cancellation terminal state; no stale global Stop.
+Tests: mock/local 2-worker, read-back, persist, cancel->cancelled, chat isolation, AUTO trivial task stays single agent.
+Avoid expensive real multi-agent testing tonight.
+
+QA19 BACKEND RECONNECT / POSSIBLE FALSE PASS
+Backend process/session was killed, but Connect made app work again.
+Determine whether intended supervisor recovery, another supervisor, APK reconnect/autostart, or stale UI.
+Inventory process ownership. Connection indicator must be fresh authenticated probe, not cached.
+Create deterministic disconnect test with autorestart explicitly disabled, prove disconnected UI; then re-enable recovery and prove reconnect. Do not call PASS until evidence explains behavior.
+
+QA20 REOPEN/PERSISTENCE
+PASS. Preserve.
+
+QA21 BACKGROUND
+Response completes but reconnect/delay exists.
+Reduce background rendering; rehydrate on resume without duplicate messages.
+
+QA22 KEYBOARD
+PASS. Preserve.
+
+QA23 LARGE INPUT FREEZE
+Multi-kilobyte paste can hang.
+Profile input path. Avoid whole-chat rerender/markdown/persistence per keystroke.
+Debounce draft persistence; batch resize/layout; paste as one update; avoid O(n^2) operations.
+If a real backend limit exists, validate truthfully instead of freezing.
+Tests: multi-kilobyte paste, repeated edit, send remains usable.
+
+QA24 RAPID INTERACTION
+Mostly OK but latency remains.
+Atomic submission/dedupe; no arbitrary long debounce.
+
+QA25 VOICE
+Works. Polish in a lightweight ChatGPT-like way: idle/listening/transcribing/cancel/error states, compact mic animation, permission handling. No heavy continuous animation. Preserve functionality.
+
+QA26 ORIENTATION
+PASS. Preserve.
+
+QA27 LONG CHAT / HEAT / PERFORMANCE
+Implement mobile-first bounded architecture:
+Frontend:
+- virtualized/bounded message and activity rendering
+- pagination/lazy history
+- lazy markdown/offscreen details
+- batch activity event UI updates roughly 100-250ms while user input/send remains immediate
+- never rerender entire transcript for one event
+- bounded LRU/cache
+- compact old activity
+- large tool output preview
+- debounced persistence
+- avoid heavy blur/continuous animation
+- clean subscriptions/listeners when switching chats
+- background view reduces rendering and catches up on resume
+Backend:
+- bounded event buffers
+- streaming/chunk handling where useful
+- project index/state reuse
+- no repeated full-project scans when unchanged
+- compact persisted snapshots
+- bounded local heavy-task concurrency
+
+TARGET ARCHITECTURE TO PRESERVE / BUILD FOUNDATIONS FOR
+
+1. POWER BALANCE ENGINE
+Modes: FAST | MEDIUM | HIGH; work modes also VERY_HIGH | MAXIMUM.
+Speed: 1x | 2x.
+Modes define limits/strategy, not fixed worker counts.
+2x increases useful concurrency when safe; it never simply doubles spend.
+Decision factors: expected quality gain, API cost/tokens, latency, CPU/RAM, thermal/battery/background state, conflict/verification cost, hard budget.
+
+2. ADAPTIVE SWARM ENGINE
+Goal -> estimate -> cheapest sufficient plan -> dynamic DAG -> workers -> evidence -> verification -> merge -> early stop.
+Start with minimum workers; spawn only on positive marginal value; shrink as tasks finish.
+Context Capsules, Shared Evidence Graph, work dedupe, write ownership/conflict control, adaptive verification, bounded hierarchy only if justified, first-class cancellation/persistence/recovery.
+Worker “done” is not global PASS; evidence gates verification.
+
+3. MULTI-KEY / MULTI-PROVIDER RESOURCE FABRIC
+Target:
+Agent mode normally one credential slot.
+Swarm may have 2..1000+ REGISTERED credential slots.
+IMPORTANT: registered credentials != workers != active provider concurrency != local heavy-task concurrency.
+Central credential vault; workers receive logical slots, never raw secrets.
+Metadata can include provider/account identity/models/budget/rate limits/latency/health/cooldown/workload permissions.
+Global budget -> swarm -> task -> worker/credential allowance; unused allowance returns.
+Respect provider/account-level restrictions and rate limits; never use key pools to bypass limits.
+Generic provider abstraction, not hardcoded to DeepSeek/Kimi.
+Tonight do NOT fake “1000 keys”. If missing, implement minimal typed interfaces/state/tests and document remaining work.
+
+4. MOBILE RESOURCE GOVERNOR
+Separate remote reasoning concurrency from local heavy work.
+Default one heavy local operation; higher power modes may allow more only when resources permit.
+Thermal/RAM pressure should reduce local work first; background reduces rendering.
+Add clean hooks/interfaces for Android thermal/memory signals if full device signal integration is not yet safe.
+No thermal PASS without real device evidence.
+
+5. INCREMENTAL PROJECT INTELLIGENCE
+Project map/index foundation: path, size, hash, type/language, relevant symbols/dependencies/change state where practical.
+Use git diff/hash/change data to avoid rereading/reindexing unchanged project.
+Project map -> relevant files -> relevant chunks -> Context Capsule.
+Add reuse tests.
+
+IMPLEMENTATION ORDER
+0 SNAPSHOT
+Read existing final reports/source lineage. Record git status/commit/APK source/backend/frontend paths and baseline tests. Do not clean user work. Identify exact v3.0.0 source used for current APK.
+Create QA -> owning layer -> reproduction/evidence table.
+
+1 ROOT-CAUSE REPRODUCTION priority:
+a per-chat running state/empty chat
+b dead Rounds/Verification/System Prompt/plus
+c project context
+d swarm
+e large input/long chat performance
+f activity timeline
+g reasoning/masking
+h Android Back
+i selector/plus latency
+j message actions/voice polish
+
+2 STATE MODEL
+One authoritative per-chat/per-turn state for submission/running/cancel, agent/swarm, project, ordered activity, background status.
+
+3 REAL CONTROL WIRING
+Rounds, Verification, System Prompt, Swarm OFF/AUTO/ON end-to-end with backend read-back. Remove dead decorative state.
+
+4 PROJECT CONTEXT
+Fix root semantics + injection.
+
+5 SWARM
+Repair current swarm, then adaptive typed foundations. Do not rewrite working backend just to rename it.
+
+6 PERFORMANCE
+Bounded/virtualized chat+activity, input optimization, event batching, subscription/cache cleanup, backend bounds. Add synthetic stress tests.
+
+7 UX
+Android Back, Retry, truthful web-search action, voice polish, touch targets, responsive selectors.
+
+8 REGRESSION + BUILD
+Targeted tests first.
+Then JS syntax/type checks, state/event reducer tests, bridge/API tests, swarm mock tests, project tests, approval/budget regressions, targeted Go tests, full go test ./... ONCE near final, signed APK build, signature lineage verify, dead-control scan, artifact hash.
+Do not rerun heavy suite after every edit.
+
+REQUIRED PERFORMANCE TESTS
+Where feasible create reproducible synthetic tests:
+- 500+ chat messages with bounded rendered window/DOM
+- thousands of activity events with bounded/compacted rendering
+- multi-kilobyte composer paste/edit
+- rapid chat switching while another chat runs
+- duplicate event/send protection
+- repeated plus/model selector open without expensive repeated fetches
+Report measurements/evidence, not “feels faster”.
+
+PASS GATE
+A QA item is PASS only when:
+1 root cause identified or behavior proven expected,
+2 fixed at owning layer,
+3 positive test,
+4 negative/regression test where applicable,
+5 evidence captured,
+6 no known contradiction.
+Physical Android-only = READY_FOR_DEVICE_TEST.
+
+FINAL APK
+Build update-compatible patch:
+`/sdcard/Download/Reasonix-Mobile-v3.0.1-NIGHT.apk`
+Preserve package/signing lineage. Create device bundle if established process does.
+
+FINAL REPORT
+Write:
+`/root/DeepSeek-Reasonix/docs/REASONIX_3_NIGHT_QA_FIX_FINAL_REPORT.md`
+Include:
+- baseline commit/source
+- root cause per QA item
+- files changed
+- state/architecture changes
+- exact test commands/results
+- performance evidence
+- backend/swarm/project/approval/budget evidence
+- APK path/size/SHA256/signature lineage
+- PASS / READY_FOR_DEVICE_TEST / BLOCKED matrix
+- intentionally deferred architecture with exact contracts
+- shortest morning manual checklist
+- NEXT_SINGLE_ACTION
+
+STOP
+Stop when locally provable gates are green and APK/report exist, or when blocked on device/credentials.
+Never retry unchanged paid failures.
+Never hide regressions.
+F. DEVELOPER TOOL / SKILL / PLUGIN FABRIC — EXPAND REASONIX AS A REAL ANDROID ENGINEERING AGENT
+
+GOAL
+Reasonix must not be limited to chat + a few file tools. Build a capability layer where a developer agent can discover, select, invoke, observe, and verify real engineering tools without hardcoding each workflow into the UI.
+
+CORE RULE
+TOOLS ARE CAPABILITIES, NOT DECORATIVE BUTTONS.
+A capability is “available” only if:
+1. the executable/plugin/skill is actually present,
+2. a health/self-test passes,
+3. the required permission/connection exists,
+4. Reasonix can invoke it through the real tool layer,
+5. the result/evidence is returned into the ordered Activity Timeline.
+
+CAPABILITY REGISTRY
+Create/extend a typed registry describing each capability:
+- id
+- category
+- executable/provider/plugin/skill source
+- version
+- availability
+- health
+- required permissions
+- required connection/device state
+- read-only vs mutation
+- estimated local resource cost
+- estimated latency
+- concurrency class
+- approval policy
+- input/output schema
+- evidence type
+- failure reason
+- last health-check timestamp
+
+The agent must query this registry rather than guessing what tools exist.
+
+ANDROID ENGINEERING CAPABILITIES
+Where already installed and working, expose them through the real tool layer:
+- java / javac
+- Android aapt / aapt2
+- apksigner
+- zipalign
+- d8
+- r8 if actually available
+- adb
+- keytool
+- Go toolchain
+- shell/terminal
+- git
+- package/build scripts already present in the Reasonix environment
+- APK verification helpers already created for this project
+
+Do NOT download a huge Android SDK/toolchain blindly during this night pass.
+First inventory the existing toolchain, reuse current wrappers, and only add missing lightweight integration code where justified.
+
+APK WORKFLOW CAPABILITY
+Reasonix developer mode should be able to represent a full verifiable APK pipeline as structured tool activity:
+
+source change
+-> targeted tests
+-> compile/build
+-> package
+-> zipalign
+-> sign
+-> signature verification
+-> APK metadata inspection
+-> copy/export artifact
+-> optional install
+-> optional launch
+-> optional device validation
+-> final evidence
+
+Each stage must appear as a distinct Activity node with command summary, exit state, relevant output, artifact path, and verification evidence.
+
+ADB / DEVICE CAPABILITY
+If ADB is truly connected and authorized, expose safe developer workflows such as:
+- adb devices/status
+- install/update APK
+- launch Activity
+- stop/restart app
+- logcat capture/filter
+- dumpsys inspection
+- package/activity inspection
+- screencap
+- UI hierarchy inspection via available Android mechanisms
+- controlled input/tap/text only for explicit QA/device automation flows
+- app data/state inspection only where current permissions allow
+
+IMPORTANT:
+- ADB installed != device connected.
+- USB debugging enabled != ADB authorized.
+- Never mark device automation PASS because `adb` binary exists.
+- If no real ADB connection exists, report DEVICE_CONNECTION_REQUIRED / READY_FOR_DEVICE_TEST.
+- Do not create fake UI automation screenshots/results.
+- Do not weaken Android security or bypass user authorization to obtain ADB access.
+
+UI AUTOMATION FOUNDATION
+If the current device connection and Android tooling support it, create a lightweight Device QA adapter that can:
+- launch current APK
+- wait for target package/activity
+- capture screenshot
+- inspect visible UI hierarchy
+- perform explicit scripted QA actions
+- capture logcat around failures
+- return evidence references to Reasonix
+
+Keep this adapter modular. It must not be required for ordinary Reasonix chat operation.
+
+TERMINAL CAPABILITY
+The agent should be able to perform real project-terminal workflows through structured tools instead of emitting copy-paste shell text when execution permission exists.
+Requirements:
+- explicit working directory
+- bounded timeout
+- bounded output
+- cancellation
+- exit code
+- stdout/stderr separation or clearly tagged output
+- approval classification for mutations/destructive commands
+- no duplicate execution after UI retry/reconnect
+- activity evidence
+- resource-cost classification so Mobile Resource Governor can serialize heavy tasks
+
+SKILLS
+Expand Skills from static labels into typed reusable workflow modules.
+A Skill may define:
+- purpose
+- preconditions
+- allowed tools
+- deterministic steps/checkpoints
+- verification gates
+- recovery strategy
+- resource profile
+- expected artifacts
+- supported project types
+
+Examples that may be implemented or represented if supported by existing project infrastructure:
+- Android APK Build
+- Android APK Verify
+- Android Device Smoke Test
+- Go Targeted Test
+- Go Full Release Gate
+- Backend Diagnose
+- Reasonix Bridge Probe
+- Project Index Refresh
+- Git Change Audit
+- Swarm Regression Gate
+- Performance Stress Gate
+
+Skills must call real underlying tools. A Skill must never return PASS solely because its script started.
+
+PLUGINS / MCP
+Create/extend a generic plugin/MCP capability boundary:
+- discovery
+- manifest/schema
+- enable/disable
+- health
+- permissions
+- invocation
+- timeout/cancel
+- typed result
+- evidence
+- per-project policy
+- resource/budget metadata
+
+The architecture must not special-case only current plugins.
+A plugin that is unavailable/disconnected must be shown as unavailable, not silently ignored.
+
+TOOL ROUTER
+Add a Tool Capability Router integrated with Power Balance Engine.
+Given a required operation, select the cheapest sufficient route:
+example:
+inspect APK
+-> use local metadata tool
+NOT
+-> launch emulator/device unnecessarily
+
+example:
+validate JavaScript syntax
+-> local parser/check
+NOT
+-> rebuild/reinstall full APK
+
+example:
+UI-only device bug
+-> if ADB/device QA available, reproduce + capture evidence
+-> otherwise READY_FOR_DEVICE_TEST
+NOT
+-> spend provider tokens pretending to observe device UI
+
+TOOL DEDUPLICATION / CACHE
+- Same read-only command against same project state/hash may be reused.
+- Same file read/hash/index request may be reused.
+- Same APK verification result may be reused while artifact hash is unchanged.
+- Same heavy build must not be launched concurrently by multiple workers.
+- Cache must be invalidated by relevant input/artifact hash changes.
+- Mutation commands are never replayed from cache.
+
+TOOL RESOURCE CLASSES
+Classify local operations, for example:
+LIGHT:
+- grep
+- stat
+- small file read
+- git status
+- metadata query
+
+MEDIUM:
+- targeted tests
+- indexing changed files
+- moderate archive work
+
+HEAVY:
+- full Go test suite
+- APK build
+- large indexing
+- compression
+- device-wide log processing
+
+Mobile Resource Governor must serialize or bound HEAVY operations, especially on Android.
+
+AGENT / SWARM TOOL OWNERSHIP
+For Swarm:
+- workers receive only tools required for their task
+- write/mutation ownership is explicit
+- two workers cannot silently mutate the same file concurrently
+- shared read-only evidence can be reused
+- heavy local tools use a central queue
+- raw API credentials are never exposed to workers
+- tool permissions are scoped per worker/task
+- orchestrator sees structured tool outcomes/evidence, not enormous raw transcripts
+
+DEVELOPER MODE UX
+Do not clutter normal Chat mode.
+In Agent/Developer context, provide compact capability access:
+- Tools
+- Skills
+- Plugins/MCP
+- Device
+- Build
+Each opens a lightweight searchable list/status panel.
+Normal users should not see dozens of dead engineering buttons.
+Unavailable capabilities are hidden by default or clearly marked unavailable in an advanced view.
+
+ACTIVITY TIMELINE INTEGRATION
+Every tool/skill/plugin/device/build operation must enter the same ordered Turn Activity Timeline:
+Agent plan
+-> Skill (if used)
+-> Tool command
+-> output/evidence
+-> next tool
+-> verification
+-> final result
+
+A Skill may contain nested tool nodes.
+A retry must be nested under the failed operation.
+Do not duplicate the same operation once under “Tool”, again under “Skill”, and again under generic “Agent work”.
+
+FAILURE TAXONOMY
+Normalize failures:
+- TOOL_NOT_INSTALLED
+- TOOL_UNHEALTHY
+- PERMISSION_REQUIRED
+- DEVICE_NOT_CONNECTED
+- DEVICE_NOT_AUTHORIZED
+- TIMEOUT
+- CANCELLED
+- RATE_LIMITED
+- BUILD_FAILED
+- TEST_FAILED
+- INVALID_INPUT
+- POLICY_DENIED
+- RESOURCE_PRESSURE
+- ARTIFACT_STALE
+- UNKNOWN
+
+Failure must propagate correctly to Skill/Task/Swarm status.
+Do not collapse all failures into generic “tool failed”.
+
+NIGHT-PASS SCOPE CONTROL
+This section is important, but do not let it derail the current QA repair.
+Tonight:
+1. inventory the current developer toolchain and wrappers,
+2. identify existing tool/skill/plugin abstractions,
+3. fix/extend the capability registry and Activity integration where reasonably contained,
+4. wire existing Android build/verify tools into a structured developer capability if practical,
+5. add honest ADB/device availability detection,
+6. add tests for capability discovery/health/state,
+7. document the remaining larger Developer Tool Fabric implementation if it is too broad for a safe patch.
+
+Do NOT spend the whole night installing unrelated packages or rewriting the entire tool system.
+Current user-visible QA regressions remain higher priority.
+
+ADDITIONAL PASS GATES FOR TOOL FABRIC
+- No capability is reported available when its real dependency is absent.
+- Tool health result is distinguishable from executable existence.
+- ADB disconnected state is truthful.
+- Existing APK build/verify pipeline can be represented with structured evidence.
+- Mutating commands respect approval mode.
+- Heavy operations respect central concurrency/resource limits.
+- Duplicate read-only work can be reused without replaying mutations.
+- Tool/Skill/Plugin events render in correct chronological nesting.
+- No secret/API key is exposed in worker context, UI, logs, or report.

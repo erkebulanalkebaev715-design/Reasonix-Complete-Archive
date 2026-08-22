@@ -1,0 +1,12 @@
+{
+  "id": "20260818-190722.612837038-deepseek-v4-flash",
+  "created_at": "2026-08-18T19:09:44.178474629Z",
+  "updated_at": "2026-08-19T09:06:40.845005527Z",
+  "model": "custom-api-deepseek-com/deepseek-v4-flash",
+  "revision": 26,
+  "content_digest": "7e9451f8b138b1b30141d6f0a4d4bae10b75ccd34e76d34609a9ad8b2da11fc7",
+  "writer_id": "localhost-22713-130c97da31051bd4",
+  "schema_version": 2,
+  "turns": 18,
+  "preview": "Ответь одним словом: РАБОТАЕТ\n\n[AUTONOMY]\nРаботай автономно в пределах уже вы…"
+}

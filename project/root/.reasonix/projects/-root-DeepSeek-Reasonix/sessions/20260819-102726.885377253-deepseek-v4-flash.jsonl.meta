@@ -1,0 +1,12 @@
+{
+  "id": "20260819-102726.885377253-deepseek-v4-flash",
+  "created_at": "2026-08-19T10:39:27.397062353Z",
+  "updated_at": "2026-08-19T10:39:30.806081274Z",
+  "model": "custom-api-deepseek-com/deepseek-v4-flash",
+  "revision": 1,
+  "content_digest": "1d2281075256d69afdff9817fdabcb61ad716ad0452a24259d2f6b2284b4457e",
+  "writer_id": "localhost-23783-fd4dc318b500348b",
+  "schema_version": 2,
+  "turns": 1,
+  "preview": "Коч братан"
+}

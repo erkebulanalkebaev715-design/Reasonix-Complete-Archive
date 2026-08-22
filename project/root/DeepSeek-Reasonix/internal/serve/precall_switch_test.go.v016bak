@@ -1,0 +1,108 @@
+package serve
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+
+	"reasonix/internal/billing"
+	"reasonix/internal/config"
+	"reasonix/internal/control"
+	"reasonix/internal/efficiency"
+	"reasonix/internal/provider"
+)
+
+type titleBudgetProbeProvider struct{ calls atomic.Int32 }
+
+func (p *titleBudgetProbeProvider) Name() string { return "title-budget-probe" }
+func (p *titleBudgetProbeProvider) Stream(context.Context, provider.Request) (<-chan provider.Chunk, error) {
+	p.calls.Add(1)
+	ch := make(chan provider.Chunk)
+	close(ch)
+	return ch, nil
+}
+
+func TestHardBudgetSkipsCosmeticTitleProvider(t *testing.T) {
+	bc := NewBroadcaster()
+	ctrl := control.New(control.Options{Sink: bc, ModelRef: "mock/flash"})
+	s := New(ctrl, bc, config.ServeConfig{})
+	defer s.ctl().Close()
+	probe := &titleBudgetProbeProvider{}
+	s.titleProv = probe
+	s.modGov.Configure(efficiency.BudgetConfig{BudgetKZT: 100, HardStop: true, FXKZTPerUnit: map[string]float64{"KZT": 1}})
+	if got := s.generateTitle(context.Background(), "real task"); got != "" {
+		t.Fatalf("title = %q, want fallback under hard budget", got)
+	}
+	if calls := probe.calls.Load(); calls != 0 {
+		t.Fatalf("title provider calls = %d, want 0", calls)
+	}
+}
+
+func TestHardPreCallBudgetSurvivesNativeModelSwitch(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.WriteFile(filepath.Join(root, "reasonix.toml"), []byte(`
+default_model = "mock/flash-a"
+
+[[providers]]
+name = "mock"
+kind = "mock"
+models = ["flash-a", "flash-b"]
+default = "flash-a"
+base_url = "http://127.0.0.1"
+billing_currency = "CNY"
+price = { cache_hit = 0.02, input = 1, output = 2, currency = "CNY" }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	bc := NewBroadcaster()
+	dir := t.TempDir()
+	ctrl := control.New(control.Options{Sink: bc, ModelRef: "mock/flash-a", SessionDir: dir})
+	s := New(ctrl, bc, config.ServeConfig{})
+	defer func() { s.ctl().Close() }()
+
+	s.modGov.Configure(efficiency.BudgetConfig{
+		BudgetKZT:      1000,
+		ReservePercent: 15,
+		ProMaxPercent:  25,
+		HardStop:       true,
+		FXKZTPerUnit:   map[string]float64{"CNY": 70},
+	})
+	gate := s.applyModTaskCostBudget()
+	if !gate.Applied || !gate.PreCall {
+		t.Fatalf("initial task gate = %+v", gate)
+	}
+	if !ctrl.StrictPreCallBudget() {
+		t.Fatal("initial controller lost strict pre-call budget")
+	}
+	initialLimit := gate.ProviderLimit
+	s.modGov.ObserveQuote(&billing.CostQuote{
+		Original:     billing.Money{Amount: "1", Currency: "CNY"},
+		CostComplete: true,
+		ModelRef:     "mock/flash-a",
+	}, "mock/flash-a")
+
+	s.buildController = func(_ context.Context, ref string) (*control.Controller, error) {
+		return control.New(control.Options{Sink: bc, ModelRef: ref, SessionDir: dir}), nil
+	}
+	if err := s.switchModel(context.Background(), "mock/flash-b"); err != nil {
+		t.Fatalf("switch model: %v", err)
+	}
+	got, ok := s.ctl().(*control.Controller)
+	if !ok {
+		t.Fatalf("replacement controller type = %T", s.ctl())
+	}
+	if !got.StrictPreCallBudget() {
+		t.Fatal("strict pre-call budget was not restored after model switch")
+	}
+	gate = s.modTaskGateSnapshot()
+	if !gate.Applied || !gate.PreCall || gate.Currency != "CNY" {
+		t.Fatalf("post-switch task gate = %+v", gate)
+	}
+	if gate.ProviderLimit >= initialLimit {
+		t.Fatalf("model switch re-granted spent money: initial=%v post=%v", initialLimit, gate.ProviderLimit)
+	}
+}

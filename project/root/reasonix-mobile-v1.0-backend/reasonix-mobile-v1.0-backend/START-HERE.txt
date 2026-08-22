@@ -1,0 +1,33 @@
+REASONIX MOBILE 1.0 — PHONE BACKEND
+
+1) Keep this folder inside Debian/PRoot.
+2) Start:
+   bash reasonix_mobile_backend.sh start
+
+3) Check:
+   bash reasonix_mobile_backend.sh status
+
+4) Show the local APK connection token:
+   bash reasonix_mobile_backend.sh token
+
+5) In Reasonix Mobile APK:
+   Settings -> Base URL: http://127.0.0.1:37914
+   Settings -> Serve token: paste output from step 4
+   -> Connect
+
+Useful:
+   bash reasonix_mobile_backend.sh log
+   bash reasonix_mobile_backend.sh restart
+   bash reasonix_mobile_backend.sh stop
+
+Defaults expect:
+   Reasonix root: ~/DeepSeek-Reasonix
+   Reasonix binary: ~/DeepSeek-Reasonix/bin/reasonix
+   Model: custom-api-deepseek-com/deepseek-v4-flash
+
+Optional overrides before start/restart:
+   REASONIX_ROOT=/path/to/repo
+   REASONIX_BIN=/path/to/reasonix
+   REASONIX_MOBILE_MODEL=provider/model
+
+The APK does not start Debian/PRoot itself in v1.0. Start this backend after entering Debian.

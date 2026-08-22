@@ -1,0 +1,516 @@
+diff --git a/internal/efficiency/quality.go b/internal/efficiency/quality.go
+new file mode 100644
+index 0000000..6533ad3
+--- /dev/null
++++ b/internal/efficiency/quality.go
+@@ -0,0 +1,164 @@
++package efficiency
++
++import (
++	"sync"
++	"time"
++
++	"reasonix/internal/event"
++)
++
++// QualitySnapshot is content-free Balance Mod state for the APK. It mirrors
++// host-owned progress/readiness signals instead of asking the model whether it
++// thinks the task is complete.
++type QualitySnapshot struct {
++	State             string   `json:"state"`
++	Phase             string   `json:"phase,omitempty"`
++	LoopGuardHits     int      `json:"loopGuardHits"`
++	ProgressGuardHits int      `json:"progressGuardHits"`
++	EvidenceNudges    int      `json:"evidenceNudges"`
++	ReadinessBlocks   int      `json:"readinessBlocks"`
++	TurnsPassed       int      `json:"turnsPassed"`
++	TurnsFailed       int      `json:"turnsFailed"`
++	CompletionVerdict string   `json:"completionVerdict,omitempty"`
++	ChecksPassed      int      `json:"checksPassed"`
++	ChecksFailed      int      `json:"checksFailed"`
++	Review            string   `json:"review,omitempty"`
++	Missing           []string `json:"missing,omitempty"`
++	UpdatedAtUnixMS   int64    `json:"updatedAtUnixMs"`
++}
++
++// QualitySignal is a machine event emitted to the Balance Mod SSE stream.
++type QualitySignal struct {
++	Type string
++	Data any
++}
++
++// QualityMonitor consumes Reasonix's existing host-owned guards and completion
++// receipts. It does not duplicate those mechanisms or infer truth from model
++// prose; the authoritative gate remains Reasonix final-readiness/evidence.
++type QualityMonitor struct {
++	mu   sync.Mutex
++	snap QualitySnapshot
++}
++
++func NewQualityMonitor() *QualityMonitor {
++	return &QualityMonitor{snap: QualitySnapshot{State: "idle"}}
++}
++
++func (m *QualityMonitor) Snapshot() QualitySnapshot {
++	if m == nil {
++		return QualitySnapshot{}
++	}
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	return cloneQualitySnapshot(m.snap)
++}
++
++func cloneQualitySnapshot(in QualitySnapshot) QualitySnapshot {
++	out := in
++	out.Missing = append([]string(nil), in.Missing...)
++	return out
++}
++
++// Observe folds one core event into APK-facing state and returns zero or more
++// typed signals. Only content-free event metadata is copied.
++func (m *QualityMonitor) Observe(e event.Event) (QualitySnapshot, []QualitySignal) {
++	if m == nil {
++		return QualitySnapshot{}, nil
++	}
++	m.mu.Lock()
++	defer m.mu.Unlock()
++
++	var signals []QualitySignal
++	touch := false
++
++	switch e.Kind {
++	case event.TurnStarted:
++		m.snap.State = "working"
++		m.snap.Phase = "working"
++		m.snap.CompletionVerdict = ""
++		m.snap.ChecksPassed = 0
++		m.snap.ChecksFailed = 0
++		m.snap.Review = ""
++		m.snap.Missing = nil
++		signals = append(signals, QualitySignal{Type: "task.turn_started"})
++		touch = true
++
++	case event.TurnPhase:
++		if e.PhaseName != "" {
++			m.snap.Phase = string(e.PhaseName)
++			m.snap.State = string(e.PhaseName)
++			signals = append(signals, QualitySignal{Type: "phase.changed", Data: map[string]any{"phase": m.snap.Phase}})
++			touch = true
++		}
++
++	case event.Notice:
++		switch e.Code {
++		case event.NoticeCodeLoopGuard:
++			m.snap.LoopGuardHits++
++			m.snap.State = "replanning"
++			signals = append(signals, QualitySignal{Type: "loop.detected", Data: map[string]any{"count": m.snap.LoopGuardHits}})
++			touch = true
++		case event.NoticeCodeProgressGuard:
++			m.snap.ProgressGuardHits++
++			m.snap.State = "stalled"
++			signals = append(signals, QualitySignal{Type: "progress.stalled", Data: map[string]any{"count": m.snap.ProgressGuardHits}})
++			touch = true
++		case event.NoticeCodeEvidenceNudge:
++			m.snap.EvidenceNudges++
++			m.snap.State = "needs_evidence"
++			signals = append(signals, QualitySignal{Type: "verifier.evidence_required", Data: map[string]any{"count": m.snap.EvidenceNudges}})
++			touch = true
++		}
++
++	case event.CompletionSummary:
++		if e.Completion != nil {
++			m.snap.CompletionVerdict = e.Completion.Verdict
++			m.snap.ChecksPassed = e.Completion.ChecksPassed
++			m.snap.ChecksFailed = e.Completion.ChecksFailed
++			m.snap.Review = e.Completion.Review
++			data := map[string]any{
++				"verdict":      m.snap.CompletionVerdict,
++				"checksPassed": m.snap.ChecksPassed,
++				"checksFailed": m.snap.ChecksFailed,
++				"review":       m.snap.Review,
++			}
++			signals = append(signals, QualitySignal{Type: "completion.summary", Data: data})
++			if m.snap.ChecksFailed > 0 {
++				signals = append(signals, QualitySignal{Type: "verifier.failed", Data: data})
++			} else if m.snap.ChecksPassed > 0 {
++				signals = append(signals, QualitySignal{Type: "verifier.passed", Data: data})
++			}
++			touch = true
++		}
++
++	case event.TurnDone:
++		if e.Outcome == event.TurnOutcomeFinalReadiness {
++			m.snap.ReadinessBlocks++
++			m.snap.State = "blocked"
++			m.snap.Missing = nil
++			if e.Readiness != nil {
++				m.snap.Missing = append([]string(nil), e.Readiness.Missing...)
++			}
++			signals = append(signals, QualitySignal{Type: "completion.blocked", Data: map[string]any{
++				"count":   m.snap.ReadinessBlocks,
++				"missing": append([]string(nil), m.snap.Missing...),
++			}})
++		} else if e.Err != nil {
++			m.snap.TurnsFailed++
++			m.snap.State = "failed"
++			signals = append(signals, QualitySignal{Type: "task.failed", Data: map[string]any{"count": m.snap.TurnsFailed}})
++		} else {
++			m.snap.TurnsPassed++
++			m.snap.State = "done"
++			m.snap.Missing = nil
++			signals = append(signals, QualitySignal{Type: "completion.allowed", Data: map[string]any{"count": m.snap.TurnsPassed}})
++		}
++		touch = true
++	}
++
++	if touch {
++		m.snap.UpdatedAtUnixMS = time.Now().UnixMilli()
++	}
++	return cloneQualitySnapshot(m.snap), signals
++}
+diff --git a/internal/efficiency/quality_test.go b/internal/efficiency/quality_test.go
+new file mode 100644
+index 0000000..7144231
+--- /dev/null
++++ b/internal/efficiency/quality_test.go
+@@ -0,0 +1,51 @@
++package efficiency
++
++import (
++	"errors"
++	"testing"
++
++	"reasonix/internal/event"
++)
++
++func TestQualityMonitorMirrorsHostGuardsAndCompletion(t *testing.T) {
++	m := NewQualityMonitor()
++	m.Observe(event.Event{Kind: event.TurnStarted})
++	m.Observe(event.Event{Kind: event.Notice, Code: event.NoticeCodeLoopGuard})
++	m.Observe(event.Event{Kind: event.Notice, Code: event.NoticeCodeProgressGuard})
++	m.Observe(event.Event{Kind: event.Notice, Code: event.NoticeCodeEvidenceNudge})
++	m.Observe(event.Event{Kind: event.CompletionSummary, Completion: &event.CompletionSummaryInfo{
++		Verdict: "continue", ChecksPassed: 2, ChecksFailed: 1, Review: "warned",
++	}})
++
++	snap, signals := m.Observe(event.Event{
++		Kind: event.TurnDone, Outcome: event.TurnOutcomeFinalReadiness,
++		Readiness: &event.FinalReadiness{Attempts: 1, Missing: []string{"verification"}},
++	})
++	if snap.State != "blocked" || snap.LoopGuardHits != 1 || snap.ProgressGuardHits != 1 || snap.EvidenceNudges != 1 || snap.ReadinessBlocks != 1 {
++		t.Fatalf("snapshot = %+v", snap)
++	}
++	if len(snap.Missing) != 1 || snap.Missing[0] != "verification" {
++		t.Fatalf("missing = %#v", snap.Missing)
++	}
++	found := false
++	for _, sig := range signals {
++		if sig.Type == "completion.blocked" {
++			found = true
++		}
++	}
++	if !found {
++		t.Fatalf("signals = %#v, want completion.blocked", signals)
++	}
++}
++
++func TestQualityMonitorPassAndFailure(t *testing.T) {
++	m := NewQualityMonitor()
++	snap, _ := m.Observe(event.Event{Kind: event.TurnDone})
++	if snap.State != "done" || snap.TurnsPassed != 1 {
++		t.Fatalf("pass snapshot = %+v", snap)
++	}
++	snap, _ = m.Observe(event.Event{Kind: event.TurnDone, Err: errors.New("boom")})
++	if snap.State != "failed" || snap.TurnsFailed != 1 {
++		t.Fatalf("failure snapshot = %+v", snap)
++	}
++}
+diff --git a/internal/provider/mock/mock.go b/internal/provider/mock/mock.go
+index 00c68fb..ffa74e9 100644
+--- a/internal/provider/mock/mock.go
++++ b/internal/provider/mock/mock.go
+@@ -79,6 +79,15 @@ func (p *mockProvider) Stream(ctx context.Context, req provider.Request) (<-chan
+ 		calledTool := false
+ 		switch p.scenario {
+ 		case "repeat-failure":
++			// Keep repeating the same failing read until Reasonix's native loop
++			// guard injects a change-approach instruction. The mock then stops,
++			// proving the host intervention reached the provider-visible history.
++			if messagesContain(req.Messages, "[loop guard]") {
++				if !emit(provider.Chunk{Type: provider.ChunkText, Text: "OFFLINE_LOOP_GUARD_PASS"}) {
++					return
++				}
++				break
++			}
+ 			path := p.path
+ 			if path == "hello.py" {
+ 				path = "__balance_mod_missing__.txt"
+@@ -196,3 +205,12 @@ func extraString(extra map[string]any, key string) string {
+ 	v, _ := extra[key].(string)
+ 	return strings.TrimSpace(v)
+ }
++
++func messagesContain(messages []provider.Message, needle string) bool {
++	for _, m := range messages {
++		if strings.Contains(m.Content, needle) {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/internal/provider/mock/mock_test.go b/internal/provider/mock/mock_test.go
+index bef90f2..eef4d10 100644
+--- a/internal/provider/mock/mock_test.go
++++ b/internal/provider/mock/mock_test.go
+@@ -54,3 +54,17 @@ func TestRepeatFailureAlwaysRequestsMissingRead(t *testing.T) {
+ 		t.Fatalf("chunks = %#v", chunks)
+ 	}
+ }
++
++func TestRepeatFailureStopsAfterLoopGuardInstruction(t *testing.T) {
++	p, err := New(provider.Config{Name: "mock", Extra: map[string]any{"scenario": "repeat-failure"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	chunks := collect(t, p, provider.Request{
++		Tools:    []provider.ToolSchema{{Name: "read_file"}},
++		Messages: []provider.Message{{Role: provider.RoleUser, Content: "[loop guard] Change approach now."}},
++	})
++	if len(chunks) == 0 || chunks[0].Type != provider.ChunkText || chunks[0].Text != "OFFLINE_LOOP_GUARD_PASS" {
++		t.Fatalf("chunks = %#v", chunks)
++	}
++}
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index b5ed5d9..b4fa227 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -14,7 +14,7 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.1"
++const balanceModVersion = "balance-mod-v0.2"
+ 
+ // modEvent is a small, content-free machine event intended for the future
+ // Android client. Human logs stay on the ordinary Reasonix event stream; the
+@@ -102,6 +102,7 @@ type modStatusPayload struct {
+ 	Budget     efficiency.BudgetSnapshot   `json:"budget"`
+ 	TaskGate   modTaskCostGateStatus       `json:"taskCostGate"`
+ 	Resources  efficiency.ResourceSnapshot `json:"resources"`
++	Quality    efficiency.QualitySnapshot  `json:"quality"`
+ 	Features   map[string]string           `json:"features"`
+ }
+ 
+@@ -141,11 +142,15 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 		Budget:     s.modGov.Snapshot(),
+ 		TaskGate:   s.modTaskGateSnapshot(),
+ 		Resources:  efficiency.ReadResources(s.modWorkspacePath()),
++		Quality:    s.modQuality.Snapshot(),
+ 		Features: map[string]string{
+-			"budget":        "post-round-gate-v0.1",
+-			"apkBridge":     "http+sse-v0.1",
+-			"resources":     "local-linux-v0.1",
+-			"offlineApiKey": "not-required",
++			"budget":         "post-round-gate-v0.1",
++			"apkBridge":      "http+sse-v0.2",
++			"resources":      "local-linux-v0.1",
++			"qualityMonitor": "host-evidence-v0.2",
++			"antiLoop":       "reasonix-native+apk-telemetry",
++			"completionGate": "reasonix-final-readiness",
++			"offlineApiKey":  "not-required",
+ 		},
+ 	})
+ }
+@@ -195,6 +200,10 @@ func (s *Server) modResources(w http.ResponseWriter, _ *http.Request) {
+ 	writeJSON(w, snap)
+ }
+ 
++func (s *Server) modQualityGet(w http.ResponseWriter, _ *http.Request) {
++	writeJSON(w, s.modQuality.Snapshot())
++}
++
+ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ 	flusher, ok := w.(http.Flusher)
+ 	if !ok {
+@@ -210,6 +219,7 @@ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ 
+ 	initial := s.modHub.encode("mod.connected", map[string]any{
+ 		"budget":    s.modGov.Snapshot(),
++		"quality":   s.modQuality.Snapshot(),
+ 		"resources": efficiency.ReadResources(s.modWorkspacePath()),
+ 	})
+ 	if len(initial) > 0 {
+@@ -249,6 +259,14 @@ func (s *Server) modEvents(w http.ResponseWriter, r *http.Request) {
+ // APK stream. It never forwards prompts, tool arguments, file contents, or
+ // reasoning.
+ func (s *Server) observeCoreEvent(e event.Event) {
++	quality, signals := s.modQuality.Observe(e)
++	for _, sig := range signals {
++		s.modHub.Emit(sig.Type, sig.Data)
++	}
++	if len(signals) > 0 {
++		s.modHub.Emit("quality.updated", quality)
++	}
++
+ 	if e.Kind != event.Usage || e.Usage == nil {
+ 		return
+ 	}
+diff --git a/internal/serve/mod_bridge_test.go b/internal/serve/mod_bridge_test.go
+index ef180d9..2623ff5 100644
+--- a/internal/serve/mod_bridge_test.go
++++ b/internal/serve/mod_bridge_test.go
+@@ -113,4 +113,43 @@ func TestModStatusExposesTypedAPKSurface(t *testing.T) {
+ 	if _, ok := body["resources"]; !ok {
+ 		t.Fatal("status missing resources")
+ 	}
++	if _, ok := body["quality"]; !ok {
++		t.Fatal("status missing quality")
++	}
++}
++
++func TestModQualityAPITracksLoopAndReadiness(t *testing.T) {
++	bc := NewBroadcaster()
++	ctrl := control.New(control.Options{Sink: bc})
++	ts := httptest.NewServer(New(ctrl, bc, config.ServeConfig{}).Handler())
++	defer ts.Close()
++
++	bc.Emit(event.Event{Kind: event.TurnStarted})
++	bc.Emit(event.Event{Kind: event.Notice, Code: event.NoticeCodeLoopGuard})
++	bc.Emit(event.Event{
++		Kind:      event.TurnDone,
++		Outcome:   event.TurnOutcomeFinalReadiness,
++		Readiness: &event.FinalReadiness{Attempts: 1, Missing: []string{"verification"}},
++	})
++
++	resp, err := http.Get(ts.URL + "/mod/quality")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	var body struct {
++		State           string   `json:"state"`
++		LoopGuardHits   int      `json:"loopGuardHits"`
++		ReadinessBlocks int      `json:"readinessBlocks"`
++		Missing         []string `json:"missing"`
++	}
++	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
++		t.Fatal(err)
++	}
++	if body.State != "blocked" || body.LoopGuardHits != 1 || body.ReadinessBlocks != 1 {
++		t.Fatalf("quality = %+v", body)
++	}
++	if len(body.Missing) != 1 || body.Missing[0] != "verification" {
++		t.Fatalf("quality missing = %#v", body.Missing)
++	}
+ }
+diff --git a/internal/serve/serve.go b/internal/serve/serve.go
+index 92768ef..d9b3e4d 100644
+--- a/internal/serve/serve.go
++++ b/internal/serve/serve.go
+@@ -59,6 +59,7 @@ type Server struct {
+ 	// Balance mod v0.1: APK-facing economy/control telemetry. These are kept
+ 	// outside SessionAPI so upstream frontend contracts stay source-compatible.
+ 	modGov      *efficiency.Governor
++	modQuality  *efficiency.QualityMonitor
+ 	modHub      *modBroadcaster
+ 	modMu       sync.RWMutex
+ 	modTaskGate modTaskCostGateStatus
+@@ -92,12 +93,13 @@ func New(ctrl control.SessionAPI, bc *Broadcaster, serveCfg config.ServeConfig)
+ 		bc = NewBroadcaster()
+ 	}
+ 	s := &Server{
+-		ctrl:   ctrl,
+-		bc:     bc,
+-		modGov: efficiency.NewGovernor(),
+-		modHub: newModBroadcaster(),
+-		titles: newTitleCache(ctrl.SessionDir()),
+-		auth:   newAuthGate(serveCfg),
++		ctrl:       ctrl,
++		bc:         bc,
++		modGov:     efficiency.NewGovernor(),
++		modQuality: efficiency.NewQualityMonitor(),
++		modHub:     newModBroadcaster(),
++		titles:     newTitleCache(ctrl.SessionDir()),
++		auth:       newAuthGate(serveCfg),
+ 	}
+ 	bc.SetEventObserver(s.observeCoreEvent)
+ 	if cfg, err := config.Load(); err == nil {
+@@ -530,6 +532,7 @@ func (s *Server) handler() http.Handler {
+ 	mux.HandleFunc("POST /mod/budget", s.modBudgetSet)
+ 	mux.HandleFunc("POST /mod/budget/reset", s.modBudgetReset)
+ 	mux.HandleFunc("GET /mod/resources", s.modResources)
++	mux.HandleFunc("GET /mod/quality", s.modQualityGet)
+ 	mux.HandleFunc("GET /mod/events", s.modEvents)
+ 	mux.HandleFunc("GET /sessions", s.sessions)
+ 	mux.HandleFunc("GET /skills", s.skills)
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index 65aa383..3a2f1a3 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,10 +5,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/4] Unit tests: Balance Mod core"
+-GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock
++echo "[1/7] Unit tests: Balance Mod core + APK bridge"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/4] Build CLI only (skip example plugin)"
++echo "[2/7] Native Reasonix completion gate regression test"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
++
++echo "[3/7] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -34,14 +37,45 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[3/4] Offline mock tool-loop"
++echo "[4/7] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$($ROOT/bin/reasonix run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+ if ! grep -q 'OFFLINE_MOCK_PASS' <<<"$OUT"; then
+-  echo "BALANCE_MOD_SMOKE_FAIL: mock provider did not reach final pass" >&2
++  echo "BALANCE_MOD_SMOKE_FAIL: normal mock provider did not reach final pass" >&2
++  exit 1
++fi
++
++cat > "$TMP/reasonix.toml" <<'TOML'
++default_model = "balance-mock-loop"
++
++[[providers]]
++name = "balance-mock-loop"
++kind = "mock"
++model = "repeat-failure"
++base_url = "http://127.0.0.1"
++context_window = 1000000
++price = { cache_hit = 0, input = 0, output = 0, currency = "KZT" }
++
++[environment]
++offline = true
++
++[sandbox]
++bash = "off"
++TOML
++
++echo "[5/7] Offline anti-loop intervention"
++LOOP_OUT="$($ROOT/bin/reasonix run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
++printf '%s\n' "$LOOP_OUT"
++if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
++  echo "BALANCE_MOD_SMOKE_FAIL: native loop guard did not redirect the repeat-failure mock" >&2
+   exit 1
+ fi
+ 
+-echo "[4/4] PASS — no provider API key/network was used"
+-echo "BALANCE_MOD_SMOKE_PASS"
++echo "[6/7] Offline quality/completion telemetry tests passed"
++echo "  - native loop guard: PASS"
++echo "  - native final-readiness completion gate: PASS"
++echo "  - APK quality monitor: PASS"
++
++echo "[7/7] PASS — no provider API key/network was used"
++echo "BALANCE_MOD_V02_SMOKE_PASS"

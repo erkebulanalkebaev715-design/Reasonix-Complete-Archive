@@ -1,0 +1,12 @@
+{
+  "id": "20260817-123451.052147246-repeat-failure",
+  "created_at": "2026-08-17T12:34:51.207596977Z",
+  "updated_at": "2026-08-17T12:34:51.417550976Z",
+  "model": "balance-mock-loop/repeat-failure",
+  "revision": 1,
+  "content_digest": "9f1b433a8da4e47b6a624afcc044ea289088edfa7c5ea25a2818c8726f783182",
+  "writer_id": "localhost-15460-d2552c115a6ba5cf",
+  "schema_version": 2,
+  "turns": 1,
+  "preview": "Investigate the requested file. If a host guard detects repetition, obey it a…"
+}

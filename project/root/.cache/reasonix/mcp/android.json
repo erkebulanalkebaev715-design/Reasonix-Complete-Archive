@@ -1,0 +1,425 @@
+{
+  "version": 2,
+  "spec_hash": "01d0a28876e3252ea7160933b65088fbd6e8705c3b4f511536274ccdd90f9102",
+  "capabilities": {
+    "tools": true
+  },
+  "tools": [
+    {
+      "name": "battery_status",
+      "description": "Read Android battery status through Termux:API.",
+      "schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "read_only": true
+    },
+    {
+      "name": "brightness",
+      "description": "Set display brightness (0-255 or auto) through Termux:API.",
+      "schema": {
+        "properties": {
+          "value": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "enum": [
+                  "auto"
+                ],
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "camera_photo",
+      "description": "Capture a photo using Termux:API into shared storage.",
+      "schema": {
+        "properties": {
+          "camera": {
+            "maximum": 8,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "capabilities",
+      "description": "Inspect real Android host capabilities visible from Reasonix Debian/PRoot.",
+      "schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "read_only": true
+    },
+    {
+      "name": "clipboard_get",
+      "description": "Read Android clipboard through Termux:API.",
+      "schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "read_only": true
+    },
+    {
+      "name": "clipboard_set",
+      "description": "Set Android clipboard through Termux:API.",
+      "schema": {
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "device_info",
+      "description": "Read telephony/device information exposed by Termux:API.",
+      "schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "read_only": true
+    },
+    {
+      "name": "host_shell",
+      "description": "Run a user-approved command through Android shell, Shizuku/rish or root/su when available.",
+      "schema": {
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "auto",
+              "android",
+              "shizuku",
+              "root"
+            ],
+            "type": "string"
+          },
+          "timeout": {
+            "maximum": 60,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "read_only": false,
+      "destructive": true
+    },
+    {
+      "name": "location",
+      "description": "Read current device location using Termux:API.",
+      "schema": {
+        "properties": {
+          "provider": {
+            "enum": [
+              "gps",
+              "network",
+              "passive"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "read_only": true
+    },
+    {
+      "name": "media_play",
+      "description": "Control Termux media player.",
+      "schema": {
+        "properties": {
+          "action": {
+            "enum": [
+              "play",
+              "pause",
+              "stop",
+              "info"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "notify",
+      "description": "Post an Android notification.",
+      "schema": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "open_file",
+      "description": "Open a shared-storage file with an Android app.",
+      "schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "open_url",
+      "description": "Open an http(s) URL on Android.",
+      "schema": {
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "sensor_list",
+      "description": "List Android sensors exposed by Termux:API.",
+      "schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "read_only": true
+    },
+    {
+      "name": "sensor_read",
+      "description": "Read one Android sensor.",
+      "schema": {
+        "properties": {
+          "limit": {
+            "maximum": 20,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sensor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sensor"
+        ],
+        "type": "object"
+      },
+      "read_only": true
+    },
+    {
+      "name": "share",
+      "description": "Open Android share sheet for text or a shared file.",
+      "schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "shared_list",
+      "description": "List files inside Android shared storage.",
+      "schema": {
+        "properties": {
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "read_only": true
+    },
+    {
+      "name": "shared_read_text",
+      "description": "Read a UTF-8 text file from Android shared storage.",
+      "schema": {
+        "properties": {
+          "maxBytes": {
+            "maximum": 524288,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "read_only": true
+    },
+    {
+      "name": "shared_write_text",
+      "description": "Write a UTF-8 text file inside Android shared storage.",
+      "schema": {
+        "properties": {
+          "append": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "text"
+        ],
+        "type": "object"
+      },
+      "read_only": false,
+      "destructive": true
+    },
+    {
+      "name": "toast",
+      "description": "Show an Android toast.",
+      "schema": {
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "torch",
+      "description": "Turn flashlight on/off through Termux:API.",
+      "schema": {
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "vibrate",
+      "description": "Vibrate the phone.",
+      "schema": {
+        "properties": {
+          "milliseconds": {
+            "maximum": 5000,
+            "minimum": 10,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "volume_get",
+      "description": "Read Android audio stream volumes.",
+      "schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "read_only": true
+    },
+    {
+      "name": "volume_set",
+      "description": "Set Android stream volume.",
+      "schema": {
+        "properties": {
+          "stream": {
+            "type": "string"
+          },
+          "volume": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream",
+          "volume"
+        ],
+        "type": "object"
+      },
+      "read_only": false
+    },
+    {
+      "name": "wifi_info",
+      "description": "Read Wi-Fi connection info.",
+      "schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "read_only": true
+    }
+  ],
+  "last_validated": "2026-08-21T17:03:19.454329856Z"
+}

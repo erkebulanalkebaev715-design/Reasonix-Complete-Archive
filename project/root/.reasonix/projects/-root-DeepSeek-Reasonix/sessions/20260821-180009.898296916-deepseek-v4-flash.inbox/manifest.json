@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 3,
+  "revision": 6,
+  "runId": "169affa5-d37f-4bcb-9e65-ce073b2b2adc",
+  "paused": false,
+  "recovered": false,
+  "items": [],
+  "receipts": {
+    "balance-auto-v13-cecd66da4e9cc47337ce8f38-retry_flash_alternative": {
+      "itemId": "84743f28-2461-4a80-8f9f-1c4c39dacb25",
+      "requestHash": "17afd09e6cec057eedbb3e6db1f2cb7abe9f2fc395793f70f47d5ffc6e75ebee",
+      "disposition": "acknowledged",
+      "completedAt": "2026-08-21T18:06:54.212517012Z"
+    }
+  },
+  "updatedAt": "2026-08-21T18:06:54.213318319Z"
+}

@@ -1,0 +1,5 @@
+Reasonix is a small experimental language model built from scratch.
+It remembers compact state, sometimes uses local attention, and routes tokens through sparse experts.
+Привет. Это тестовый корпус Reasonix. Модель учится предсказывать следующий байт текста.
+The mobile design values useful quality per byte of memory and per unit of compute.
+Reasonix does not contain weights from another language model.

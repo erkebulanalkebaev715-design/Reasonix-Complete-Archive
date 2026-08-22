@@ -1,0 +1,130 @@
+REASONIX MOBILE v2.0.7 RC — ENGINEERING REPORT
+Date: 2026-08-19
+
+ROOT_CAUSES_FOUND:
+1. AI breaker v2.0.6 used elapsed time (>45s) OR grouped action count >=5 as hard-stop signals. It did not model meaningful progress and could false-positive on legitimate long work.
+2. Plus Tools/Plugins/Skills parsed backend responses with the wrong `.items` field. Backend contracts actually expose `.servers` and `.skills`, so visible lists could be empty/dead despite backend data.
+3. Rounds/Verification were prompt-text injection, not actual Reasonix runtime capabilities.
+4. Project state was mostly localStorage metadata/prompt injection and lacked a backend-persisted project container.
+5. Voice input had no real Android native speech bridge in the safe v2.0.2-host lineage. Browser Web Speech is not a reliable implementation for this APK.
+6. Backend diagnostics could not prove whether the CURRENT phone Reasonix tree actually contains evidence-aware core progress guard/reasoning source seams.
+
+FILES_CHANGED:
+Backend v1.5.0:
+- reasonix_mobile_bridge.py
+- reasonix_mobile_backend.sh
+- START-HERE.txt
+- VERIFICATION.txt
+
+Frontend RC:
+- reasonix-mobile-v2.0.7-rc-source/index.html
+- check.js
+
+Native RC kit:
+- src/com/reasonix/mobile/installfix/MainActivity.java
+- AndroidManifest.xml
+- assets/index.html
+- build_in_termux.sh
+- VOICE_TEST.md
+
+CONTRACTS_CHANGED:
+Backend additions:
+GET  /mobile/projects
+POST /mobile/projects
+POST /mobile/projects/delete
+GET  /mobile/workflows
+POST /mobile/workflows
+
+/mobile/integration-audit additions:
+coreGuard
+reasoningTransport
+
+Existing contracts preserved:
+X-Reasonix-Mobile-Token
+POST /approve
+POST /answer
+POST /tool-approval-mode
+POST /mod/app/task/start with {"input":...}
+/mobile/tools and /mobile/skills routes
+
+INVARIANTS_ADDED:
+- Mobile emergency breaker never stops merely because 45 seconds elapsed.
+- Permission/approval waiting is not treated as a loop.
+- 1-2 duplicate calls are not a breaker condition.
+- Generic repeated identical tool-result failure requires 5 repeats before mobile hard-break.
+- Strong tool_not_found/schema/invalid-argument failures stop blind retry after 2 identical failures.
+- Main no-progress strategy belongs to Reasonix core progress guard; APK breaker is secondary emergency protection.
+- Plus visible Tools/Plugins/Skills read their real backend response shapes and mutate real backend state.
+- Rounds/Verification map to backend-managed Reasonix Skills, not prompt injection.
+- Projects persist server-side with id/name/workspace/sources/files/chatIds.
+- Voice must be native Android SpeechRecognizer; no Web Speech fake fallback is treated as implemented.
+- Native voice has bounded ~35s watchdog and terminal cleanup paths.
+- No manual/handwritten DEX release path.
+
+TESTS_RUN:
+- python test_backend_v150.py -> V150_PROJECT_INTEGRATION_PASS
+- python test_backend_v150_full.py -> V150_FULL_INTEGRATION_PASS
+- python test_backend_v150_core_audit.py -> V150_CORE_AUDIT_INTEGRATION_PASS
+- python -m py_compile backend Python modules -> PASS
+- bash -n backend shell scripts -> PASS
+- node --check frontend JS -> PASS
+- python test_v207_guard.py -> V207_GUARD_REGRESSION_PASS
+- python test_v207_rc_ui.py -> V207_RC_UI_CONTRACT_PASS
+- javac against local Android signature stubs for MainActivity.java -> V207_NATIVE_JAVA_STUB_COMPILE_PASS
+- RU/EN key parity -> 185 / 185, no missing keys
+- static dead-UI scan: TODO=0, FIXME=0, window.prompt=0, alert=0, confirm=0, href="#"=0
+- task-start protocol scan: prompt-field regression=0, input-field path=1
+- old Web Speech API references=0; native ReasonixNative bridge reference=1
+
+REGRESSION_TESTS:
+Breaker:
+A: two duplicate calls, no failure -> NO BREAK
+B: five identical generic tool-result failures -> HARD BREAK
+C: five permission/approval-like failures -> NO BREAK
+D: repeated tool_not_found x2 -> HARD BREAK
+E: changing failure signatures -> NO BREAK
+
+Plus/browser contract:
+- Tools list sees backend .servers and filters stdio
+- Plugins list filters non-stdio MCP
+- Tool toggle/edit calls backend
+- Skills list sees backend .skills
+- Skill toggle/edit calls backend
+- System prompt GET/POST in Plus
+- Rounds toggle POSTs /mobile/workflows
+- Project create/source/file/chat binding POSTs backend project API
+- Native voice JS contract: start/partial/final/cancel, no partial duplication, no auto-send
+
+PASS:
+Only the automated checks listed above.
+Backend v1.5 fake-Reasonix integration contract is verified in this build environment.
+Frontend/browser contract is verified in this build environment.
+Native Java source type-check is verified only against the local stub harness.
+
+NOT_VERIFIED:
+- Current /root/DeepSeek-Reasonix tree on the physical phone.
+- Whether current phone coreGuard.evidenceAware is true.
+- Whether current phone reasoningTransport fields are true.
+- Real Reasonix parsing/invocation of the new workflow skill files on the user's current tree.
+- Real provider request after this update.
+- Real APK install/update/launch for v2.0.7.
+- Physical microphone permission and SpeechRecognizer behavior.
+- Physical voice partial/final/error/cancel/watchdog behavior.
+
+READY_FOR_DEVICE_TEST:
+Backend v1.5.0 bundle.
+Reasonix Mobile v2.0.7 native source/build kit.
+
+TESTING_BLOCKED:
+A final v2.0.7 native APK cannot be produced in the current ChatGPT container because Android D8/AAPT/apksigner/android.jar are absent and outbound container download is unavailable. Manual DEX generation is intentionally prohibited by the project contract. Build must use the real Android/Termux toolchain on the physical device (or another environment with Android SDK Build Tools).
+
+ARTIFACTS:
+reasonix-mobile-v1.5.0-backend.tar.gz
+reasonix-mobile-v2.0.7-native-kit.tar.gz
+reasonix-mobile-v2.0.7-rc-source.tar.gz
+Reasonix-v2.0.7-RC-ENGINEERING-REPORT.txt
+Reasonix-v2.0.7-RC-SHA256.txt
+
+ROLLBACK:
+Backend: stop v1.5 and start previous ~/reasonix-mobile-v1.4.0-backend.
+APK: do not uninstall the current working app before the RC update is physically proven. Build/install v2.0.7 as an update using the existing com.reasonix.mobile.installfix signing lineage.

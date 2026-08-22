@@ -1,0 +1,27 @@
+# v0.20 REAL-provider gate template. NO API KEY is embedded.
+default_model = "deepseek-v20/deepseek-v4-flash"
+
+[[providers]]
+name = "deepseek-v20"
+kind = "openai"
+base_url = "https://api.deepseek.com"
+models = ["deepseek-v4-flash"]
+default = "deepseek-v4-flash"
+api_key_env = "DEEPSEEK_API_KEY"
+context_window = 1000000
+max_output_tokens = 64
+billing_currency = "USD"
+effort = "disabled"
+
+[environment]
+enabled = true
+offline = false
+
+[tools]
+enabled = ["read_file"]
+
+[sandbox]
+bash = "off"
+
+[serve]
+auth_mode = "token"

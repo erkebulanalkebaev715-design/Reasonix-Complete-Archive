@@ -1,0 +1,12 @@
+{
+  "id": "20260820-180754.178642334-budget-cap",
+  "created_at": "2026-08-20T18:07:56.113065487Z",
+  "updated_at": "2026-08-20T18:07:56.276812333Z",
+  "model": "balance-budget-mock/budget-cap",
+  "revision": 1,
+  "content_digest": "68318fc0235a744d3c4fd3fca79ffa8fd8cdd7dfd52c3642380383e080ea2db2",
+  "writer_id": "localhost-29497-b8c72ac0ff3b12c2",
+  "schema_version": 2,
+  "turns": 1,
+  "preview": "Run the offline hard pre-call budget probe."
+}

@@ -1,0 +1,8 @@
+#!/bin/bash
+set -u
+echo '=== REASONIX BACKEND PROBE ==='
+command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -E '127\.0\.0\.1:(37914|[0-9]+)' | head -30 || true
+for u in http://127.0.0.1:37914/ http://127.0.0.1:37914/mobile/integration-audit; do
+  c="$(curl -sS -o /tmp/rxprobe.$$ -w '%{http_code}' --max-time 3 "$u" 2>/dev/null || true)"; echo "$u -> ${c:-NO_RESPONSE}"
+done
+rm -f /tmp/rxprobe.$$ 2>/dev/null || true

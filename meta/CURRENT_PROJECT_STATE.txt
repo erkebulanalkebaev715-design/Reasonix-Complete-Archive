@@ -1,0 +1,182 @@
+Reasonix complete project freeze
+Created: 2026-08-22
+
+=== CORE ===
+## main-v2...origin/main-v2
+ M cmd/reasonix/main.go
+ M desktop/frontend/src/lib/types.ts
+ M desktop/official_provider_access_install_test.go
+ M desktop/settings_app_test.go
+ M internal/agent/agent.go
+ M internal/agent/compact.go
+ M internal/agent/coordinator.go
+ M internal/agent/execute_one.go
+ M internal/agent/reasoning_replay.go
+ M internal/agent/reasoning_warn_state_test.go
+ M internal/agent/run_budget.go
+ M internal/agent/run_loop.go
+ M internal/agent/run_usage.go
+ M internal/agent/sampling_request.go
+ M internal/billing/catalog.go
+ M internal/billing/quote_test.go
+ M internal/boot/costquote_order_test.go
+ M internal/cli/cli_test.go
+ M internal/config/backfill_test.go
+ M internal/config/billing_upgrade_test.go
+ M internal/config/edit_test.go
+ M internal/config/paths.go
+ M internal/config/pricing.go
+ M internal/config/render_test.go
+ M internal/control/approval.go
+ M internal/control/capability.go
+ M internal/control/controller.go
+ M internal/control/inbox.go
+ M internal/control/inbox_run.go
+ M internal/event/event.go
+ M internal/eventwire/costquote_compat_test.go
+ M internal/eventwire/wire.go
+ M internal/memory/bounded_name_test.go
+ M internal/memory/store.go
+ M internal/plugin/stats.go
+ M internal/plugin/stats_test.go
+ M internal/provider/retry.go
+ M internal/serve/broadcaster.go
+ M internal/serve/serve.go
+ M internal/sessioninbox/manifest.go
+ M internal/sessioninbox/ops.go
+ M internal/sessioninbox/recovery.go
+ M internal/sessioninbox/store.go
+ M internal/sessioninbox/types.go
+ M internal/tool/tool.go
+?? .balance_mod_backups/
+?? .balance_mod_diagnostics/
+?? .mcp.json
+?? .reasonix-mobile-disabled-skills/
+?? balance_mod_hotfix_v0.8.2/
+?? configs/
+?? docs/BALANCE_MOD.md
+?? docs/BALANCE_MOD_V017.md
+?? docs/BALANCE_MOD_V018.md
+?? docs/BALANCE_MOD_V019.md
+?? docs/BALANCE_MOD_V020.md
+?? docs/BALANCE_MOD_V020_FIXED.md
+?? docs/BALANCE_MOD_V020_FIXED10.md
+?? docs/BALANCE_MOD_V020_FIXED12.md
+?? docs/BALANCE_MOD_V020_FIXED5.md
+?? docs/BALANCE_MOD_V020_FIXED9.md
+?? docs/REASONIX_3_APK_BUILD_FINAL_REPORT.md
+?? docs/REASONIX_3_FINAL_REPORT.md
+?? docs/REASONIX_3_MORNING_FINAL_REPORT.md
+?? docs/REASONIX_3_NIGHT_QA_FIX_FINAL_REPORT.md
+?? docs/REASONIX_3_SWARM.md
+?? internal/agent/balance_strict_retry_fixed9_test.go
+?? internal/agent/balance_v20_usage_receipt_fixed12.go
+?? internal/agent/balance_v20_usage_receipt_fixed12_test.go
+?? internal/agent/precall_budget_test.go
+?? internal/agent/strict_budget_tools.go
+?? internal/control/inbox_budget.go
+?? internal/control/inbox_budget_test.go
+?? internal/control/inbox_completion_receipt_test.go
+?? internal/control/precall_budget_setter.go
+?? internal/control/precall_budget_setter.go.v016bak
+?? internal/control/runtime_tool_policy.go
+?? internal/control/runtime_tool_policy_test.go
+?? internal/control/task_budget_setter.go
+?? internal/efficiency/
+?? internal/provider/balance_strict_retry_fixed9_test.go
+?? internal/provider/mock/
+?? internal/serve/mod_agent_control.go
+?? internal/serve/mod_agent_control_test.go
+?? internal/serve/mod_app.go
+?? internal/serve/mod_app_test.go
+?? internal/serve/mod_bridge.go
+?? internal/serve/mod_bridge_test.go
+?? internal/serve/mod_capabilities.go
+?? internal/serve/mod_capabilities_test.go
+?? internal/serve/mod_contract.go
+?? internal/serve/mod_contract_test.go
+?? internal/serve/mod_live.go
+?? internal/serve/mod_live_qa301_test.go
+?? internal/serve/mod_live_test.go
+?? internal/serve/mod_orchestrator.go
+?? internal/serve/mod_orchestrator_test.go
+?? internal/serve/mod_power.go
+?? internal/serve/mod_power_turn.go
+?? internal/serve/mod_power_turn_test.go
+?? internal/serve/mod_projects.go
+?? internal/serve/mod_projects_test.go
+?? internal/serve/mod_queue.go
+?? internal/serve/mod_queue_test.go
+?? internal/serve/mod_swarm.go
+?? internal/serve/mod_swarm_test.go
+?? internal/serve/precall_switch_test.go
+?? internal/serve/precall_switch_test.go.v016bak
+?? internal/sessioninbox/completion_receipt.go
+?? internal/sessioninbox/completion_receipt.go.v017bak
+?? internal/sessioninbox/completion_receipt_test.go
+?? internal/swarm/
+?? internal/tool/session_hidden_test.go
+?? reasonix-balance-mod-v0.15-bundle.tar.gz
+?? reasonix-balance-mod-v0.15-bundle/
+?? reasonix-balance-mod-v0.16-bundle.tar.gz
+?? reasonix-balance-mod-v0.16-bundle/
+?? reasonix-balance-mod-v0.19-bundle.tar.gz
+?? reasonix-balance-mod-v0.19-bundle/
+?? reasonix-balance-mod-v0.20-fixed-bundle.tar.gz
+?? reasonix-balance-mod-v0.20-fixed-bundle/
+?? reasonix-balance-mod-v0.20-fixed3-bundle.tar.gz
+?? reasonix-balance-mod-v0.20-fixed3-bundle/
+?? reasonix-balance-mod-v0.20-fixed4-bundle.tar.gz
+?? reasonix-balance-mod-v0.20-fixed4-bundle/
+?? reasonix-balance-mod-v0.8.2-hotfix.tar.gz
+?? reasonix-ui-approval-test.txt
+?? reasonix.toml.bak-context
+?? reasonix.toml.bak-final
+?? reasonix.toml.bak-router-20260819-141452
+?? scripts/__pycache__/
+?? scripts/balance_mod_offline_prototype.sh
+?? scripts/balance_mod_offline_stress.sh
+?? scripts/balance_mod_precall_budget.sh
+?? scripts/balance_mod_smoke.sh
+?? scripts/balance_mod_smoke_quick.sh
+?? scripts/balance_mod_smoke_quick_v017.sh
+?? scripts/balance_mod_smoke_quick_v018.sh
+?? scripts/balance_mod_smoke_quick_v019.sh
+?? scripts/balance_mod_smoke_quick_v020.sh
+?? scripts/balance_mod_smoke_v017.sh
+?? scripts/balance_mod_smoke_v018.sh
+?? scripts/balance_mod_smoke_v019.sh
+?? scripts/balance_mod_smoke_v020.sh
+?? scripts/balance_mod_swarm_gate.sh
+?? scripts/balance_mod_v017_targeted.sh
+?? scripts/balance_mod_v018_rc.sh
+?? scripts/balance_mod_v018_targeted.sh
+?? scripts/balance_mod_v019_contract_probe.py
+?? scripts/balance_mod_v019_targeted.sh
+?? scripts/balance_mod_v019_targeted.sh.v019-sse-bak
+?? scripts/balance_mod_v019_targeted.sh.v019bak
+?? scripts/balance_mod_v020_completion_check.py
+?? scripts/balance_mod_v020_preflight.sh
+?? scripts/balance_mod_v020_real_gate.sh
+?? scripts/balance_mod_v020_real_gate.sh.before-verbose
+?? scripts/balance_mod_v020_reconcile.py
+?? scripts/balance_mod_v020_targeted.sh
+?? scripts/qa_3_0_1_android_caps_test.py
+?? scripts/qa_3_0_1_bridge_readback.sh
+?? scripts/reasonix_android_backend.sh
+?? scripts/reasonix_morning_cancel_recovery.sh
+?? scripts/reasonix_morning_real_approval.sh
+?? scripts/reasonix_morning_real_chat.sh
+?? scripts/reasonix_morning_real_swarm.sh
+?? scripts/reasonix_morning_real_tool.sh
+?? "tHardPreCallBudgetSurvivesNativeModelSwitch$' "
+?? tools/namelencheck/
+
+HEAD:
+9e68643823943f05d13ab6a4578b7a629d490b07
+
+BRANCH:
+main-v2
+
+RECENT COMMITS:
+9e68643 (grafted, HEAD -> main-v2, tag: v1.25.4, tag: npm-v1.25.4, tag: desktop-v1.25.4, origin/main-v2, origin/HEAD, balance-mod-backup-v0.1) docs(release): 准备 v1.25.4 中英更新日志 (#8986)

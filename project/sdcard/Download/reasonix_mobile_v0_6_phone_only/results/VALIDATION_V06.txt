@@ -1,0 +1,11 @@
+Reasonix Mobile v0.6 PHONE-ONLY validation
+Python unit/regression: 23/23 PASS
+Native INT4 primitive: PASS
+RXM6 INT8 Python<->C++ FAST/STANDARD/DEEP: PASS
+RXM6 mixed Python<->C++ FAST/STANDARD/DEEP: PASS
+Training smoke: 5.6031079292 -> 2.8979835510 (30 steps)
+mobile_s BENCH-ONLY params: 23,574,210
+mobile_s mixed RXM6 bytes: 18,188,352
+Host mobile_s: FAST 344.944, STANDARD 223.515, DEEP 170.068 token-steps/s, max RSS 22,204 KB
+WARNING: host numbers are not Realme Note 60 measurements.
+INT4 host smoke result: 11.95% smaller file, but only 60.48% of INT8 deep throughput; not accepted as a speed optimization.

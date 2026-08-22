@@ -1,0 +1,12 @@
+{
+  "id": "20260818-052153.686953306-smoke",
+  "created_at": "2026-08-18T05:21:53.869217383Z",
+  "updated_at": "2026-08-18T05:21:54.05648446Z",
+  "model": "balance-mock/smoke",
+  "revision": 1,
+  "content_digest": "f16ea9c5f469689c467f5c6f50c7212abf1bbea714f5a313ccd0c3574038d166",
+  "writer_id": "localhost-5948-96a3da5ad0c2a3c0",
+  "schema_version": 2,
+  "turns": 1,
+  "preview": "Run the offline Balance Mod smoke scenario."
+}

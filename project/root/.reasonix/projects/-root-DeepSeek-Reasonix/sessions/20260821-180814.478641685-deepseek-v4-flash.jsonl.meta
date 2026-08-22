@@ -1,0 +1,12 @@
+{
+  "id": "20260821-180814.478641685-deepseek-v4-flash",
+  "created_at": "2026-08-21T18:08:18.426161759Z",
+  "updated_at": "2026-08-21T18:08:55.512503079Z",
+  "model": "custom-api-deepseek-com/deepseek-v4-flash",
+  "revision": 2,
+  "content_digest": "1c03956235136b55a0865a5dbbce2c33e1b3357a4c37f9bec3e9e9cad653d6c1",
+  "writer_id": "localhost-20147-4563d10cf62fd34d",
+  "schema_version": 2,
+  "turns": 1,
+  "preview": "Найди две возможные причины, почему приложение может потерять соединение с lo…"
+}

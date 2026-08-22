@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."&&pwd)";GO_BIN="${GO_BIN:-go}";PY_BIN="${PY_BIN:-python3}";cd "$ROOT"
+echo '[v0.20 1/6] version + locked manifest';grep -q 'const balanceModVersion = "balance-mod-v0.20"' internal/serve/mod_bridge.go
+"$PY_BIN" - <<'PY'
+import json;m=json.load(open('configs/balance_mod_v020_real_provider_manifest.json'));assert m['modVersion']=='balance-mod-v0.20' and m['baseline']=='balance-mod-v0.19';assert m['state']=='locked-until-explicit-user-approval';assert not m['provider']['proAllowed'];assert m['hardGate']['maximumBudgetKzt']==25 and m['hardGate']['proMaxPercent']==0
+PY
+echo '[v0.20 2/6] no embedded secret';! grep -RniE 'sk-[A-Za-z0-9_-]{16,}|Authorization:[[:space:]]*Bearer[[:space:]]+[A-Za-z0-9._-]{16,}' configs/balance_mod_v020_real_provider_manifest.json configs/reasonix.balance.v020.real.template.toml docs/BALANCE_MOD_V020.md scripts/balance_mod_v020_*||{ echo BALANCE_V20_FAIL:secret >&2;exit 1;}
+echo '[v0.20 3/6] default lock';set +e;OUT="$(env -u BALANCE_V20_REAL_API_APPROVED -u BALANCE_V20_USD_KZT ./scripts/balance_mod_v020_real_gate.sh 2>&1)";RC=$?;set -e;[[ "$RC" == 20 ]]&&grep -q BALANCE_V20_REAL_GATE_LOCKED<<<"$OUT"||{ echo "$OUT";exit 1;}
+echo '[v0.20 4/6] reconcile self-test';"$PY_BIN" scripts/balance_mod_v020_reconcile.py --self-test
+echo '[v0.20 5/6] native pre-call + Fixed5 one-paid-attempt regression';PATH="$(dirname "$(command -v "$GO_BIN")"):$PATH" GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^(TestStrictPreCallBudget|TestProviderRequestTokenUpperBound|TestStrictBudgetBlocks|TestBalanceStrictPreCallUsesCurrentAttemptEnvelope|TestBalanceStrictReasoningFallbackSuppressed)' -count=1;PATH="$(dirname "$(command -v "$GO_BIN")"):$PATH" GOTOOLCHAIN=local "$GO_BIN" test ./internal/provider -run '^TestBalanceStrictRetryLimitZeroStartsOneHTTPAttempt$' -count=1;PATH="$(dirname "$(command -v "$GO_BIN")"):$PATH" GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestHardPreCallBudgetSurvivesNativeModelSwitch|TestHardBudgetSkipsCosmeticTitleProvider)$' -count=1
+echo '[v0.20 6/6] syntax + build';bash -n scripts/balance_mod_v020_real_gate.sh;bash -n scripts/balance_mod_smoke_v020.sh;"$PY_BIN" -m py_compile scripts/balance_mod_v020_reconcile.py;mkdir -p bin;PATH="$(dirname "$(command -v "$GO_BIN")"):$PATH" GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix;git diff --check
+echo BALANCE_MOD_V20_TARGETED_PASS

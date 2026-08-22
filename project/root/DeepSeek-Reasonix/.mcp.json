@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "android": {
+      "auto_start": true,
+      "command": "/usr/bin/python3",
+      "args": [
+        "/root/reasonix-mobile-v1.5.1-backend/reasonix_android_tools.py"
+      ]
+    }
+  }
+}

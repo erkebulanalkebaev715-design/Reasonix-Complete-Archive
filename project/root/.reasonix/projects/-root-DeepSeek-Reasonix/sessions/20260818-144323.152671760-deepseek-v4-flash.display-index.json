@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "revision": 9,
+  "revision_known": true,
+  "content_digest": "3c75f8e78e569bef68e0abe197b9d87b9815b8ffadf3ae25255b69eadf496659",
+  "transcript_size": 118395,
+  "message_count": 27,
+  "authored_turns": 1,
+  "entries": [
+    {
+      "index": 0,
+      "offset": 0,
+      "length": 19027,
+      "role": "system",
+      "authored_turn": 0
+    },
+    {
+      "index": 1,
+      "offset": 19027,
+      "length": 435,
+      "role": "user",
+      "authored_turn": 1,
+      "starts_turn": true
+    },
+    {
+      "index": 2,
+      "offset": 19462,
+      "length": 4696,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 3,
+      "offset": 24158,
+      "length": 1288,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 4,
+      "offset": 25446,
+      "length": 1890,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 5,
+      "offset": 27336,
+      "length": 238,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 6,
+      "offset": 27574,
+      "length": 8910,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 7,
+      "offset": 36484,
+      "length": 289,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 8,
+      "offset": 36773,
+      "length": 42590,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 9,
+      "offset": 79363,
+      "length": 144,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 10,
+      "offset": 79507,
+      "length": 2122,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 11,
+      "offset": 81629,
+      "length": 370,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 12,
+      "offset": 81999,
+      "length": 1934,
+      "role": "assistant",
+      "authored_turn": 1
+    },
+    {
+      "index": 13,
+      "offset": 83933,
+      "length": 2537,
+      "role": "tool",
+      "authored_turn": 1,
+      "local_only": true,
+      "tool_result": true
+    },
+    {
+      "index": 14,
+      "offset": 86470,
+      "length": 1593,
+      "role": "user",
+      "authored_turn": 1,
+      "synthetic": true
+    },
+    {
+      "index": 15,
+      "offset": 88063,
+      "length": 2928,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 16,
+      "offset": 90991,
+      "length": 5370,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 17,
+      "offset": 96361,
+      "length": 2385,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 18,
+      "offset": 98746,
+      "length": 4299,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 19,
+      "offset": 103045,
+      "length": 442,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 20,
+      "offset": 103487,
+      "length": 409,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 21,
+      "offset": 103896,
+      "length": 145,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 22,
+      "offset": 104041,
+      "length": 210,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 23,
+      "offset": 104251,
+      "length": 2638,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 24,
+      "offset": 106889,
+      "length": 3571,
+      "role": "assistant",
+      "authored_turn": 1,
+      "has_tool_calls": true
+    },
+    {
+      "index": 25,
+      "offset": 110460,
+      "length": 196,
+      "role": "tool",
+      "authored_turn": 1,
+      "tool_result": true
+    },
+    {
+      "index": 26,
+      "offset": 110656,
+      "length": 7739,
+      "role": "tool",
+      "authored_turn": 1,
+      "local_only": true,
+      "tool_result": true
+    }
+  ],
+  "updated_at": "2026-08-18T14:48:13.989176514Z"
+}

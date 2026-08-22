@@ -1,0 +1,17 @@
+diff --git a/scripts/balance_mod_offline_prototype.sh b/scripts/balance_mod_offline_prototype.sh
+--- a/scripts/balance_mod_offline_prototype.sh
++++ b/scripts/balance_mod_offline_prototype.sh
+@@ -126,10 +126,11 @@ "$CURL_BIN" -fsS "$BASE/mod/budget" > "$TMP/budget.json"
+ "$PY_BIN" - "$TMP/budget.json" <<'PY'
+ import json, sys
+ p=json.load(open(sys.argv[1], encoding='utf-8'))
+ # Mock provider is priced at zero KZT: the end-to-end control path must not
+ # fabricate spend or need a real provider key.
+-assert p['spentKzt']==0
+-assert p['budgetKzt']==100
++b=p['budget']
++assert b['spentKzt']==0
++assert b['budgetKzt']==100
+ PY
+ 
+ # Chat mode must keep the same backend/session while shrinking mutating tool

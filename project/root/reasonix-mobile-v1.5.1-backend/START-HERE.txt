@@ -1,0 +1,43 @@
+Reasonix Mobile backend v1.5.1
+
+Thin local Android/PRoot bridge for the existing Reasonix + Balance Mod.
+It does not contain a second agent engine and does not replace Balance Mod Fixed12.
+
+Main changes from v1.3.2:
+- forwards Reasonix interactive control routes needed by the APK: /approve, /answer, /tool-approval-mode, /plan;
+- real approval flow now reaches Reasonix instead of being lost between APK and serve;
+- deduplicates duplicate model entries while preserving alternatives;
+- /mobile/integration-audit reports Balance/Execution Router/orchestrator/budget/approval wiring honestly;
+- Skills detail/toggle support;
+- MCP server enable/disable support;
+- installs useful base Skills without overwriting user edits: android-developer, debugger, verifier, web-researcher, project-architect;
+- upgrade sets Reasonix tool approval mode to auto, while explicit approval_request events can still be handled by the APK;
+- retains v1.3.2 Android-safe stale/orphan bridge recovery.
+
+Upgrade:
+  cd ~/reasonix-mobile-v1.5.1-backend
+  bash ./upgrade_backend.sh
+
+Status:
+  bash ./reasonix_mobile_backend.sh status
+
+Token:
+  bash ./reasonix_mobile_backend.sh token
+
+Diagnostics:
+  bash ./reasonix_mobile_backend.sh diagnose
+  bash ./reasonix_mobile_backend.sh integration-audit
+
+Default APK bridge URL:
+  http://127.0.0.1:37914
+
+Read-only full-stack audit (does not make a provider request):
+  cd ~/reasonix-mobile-v1.5.1-backend
+  bash ./reasonix_mobile_backend.sh full-stack-audit
+
+The integration audit now also reports:
+  coreGuard.sourcePresent
+  coreGuard.evidenceAware
+  reasoningTransport.eventReasoning
+  reasoningTransport.serveHistoryReasoning
+These values describe the CURRENT Reasonix source tree selected by REASONIX_ROOT; they are diagnostic facts, not auto-repair instructions.

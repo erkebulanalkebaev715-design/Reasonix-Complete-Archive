@@ -1,0 +1,962 @@
+MEGA HANDOFF PROMPT — REASONIX / NEW CHAT CONTINUATION
+Дата контекста: 2026-08-22, локальное время пользователя +05.
+Язык: русский.
+ВАЖНО: ЭТО ПРОДОЛЖЕНИЕ СУЩЕСТВУЮЩЕГО ПРОЕКТА. НЕ НАЧИНАЙ REASONIX ЗАНОВО.
+
+==============================
+1. КАК ТЫ ДОЛЖЕН РАБОТАТЬ СО МНОЙ
+==============================
+
+Ты продолжаешь уже существующий проект Reasonix и текущую ручную/ночную QA-разработку.
+
+Стиль:
+- отвечай коротко, по делу;
+- команды давай copy-paste;
+- лучше одна операция за раз;
+- не задавай повторные вопросы, если контекст уже позволяет действовать;
+- не придумывай PASS;
+- если поведение неизвестно — сначала прочитай код/лог/отчёт;
+- не переписывай проект с нуля;
+- не делай локальный костыль, если нужен системный инвариант;
+- каждая серьёзная правка: reproduce -> root cause -> systemic fix -> positive test -> negative/regression test -> evidence -> PASS;
+- физические Android-проверки без реального наблюдения = READY_FOR_DEVICE_TEST, а не PASS;
+- не читай пользователю лекции про API-ключи: ключ уже локально настроен, секрет в ответах/логах не печатай;
+- не заставляй пользователя вручную повторять сведения из этого handoff.
+
+Главный архитектурный закон проекта:
+
+МОЩНОСТЬ = ЭКОНОМИЯ = СТАБИЛЬНОСТЬ = МИНИМАЛЬНАЯ НАГРУЗКА.
+
+Максимальный режим не означает «сжечь максимум денег/CPU», а означает максимум полезного результата на каждый токен, запрос, секунду, RAM, CPU, батарею и тепловой бюджет.
+
+==============================
+2. УСТРОЙСТВО / СРЕДА
+==============================
+
+Пользователь работает ТОЛЬКО с телефона, ПК нет.
+
+Телефон:
+- Realme Note 60 / RMX3933
+- Android ARM64
+- Termux
+- proot-distro Debian ARM64
+
+Основной проект:
+- /root/DeepSeek-Reasonix
+
+Repo:
+- esengine/DeepSeek-Reasonix
+- branch: main-v2
+
+Канонический Go:
+- /usr/local/go/bin/go
+- использовать:
+  export PATH=/usr/local/go/bin:/root/.opencode/bin:/root/reasonix-android-tools/bin:$PATH
+  export GOTOOLCHAIN=local
+  hash -r
+
+OpenCode:
+- /root/.opencode/bin/opencode
+
+Android developer tools:
+- java/javac
+- aapt/aapt2
+- apksigner
+- zipalign
+- d8
+- adb
+- keytool
+- Go
+- Android wrappers в /root/reasonix-android-tools
+- R8 jar ранее отсутствовал, но текущий APK pipeline успешно работал без него.
+
+Нельзя путать обычный Termux:
+  ~ $
+с Debian:
+  root@localhost:...#
+
+Долгие процессы внутри PRoot запускать под native Termux tmux, иначе выход/смерть PRoot может убить процесс.
+
+==============================
+3. REASONIX АРХИТЕКТУРА
+==============================
+
+Основная схема:
+
+Android APK / WebView UI
+-> stable bridge http://127.0.0.1:37914
+-> authenticated Reasonix serve на динамическом порту
+-> Reasonix Controller/Agent
+-> Balance Mod
+-> Tools / Skills / Plugins / MCP
+-> provider API
+
+APK — control plane/UI, а Reasonix остаётся runtime. Не создавать второй агентный движок внутри APK.
+
+Bridge auth header:
+X-Reasonix-Mobile-Token
+
+Token file:
+- /root/.reasonix-mobile-v1/serve.token
+
+Backend:
+- /root/reasonix-mobile-v1.5.1-backend
+- reasonix_mobile_backend.sh start/status/restart/stop
+- stable URL: http://127.0.0.1:37914
+
+Последний рабочий backend status был:
+- status=running
+- model=custom-api-deepseek-com/deepseek-v4-flash
+- bridge 37914
+- внутренний Reasonix port динамический
+
+APK package:
+- com.reasonix.mobile.installfix
+
+Signing cert SHA-256:
+- fdf18d0b9d5372d142caf4fe76598e761090db75b5c66165a41b0ce67c65e48c
+
+APK только обычная Activity + WebView.
+Никаких NativeActivity.
+Никаких ручных DEX/bytecode hacks.
+
+==============================
+4. ТЕКУЩИЙ APK / ПРОЙДЕННОЕ
+==============================
+
+Reasonix Mobile 3.0.0 был реально собран и установлен.
+
+APK:
+- /sdcard/Download/Reasonix-Mobile-v3.0.0.apk
+
+SHA256:
+- 7297ae8b2861a7560b3d43aac5ac0a807fdd6d6800645e2aa740b796e89a09cc
+
+Физически:
+- APK устанавливается
+- запускается
+- UI не чёрный
+- backend подключается
+- DeepSeek Flash отображается
+- обычный real chat работает
+- voice работает
+- copy работает
+- проекты создаются
+- история/поиск работают
+- бюджет UI работает
+- Agent tools реально работают
+
+Real DeepSeek chat уже подтверждён на устройстве.
+
+==============================
+5. BUDGET / ПОСЛЕДНИЕ ДЕНЬГИ
+==============================
+
+У пользователя последний небольшой DeepSeek API-баланс. Ранее около $2.54.
+Требование пользователя: после ночной работы оставить минимум около $1.
+Для safety лучше floor $1.50, если пользователь не попросит иначе.
+
+Runtime Reasonix hard budget уже был включён:
+
+POST /mod/budget:
+- budgetKzt = 500
+- reservePercent = 20
+- proMaxPercent = 0
+- hardStop = true
+- fx USD = 457
+
+Подтверждён snapshot:
+- enabled=true
+- budgetKzt=500
+- spentKzt=0 на момент настройки
+- remainingKzt=500
+- reserveKzt=100
+- regularLimitKzt=400
+- proLimitKzt=0
+- hardStop=true
+- preCall=true
+- singleAgent=true
+
+ВАЖНО:
+Reasonix runtime hard budget защищает вызовы через Reasonix, но OpenCode может обращаться к DeepSeek отдельно. Поэтому для ночного OpenCode нужен отдельный balance watcher.
+
+Ночной кодинговый pass:
+- DeepSeek Flash only
+- NO subagents
+- NO Pro
+- NO Kimi
+- local grep/read/tests/build first
+- минимум paid real smoke
+- не повторять real tests без значимой правки
+- не прожигать баланс ради визуальных изменений.
+
+==============================
+6. ПОЛНЫЙ ON-DEVICE QA 3.0.0 — РЕАЛЬНЫЕ НАБЛЮДЕНИЯ
+==============================
+
+QA-1:
+Работает, но есть задержка.
+У assistant/model сообщений нет кнопок:
+- Retry/Повторить
+- Search web/Искать в сети
+
+Нужно:
+- Retry реальный, без дубля history/request;
+- Search web показывать только если реально есть web tool/capability. Никаких фейковых кнопок.
+
+QA-2:
+PASS — обычный чат.
+
+QA-3:
+Иногда reasoning работал.
+Позже UI написал «провайдер не отдал мышление модели».
+Также модель вывела:
+17 × 24 = ******** предметов
+вместо 408.
+
+Нужно:
+- не придумывать reasoning, если provider реально его не дал;
+- найти root cause ********:
+  provider raw -> event -> bridge -> frontend sanitizer/redactor/render;
+- нормальные числа типа 408 не должны маскироваться.
+
+QA-4:
+PASS — длинный ответ/scroll.
+
+QA-5:
+Copy работает.
+
+QA-6:
+Agent реально прочитал README.
+Но «Работа агента» неудобная.
+
+Нужно сделать чёткую хронологическую цепочку:
+Turn
+-> provider-visible reasoning
+-> plan/round
+-> Tool
+   -> call
+   -> output
+   -> retries
+-> Skill
+   -> tools внутри
+-> Plugin/MCP
+-> Verification
+-> Final
+
+Каждый элемент:
+- отдельный тип
+- expandable details
+- ordered
+- succeeded/failed/running/cancelled
+- retry вложен внутрь операции
+- длинный output preview/lazy
+- repeated operations можно compact Read x7 с раскрытием.
+
+QA-7/8:
+Approval dialog НЕ появился, mutation прошла.
+НО текущая политика была AUTO, поэтому это может быть ПРАВИЛЬНО.
+
+Нужно:
+- AUTO не ломать;
+- ASK должен реально показать deny/allow;
+- ASK deny -> нет mutation;
+- ASK allow -> mutation -> readback;
+- UI должен явно показывать текущую policy.
+
+QA-9:
+Rounds FAIL.
+Выбора/настройки не было.
+Agent просто дал 2 причины.
+В + есть задержка.
+Нижние пункты вроде System Prompt / Verification / Rounds местами не открываются/ничего не делают.
+
+Нужно:
+- audit ВСЕ элементы +;
+- удалить dead controls или реально wire end-to-end;
+- Rounds должны реально менять backend/agent execution;
+- System Prompt — настоящий load/save с scope;
+- Verification — реальный режим, а не декоративное состояние;
+- + не должен вызывать тяжёлый полный refresh.
+
+QA-10:
+Verification похоже не работает.
+В agent actions не видно verifier.
+Было два самостоятельных правильных ответа.
+
+Нужно:
+- найти backend vs event vs UI disconnect;
+- Verification ON -> реальный typed verification stage/evidence;
+- OFF -> без ненужного duplicate verifier;
+- Adaptive -> только при необходимости, UI показывает фактический режим.
+
+QA-11:
+Project создаётся и сохраняется.
+НО модель/agent не видит project.
+Путь проекта при создании можно не указать.
+
+Нужно:
+- project binding -> реальный project identity/root/cwd для agent/tools;
+- project path semantics:
+  existing path / enter path / managed directory / explicit logical project;
+- switch project -> correct cwd/context;
+- reopen -> сохраняется;
+- никаких cross-project leaks.
+
+QA-12:
+Критический state bug:
+- New Chat без сообщения сохраняется как пустой chat;
+- agent работает в Chat A;
+- в новом пустом Chat B стоит Stop, хотя там ничего не запущено;
+- в sidebar/history не видно нормально, что Chat A продолжает работу.
+
+Нужно:
+- empty draft chat не сохранять до meaningful content;
+- running/stop state строго per-chat/per-session/per-turn;
+- Chat A running -> Chat B показывает Send;
+- sidebar Chat A показывает running/progress;
+- switch away не cancel;
+- return -> live activity;
+- cancel A не влияет B.
+
+QA-13:
+Model selector работает, но с задержкой.
+
+Нужно:
+- lightweight cache;
+- не делать full audit/network waterfall на каждое открытие;
+- lazy details;
+- actual model == displayed model.
+
+QA-14:
+Нужен нормальный Android Back.
+
+Желаемый стек:
+1. закрыть top modal/dropdown
+2. закрыть + sheet
+3. settings/detail -> предыдущий app screen/chat
+4. закрыть sidebar
+5. только потом exit/default Android behavior
+
+Без duplicate browser-history traps.
+
+QA-15..18:
+Swarm UX/работа проблемные.
+
+Сейчас:
+- в + есть «Рой»
+- в основном поле «цель роя» + запуск
+- это неудобно
+- swarm сейчас не работает надёжно в APK
+- пока swarm/agent идёт в одном чате, в другом новый chat получает Stop.
+
+Желаемый режим:
+Swarm = OFF | AUTO | ON
+
+OFF:
+- single agent only
+
+AUTO:
+- обычный agent сам эскалирует в swarm, только если marginal value положительный
+
+ON:
+- user явно разрешает/просит swarm
+- но scheduler всё равно берёт минимально нужное число workers
+
+Manual “Start swarm with goal” можно оставить как advanced action, но не единственный способ.
+
+Нужно:
+- APK -> bridge -> /mod/swarm реально;
+- per-chat swarm state;
+- live swarm card;
+- orchestrator/tasks/workers/progress/evidence/cost;
+- cancel -> весь swarm terminal cancelled;
+- persistence/readback;
+- trivial task в AUTO -> single-agent;
+- не делать дорогие real multi-agent tests без необходимости.
+
+QA-19:
+User убил backend tmux, но после Connect в APK backend снова заработал.
+Неясно:
+- supervisor autorestart?
+- другой process?
+- APK recovery?
+- stale UI?
+
+Нужно:
+- найти exact process ownership;
+- fresh authenticated probe, не cached state;
+- deterministic test with autorestart disabled;
+- then recovery enabled;
+- только после evidence PASS.
+
+QA-20:
+Reopen/persistence работает.
+
+QA-21:
+Background ответ пришёл, но была задержка на reconnect.
+Нужно:
+- background уменьшает UI rendering;
+- backend task продолжает;
+- resume rehydrate без дублей.
+
+QA-22:
+Keyboard PASS.
+
+QA-23:
+Большой input зависает.
+Критический performance FAIL.
+
+Нужно:
+- не rerender весь chat на каждый keystroke;
+- debounce draft persistence;
+- requestAnimationFrame/batched resize;
+- large paste одной update;
+- убрать O(n^2);
+- send остаётся доступен.
+
+QA-24:
+Double tap mostly OK, но delay.
+Нужно сохранить dedup и atomically disable submit, без длинного искусственного debounce.
+
+QA-25:
+Voice работает.
+Нужно сделать красивее, как ChatGPT:
+idle/listening/transcribing/cancel/permission state,
+но без тяжёлых постоянных анимаций.
+
+QA-26:
+Orientation работает.
+
+QA-27:
+Уже есть задержки, ожидается long-chat lag/нагрев.
+Нужно реальное mobile-first performance architecture.
+
+Frontend:
+- virtualization/bounded rendering
+- не держать unlimited DOM
+- lazy/paginated history
+- lazy markdown
+- batched activity updates ~100-250ms
+- user text/send immediate
+- не rerender весь transcript
+- bounded LRU caches
+- old activity compact
+- large tool output preview
+- debounced persistence
+- no heavy blur/animations
+- unsubscribe listeners correctly
+- background rendering reduced
+- synthetic stress:
+  500+ messages
+  thousands activity events
+  multi-kB composer paste
+  rapid chat switching while another chat running
+
+Backend:
+- bounded event buffers
+- streaming/chunked where relevant
+- project index reuse
+- no repeated full scans unchanged content
+- hash/content reuse
+- compact snapshots
+- bounded logs
+- no concurrent heavy local jobs without scheduler.
+
+QA-28:
+Final agent/tool chain worked.
+Но Activity снова нужно переработать в чёткую цепочку Tools / Skills / Plugins / Verification / Reasoning с вложенностью и порядком.
+
+==============================
+7. НОВАЯ POWER BALANCE ARCHITECTURE — ЗАФИКСИРОВАНО
+==============================
+
+Режимы:
+- Быстрый / FAST
+- Средний / MEDIUM
+- Высокий / HIGH
+Для Agent/Work:
+- Очень высокий / VERY_HIGH
+- Максимум / MAXIMUM
+
+Speed:
+- 1x
+- 2x
+
+ВАЖНО:
+Режим НЕ задаёт фиксированное число агентов.
+Он задаёт bounds/strategy.
+
+2x:
+- увеличивает полезный параллелизм где безопасно;
+- не означает автоматически x2 расходы;
+- не означает x2 локальный CPU.
+
+Power Balance Engine должен учитывать:
+- expected quality gain
+- API cost/tokens
+- latency
+- RAM
+- CPU
+- thermal pressure
+- battery/background
+- verification/conflict cost
+- hard budget.
+
+Progressive escalation:
+cheap single Flash
+-> evidence strong -> STOP
+-> uncertainty -> verifier
+-> conflict -> specialist
+-> parallelizable -> swarm
+-> Pro только если реально разрешён/нужен и budget допускает
+-> early stop.
+
+==============================
+8. ADAPTIVE SWARM — ЗАФИКСИРОВАНО
+==============================
+
+Pipeline:
+Goal
+-> Estimate
+-> Cheapest sufficient plan
+-> Dynamic DAG
+-> Workers
+-> Evidence
+-> Verification
+-> Merge
+-> Early Stop
+
+Ключевые механизмы:
+- dynamic grow/shrink
+- minimum useful workers
+- marginal value scheduler
+- Context Capsules вместо всего проекта
+- Shared Evidence Graph вместо гигантских transcripts
+- Work Deduplication
+- Write Ownership / conflict management
+- Adaptive Verification
+- bounded hierarchy max depth 2 если вообще нужно
+- global budget -> swarm -> tasks -> workers
+- unused budget возвращается
+- cancellation/persistence/recovery first-class
+- worker “done” != verified PASS.
+
+==============================
+9. MULTI-KEY / MULTI-PROVIDER FABRIC
+==============================
+
+Цель:
+Agent:
+- обычно 1 credential slot
+
+Swarm:
+- архитектурно может иметь 2..1000+ REGISTERED credential slots
+
+НО:
+1000 registered keys != 1000 workers != 1000 concurrent calls.
+
+Разделять:
+- registered credentials
+- worker count
+- provider-call concurrency
+- local heavy-operation concurrency
+
+Credential metadata:
+- provider
+- account/pool identity
+- allowed models
+- budget
+- rate limits
+- latency
+- health
+- cooldown
+- workload policy
+
+Правила:
+- raw keys workers не видят;
+- Credential Vault;
+- workers получают logical slots;
+- central rate-limit coordinator;
+- соблюдать account/provider restrictions;
+- нельзя использовать multi-key как обход provider restrictions;
+- dynamic budget rebalancing;
+- health/failover;
+- cost/latency/quality routing;
+- generic provider abstraction, не только DeepSeek/Kimi.
+
+Не фейкать “1000 keys support” без реальной реализации.
+
+==============================
+10. MOBILE RESOURCE GOVERNOR
+==============================
+
+Главная цель:
+огромный проект должен оставаться usable на телефоне без сильного нагрева.
+
+Отдельно:
+remote reasoning concurrency
+и
+local heavy-process concurrency.
+
+Пример:
+- несколько API workers могут думать удалённо
+- local Go full tests / APK build / large indexing должны идти через bounded central queue.
+
+Thermal/RAM:
+- NORMAL -> normal
+- MODERATE -> reduce concurrency
+- SEVERE -> one heavy local task
+- CRITICAL -> pause builds/indexing, keep lightweight/remote work
+- hysteresis/cooldown
+
+RAM pressure:
+- unload old UI/activity caches
+- stop pre-index
+- reduce context caches
+- suspend low-priority workers
+- critical -> orchestrator + active worker
+
+Не объявлять thermal PASS без реального Android signal/device evidence.
+
+==============================
+11. INCREMENTAL PROJECT INTELLIGENCE
+==============================
+
+Не перечитывать весь repo каждый раз.
+
+Project index примерно:
+path
+size
+hash
+language/type
+symbols
+dependencies
+change state
+
+Pipeline:
+Project Map
+-> Relevant Files
+-> Relevant Chunks
+-> Context Capsule
+
+Использовать:
+git diff/hash/change detection
+
+Unchanged content -> reuse.
+Changed file -> reindex only changed/dependent areas.
+
+Tests:
+targeted first
+affected integration
+full go test ./... только release gate.
+
+==============================
+12. DEVELOPER TOOL / SKILL / PLUGIN FABRIC
+==============================
+
+Reasonix должен стать реальным Android developer agent, а не чат с декоративными кнопками.
+
+Capability Registry:
+- id
+- category
+- executable/provider/plugin/skill
+- version
+- availability
+- health
+- permissions
+- device/connection requirements
+- read-only/mutation
+- resource class
+- latency
+- concurrency class
+- approval policy
+- input/output schema
+- evidence
+- failure reason
+- last health check
+
+Использовать реально установленное:
+- Java/Javac
+- aapt/aapt2
+- apksigner
+- zipalign
+- d8
+- adb
+- keytool
+- Go
+- shell
+- git
+- existing APK verification/build helpers
+
+Не скачивать ночью огромный SDK без необходимости.
+
+APK structured workflow:
+source change
+-> targeted tests
+-> compile/build
+-> package
+-> zipalign
+-> sign
+-> signature verify
+-> metadata inspect
+-> artifact copy/export
+-> optional install
+-> optional launch
+-> device validation
+-> evidence
+
+ADB:
+- adb exists != device connected
+- USB debugging != authorized
+- truthful states only
+
+Если реально connected:
+- install/update
+- launch
+- stop/restart app
+- logcat
+- dumpsys
+- package/activity inspect
+- screenshot
+- UI hierarchy
+- explicit QA input automation
+
+Если нет:
+DEVICE_CONNECTION_REQUIRED / READY_FOR_DEVICE_TEST.
+
+Terminal capability:
+- explicit cwd
+- timeout
+- bounded output
+- cancellation
+- exit code
+- stdout/stderr clarity
+- approval class
+- no duplicate mutation after retry/reconnect
+- activity evidence
+- resource class.
+
+Skills:
+- Android APK Build
+- APK Verify
+- Android Device Smoke Test
+- Go Targeted Test
+- Go Full Release Gate
+- Backend Diagnose
+- Bridge Probe
+- Project Index Refresh
+- Git Change Audit
+- Swarm Regression Gate
+- Performance Stress Gate
+
+Skill PASS только после реальных verification gates.
+
+Plugins/MCP:
+generic discovery/manifest/schema/enable-disable/health/permissions/invoke/timeout/cancel/typed result/evidence/project policy/resource metadata.
+
+Tool Router:
+дешёвый достаточный путь first.
+
+Tool cache/dedup:
+- read-only same hash/state may reuse
+- mutation NEVER replay from cache
+- same APK verify result reuse if artifact hash same
+- heavy build не запускать параллельно multiple workers.
+
+Resource classes:
+LIGHT / MEDIUM / HEAVY.
+Mobile Governor bounds HEAVY.
+
+==============================
+13. НОЧНОЙ MASTER PROMPT
+==============================
+
+Финальный night master prompt:
+- REASONIX_3_NIGHT_QA_FIX_MASTER_PROMPT_FINAL.txt
+
+Скачиваемый путь обычно:
+- /sdcard/Download/REASONIX_3_NIGHT_QA_FIX_MASTER_PROMPT_FINAL.txt
+
+В Debian должен копироваться как:
+- /root/REASONIX_3_NIGHT_QA_FIX_MASTER_PROMPT.txt
+
+Этот prompt уже оптимизирован под бюджет:
+- Flash only
+- no OpenCode subagents
+- local-first
+- full suite только ближе к release
+- paid real calls минимум
+- no Pro/Kimi
+- no looping
+- stop when done/blocked
+- evidence-required PASS.
+
+==============================
+14. НОЧНЫЕ START/WATCH SCRIPTS — ИСПОЛЬЗОВАТЬ ТОЛЬКО V2
+==============================
+
+Были созданы исправленные V2:
+
+- REASONIX_NIGHT_BUDGET_WATCH_V2.sh
+- REASONIX_NIGHT_START_STABLE_V2.sh
+
+Они были проверены `bash -n`:
+- WATCH_SYNTAX_OK
+- STARTER_SYNTAX_OK
+
+НО:
+runtime на реальном Termux после создания V2 ещё не был подтверждён.
+Перед ночным запуском нужно сделать короткий preflight и не использовать старые V1 scripts.
+
+V2 идеи:
+- native Termux tmux
+- termux-wake-lock
+- DeepSeek balance check
+- safety floor default $1.50
+- check every 60 sec
+- abnormal single-interval spend jump > $0.30 -> stop
+- if balance check fails 2x -> stop
+- OpenCode launched as own process group/session
+- watcher kills OpenCode process group, а не только tmux
+- no blind endless restart
+- max one continuation pass only if mandatory report missing
+- continuation explicitly says continue current work, not restart
+- mandatory final report/APK validation
+- logs copied to /sdcard/Download.
+
+ВАЖНО:
+Пользователь хочет оставить хотя бы ~$1, поэтому floor $1.50 выбран как safety buffer. Если пользователь прямо попросит другой floor — менять осознанно.
+
+==============================
+15. ANDROID NIGHT STABILITY
+==============================
+
+Перед ночью:
+- Termux battery = Unrestricted
+- background activity allowed
+- battery optimization -> Don’t optimize
+- Battery Saver/Super Saver OFF
+- Termux locked in recents
+- no Clear All
+- no automatic reboot/update tonight
+- stable Wi-Fi
+- close Reasonix UI when no longer needed
+- close heavy games/browser tabs
+- phone on hard open surface
+- case can be removed for cooling
+- screen may be OFF after launch
+- termux-wake-lock holds CPU
+- charging allowed, 80% charge protection preferable if available
+- do NOT use High Performance mode.
+
+TikTok:
+Да, пользователь МОЖЕТ сидеть в TikTok во время работы, но это повышает RAM/thermal pressure и шанс, что Android прибьёт Termux. Для максимальной надёжности ночного pass лучше TikTok/игры не держать долго. Коротко посмотреть можно при Termux Unrestricted + locked, но safest = экран выключен и ничего тяжёлого не запускать.
+
+==============================
+16. ЦЕЛЬ НОЧНОГО PASS
+==============================
+
+Target APK:
+- /sdcard/Download/Reasonix-Mobile-v3.0.1-NIGHT.apk
+
+Target report:
+- /root/DeepSeek-Reasonix/docs/REASONIX_3_NIGHT_QA_FIX_FINAL_REPORT.md
+копия:
+- /sdcard/Download/REASONIX_3_NIGHT_QA_FIX_FINAL_REPORT.md
+
+Night log:
+- /sdcard/Download/reasonix-night.log
+
+Ночной agent должен:
+1. snapshot existing state;
+2. reproduce QA failures;
+3. root-cause;
+4. systemic fix;
+5. targeted tests;
+6. performance stress tests;
+7. full Go suite once near final;
+8. rebuild signed update-compatible APK;
+9. verify signature lineage;
+10. copy APK to Downloads;
+11. write full final report;
+12. STOP.
+
+Никаких фальшивых PASS.
+
+==============================
+17. САМЫЕ ПРИОРИТЕТНЫЕ FIXES
+==============================
+
+Порядок:
+1. global Stop/running leakage + empty chats
+2. dead + / Rounds / Verification / System Prompt
+3. project binding into agent/tools
+4. swarm APK wiring + OFF/AUTO/ON + cancel/persistence
+5. long input freeze + long chat virtualization
+6. Activity Timeline normalization
+7. reasoning absent state + ******** corruption
+8. Android Back navigation
+9. model/+ selector latency
+10. assistant Retry + truthful Search web
+11. voice polish
+12. developer tools/capability fabric foundations
+
+Не уходить в tools fabric настолько глубоко, что core QA остаётся сломанным.
+
+==============================
+18. ЧТО ДЕЛАТЬ В НОВОМ ЧАТЕ ПРЯМО СЕЙЧАС
+==============================
+
+НЕ НАЧИНАЙ НОВЫЙ ДИЗАЙН И НЕ ПЕРЕСКАЗЫВАЙ МНЕ ПРОЕКТ.
+
+Сначала:
+1. Считай этот handoff authoritative.
+2. Если V2 scripts ещё не скачаны пользователем — дай ссылки/команды для V2, а не V1.
+3. Сделай preflight runtime assumptions V2 минимальными командами.
+4. Запусти night pass только из обычного native Termux `~ $`, не из Debian shell.
+5. После старта проверь:
+   tmux ls
+   reasonix-night
+   reasonix-budget-watch
+6. capture last lines обеих sessions.
+7. Если всё живо — скажи пользователю оставить телефон и не мешать.
+8. Утром сначала читать report/log/artifacts, а не запускать новый coding pass.
+
+==============================
+19. PASS / TRUTH RULES
+==============================
+
+Нельзя говорить:
+- “работает”, если только есть кнопка;
+- “swarm PASS”, если только endpoint существует;
+- “ADB PASS”, если только бинарь установлен;
+- “thermal governor PASS”, если Android telemetry не проверена;
+- “device QA PASS”, если устройство физически не наблюдалось;
+- “budget safe”, если watcher не подтвердил balance;
+- “backend reconnect PASS”, пока не доказан process ownership/autorestart;
+- “project PASS”, пока agent реально не использует project root;
+- “verification PASS”, пока видно только два model answers без typed verifier/evidence.
+
+PASS требует доказательств.
+
+==============================
+20. УТРЕННИЙ FLOW
+==============================
+
+Утром:
+- tmux ls
+- tail /sdcard/Download/reasonix-night.log
+- проверить APK
+- sha256sum APK
+- проверить final report
+- прочитать PASS/READY/BLOCKED matrix
+- не запускать ещё один paid pass автоматически.
+
+Если APK готов:
+- поднять stable backend supervisor
+- установить v3.0.1-NIGHT поверх 3.0.0
+- провести короткий high-signal manual QA именно по исправленным пунктам
+- каждую регрессию чинить root-cause.
+
+END OF HANDOFF.

@@ -1,0 +1,78 @@
+{
+  "schema": "balance-apk-backend-integration-v1",
+  "modVersion": "balance-mod-v0.19",
+  "baseline": "balance-mod-v0.18",
+  "apkContract": "balance-apk-v1",
+  "transport": {
+    "bind": "127.0.0.1:0",
+    "http": true,
+    "sse": true,
+    "authMode": "token",
+    "tokenFileRequired": true,
+    "tokenInReasonixProcessArgs": false
+  },
+  "supervisor": {
+    "script": "scripts/reasonix_android_backend.sh",
+    "commands": ["start", "stop", "restart", "status", "token", "log"]
+  },
+  "provider": {
+    "name": "balance-apk-mock",
+    "kind": "mock",
+    "networkRequired": false,
+    "apiKeyRequired": false
+  },
+  "budget": {
+    "budgetKzt": 1000,
+    "reservePercent": 15,
+    "proMaxPercent": 25,
+    "hardStop": true,
+    "fxKztPerUnit": {"CNY": 70}
+  },
+  "contractMinimums": {
+    "endpoints": 67,
+    "eventTypes": 68
+  },
+  "requiredEndpoints": [
+    "/mod/status",
+    "/mod/budget",
+    "/mod/resources",
+    "/mod/events",
+    "/mod/app/contract",
+    "/mod/app/task/start",
+    "/mod/live/history"
+  ],
+  "requiredSurfaces": [
+    "project",
+    "chat",
+    "agent",
+    "file",
+    "tool",
+    "permission",
+    "instruction",
+    "skill",
+    "budget",
+    "live",
+    "task",
+    "queue",
+    "recovery-or-checkpoint"
+  ],
+  "requiredGates": [
+    "loopback-only-listener",
+    "token-file-private",
+    "unauthenticated-api-denied",
+    "token-bootstrap-cookie",
+    "frozen-contract-inventory",
+    "authenticated-sse",
+    "apk-style-task-start",
+    "live-history-result",
+    "hard-precall-budget",
+    "android-supervisor-contract",
+    "v0.18-full-regression"
+  ],
+  "forbidden": [
+    "real-provider",
+    "provider-api-key",
+    "external-network-agent-test",
+    "terminal-text-as-apk-protocol"
+  ]
+}

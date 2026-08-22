@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "workspace": "/root/DeepSeek-Reasonix",
+  "savedAtUnixMs": 1787394970545,
+  "profile": {
+    "mode": "agent",
+    "liveDetail": "project"
+  },
+  "approvalMode": "auto",
+  "budget": {
+    "config": {
+      "budgetKzt": 500,
+      "reservePercent": 20,
+      "proMaxPercent": 0,
+      "hardStop": true,
+      "fxKztPerUnit": {
+        "KZT": 1,
+        "USD": 457
+      }
+    },
+    "spentKzt": 47.859840496,
+    "proSpentKzt": 0,
+    "unpricedCalls": 4
+  },
+  "execution": {
+    "enabled": true,
+    "flashPrimaryRef": "custom-api-deepseek-com/deepseek-v4-flash",
+    "flashAlternativeRef": "custom-api-deepseek-com/deepseek-v4-flash",
+    "proRef": "custom-api-deepseek-com/deepseek-v4-pro",
+    "flashRepairRef": "custom-api-deepseek-com/deepseek-v4-flash"
+  },
+  "orchestrator": {
+    "enabled": true,
+    "maxContinuations": 4,
+    "idleWaitSeconds": 15
+  }
+}

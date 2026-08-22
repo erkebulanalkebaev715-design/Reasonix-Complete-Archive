@@ -1,0 +1,756 @@
+diff --git a/docs/BALANCE_MOD.md b/docs/BALANCE_MOD.md
+index 2496c42..4baf6fc 100644
+--- a/docs/BALANCE_MOD.md
++++ b/docs/BALANCE_MOD.md
+@@ -608,3 +608,39 @@ same backend session into chat mode. It unsets common provider key environment
+ variables for the child process and requires no external provider/network call.
+ 
+ The v0.14 full gate ends with `BALANCE_MOD_V14_SMOKE_PASS`.
++
++
++## v0.15 — offline stress gate before any real provider
++
++v0.15 deliberately adds very little production surface. The goal is to attack
++existing assumptions before a real API key is ever accepted by the workflow.
++The zero-cost MockProvider gains a `deny-bypass` scenario that first verifies a
++denied writer is absent from the provider schema and then deliberately attempts
++the same writer through `use_capability`. Success requires the resolved target
++to be rejected by Reasonix's native permission gate; merely hiding a tool from
++the schema is not considered sufficient.
++
++`scripts/balance_mod_offline_stress.sh` runs the real localhost serve process in
++an isolated `REASONIX_HOME` with all common provider-key environment variables
++unset. It verifies, in one process-level scenario:
++
++- frozen APK v1 safety guarantees are still negotiated;
++- `write_file=deny` survives a capability-proxy bypass attempt and no file is
++  created;
++- a queued task requesting more KZT than the workspace budget is clipped to the
++  workspace ceiling before admission;
++- rollback without an available checkpoint fails closed;
++- an abrupt backend kill followed by explicit native session resume preserves
++  workspace budget, tool policy and the paused durable inbox item;
++- malformed APK persistence is reported as an error without crashing the
++  backend, and a valid saved state can subsequently be restored;
++- an invalid budget mutation is rejected without changing the prior budget;
++- Balance Mod state contains no provider-key-shaped data.
++
++The crash test intentionally keeps the inbox paused. v0.15 does **not** claim
++that arbitrary in-flight model work is exactly-once across process death; the
++stronger guarantee remains the reviewed/uncertain native inbox recovery policy
++and the v0.13 idempotent auto-continuation path.
++
++The v0.15 quick gate ends with `BALANCE_MOD_V15_QUICK_PASS`; the full gate ends
++with `BALANCE_MOD_V15_SMOKE_PASS`. No real provider key is required or used.
+diff --git a/internal/provider/mock/mock.go b/internal/provider/mock/mock.go
+index 72633e3..b6d31fb 100644
+--- a/internal/provider/mock/mock.go
++++ b/internal/provider/mock/mock.go
+@@ -27,21 +27,21 @@ func init() {
+ 
+ // New builds an offline mock provider. Supported Extra fields:
+ //
+-//	scenario: smoke (default) | repeat-failure | repair-cycle | text
++//	scenario: smoke (default) | repeat-failure | repair-cycle | deny-bypass | text
+ //	path: file used by smoke/repeat-failure (default hello.py)
+ func New(cfg provider.Config) (provider.Provider, error) {
+ 	scenario := extraString(cfg.Extra, "scenario")
+ 	if scenario == "" {
+ 		candidate := strings.ToLower(strings.TrimSpace(cfg.Model))
+ 		switch candidate {
+-		case "smoke", "repeat-failure", "repair-cycle", "text":
++		case "smoke", "repeat-failure", "repair-cycle", "deny-bypass", "text":
+ 			scenario = candidate
+ 		default:
+ 			scenario = "smoke"
+ 		}
+ 	}
+ 	switch scenario {
+-	case "smoke", "repeat-failure", "repair-cycle", "text":
++	case "smoke", "repeat-failure", "repair-cycle", "deny-bypass", "text":
+ 	default:
+ 		return nil, fmt.Errorf("mock provider: unknown scenario %q", scenario)
+ 	}
+@@ -81,6 +81,39 @@ func (p *mockProvider) Stream(ctx context.Context, req provider.Request) (<-chan
+ 		toolResults := countToolResults(req.Messages)
+ 		calledTool := false
+ 		switch p.scenario {
++		case "deny-bypass":
++			// Stress the real policy boundary, not only provider-schema trimming.
++			// A denied write_file should be absent from the provider schema; the
++			// mock then deliberately tries the stable use_capability proxy. The
++			// resolved target must still be rejected by Reasonix's native gate.
++			if hasTool(req.Tools, "write_file") {
++				if !emit(provider.Chunk{Type: provider.ChunkText, Text: "MOCK_DENY_SCHEMA_FAIL"}) {
++					return
++				}
++				break
++			}
++			if toolResults == 0 {
++				if hasTool(req.Tools, "use_capability") {
++					if !emit(provider.Chunk{Type: provider.ChunkToolCall, ToolCall: &provider.ToolCall{
++						ID:        "mock-deny-proxy-1",
++						Name:      "use_capability",
++						Arguments: `{"action":"call","capability_id":"tool:write_file","arguments":{"path":"should_not_exist.txt","content":"DENY_BYPASS_SHOULD_NEVER_WRITE"}}`,
++					}}) {
++						return
++					}
++					calledTool = true
++				} else if !emit(provider.Chunk{Type: provider.ChunkText, Text: "MOCK_DENY_NO_PROXY"}) {
++					return
++				}
++				break
++			}
++			if messagesContain(req.Messages, "denied by permission policy") || messagesContain(req.Messages, "blocked:") {
++				if !emit(provider.Chunk{Type: provider.ChunkText, Text: "OFFLINE_DENY_NATIVE_PASS"}) {
++					return
++				}
++			} else if !emit(provider.Chunk{Type: provider.ChunkText, Text: "MOCK_DENY_NATIVE_FAIL"}) {
++				return
++			}
+ 		case "repair-cycle":
+ 			p.mu.Lock()
+ 			p.step++
+diff --git a/internal/provider/mock/mock_test.go b/internal/provider/mock/mock_test.go
+index b8e5f98..38a0c10 100644
+--- a/internal/provider/mock/mock_test.go
++++ b/internal/provider/mock/mock_test.go
+@@ -82,3 +82,34 @@ func TestRepairCycleScenarioSequence(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestDenyBypassScenarioRequiresSchemaTrimAndNativeDenial(t *testing.T) {
++	p, err := New(provider.Config{Name: "mock", Extra: map[string]any{"scenario": "deny-bypass"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	// A direct writer in the provider schema is already a policy failure.
++	bad := collect(t, p, provider.Request{Tools: []provider.ToolSchema{{Name: "write_file"}, {Name: "use_capability"}}})
++	if len(bad) == 0 || bad[0].Type != provider.ChunkText || bad[0].Text != "MOCK_DENY_SCHEMA_FAIL" {
++		t.Fatalf("bad schema result = %#v", bad)
++	}
++
++	p, err = New(provider.Config{Name: "mock", Extra: map[string]any{"scenario": "deny-bypass"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	first := collect(t, p, provider.Request{Tools: []provider.ToolSchema{{Name: "use_capability"}}})
++	if len(first) == 0 || first[0].ToolCall == nil || first[0].ToolCall.Name != "use_capability" {
++		t.Fatalf("proxy attempt = %#v", first)
++	}
++	if !strings.Contains(first[0].ToolCall.Arguments, `"capability_id":"tool:write_file"`) {
++		t.Fatalf("proxy args = %q", first[0].ToolCall.Arguments)
++	}
++	second := collect(t, p, provider.Request{
++		Tools:    []provider.ToolSchema{{Name: "use_capability"}},
++		Messages: []provider.Message{{Role: provider.RoleTool, Name: "use_capability", Content: "blocked: denied by permission policy — do not retry"}},
++	})
++	if len(second) == 0 || second[0].Type != provider.ChunkText || second[0].Text != "OFFLINE_DENY_NATIVE_PASS" {
++		t.Fatalf("denied result = %#v", second)
++	}
++}
+diff --git a/internal/serve/mod_bridge.go b/internal/serve/mod_bridge.go
+index c80b0a3..4be18f3 100644
+--- a/internal/serve/mod_bridge.go
++++ b/internal/serve/mod_bridge.go
+@@ -16,7 +16,7 @@ import (
+ 	"reasonix/internal/event"
+ )
+ 
+-const balanceModVersion = "balance-mod-v0.14"
++const balanceModVersion = "balance-mod-v0.15"
+ 
+ // modEvent is a typed machine event for the Android client. Most Balance Mod
+ // telemetry is content-free; v0.7 live.* events may additionally carry bounded,
+@@ -228,6 +228,7 @@ func (s *Server) modStatus(w http.ResponseWriter, _ *http.Request) {
+ 			"durablePendingRoute":  "sanitized-state+stable-idempotency-v0.13",
+ 			"proDiagnosisGuard":    "native-read-only-policy-overlay-v0.13",
+ 			"androidSupervisor":    "debian-process-wrapper-v0.8",
++			"offlineStressGate":    "native-deny+crash-restart+queue+corrupt-state-v0.15",
+ 		},
+ 	})
+ }
+diff --git a/scripts/balance_mod_offline_stress.sh b/scripts/balance_mod_offline_stress.sh
+new file mode 100755
+index 0000000..bb9f9bc
+--- /dev/null
++++ b/scripts/balance_mod_offline_stress.sh
+@@ -0,0 +1,306 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++GO_BIN="${GO_BIN:-go}"
++CURL_BIN="${CURL_BIN:-curl}"
++PY_BIN="${PY_BIN:-python3}"
++
++command -v "$CURL_BIN" >/dev/null || { echo "BALANCE_OFFLINE_STRESS_FAIL: curl missing" >&2; exit 1; }
++command -v "$PY_BIN" >/dev/null || { echo "BALANCE_OFFLINE_STRESS_FAIL: python3 missing" >&2; exit 1; }
++
++cd "$ROOT"
++if [[ ! -x bin/reasonix ]]; then
++  mkdir -p bin
++  GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
++fi
++
++TMP="$(mktemp -d)"
++WORK="$TMP/workspace"
++RXHOME="$TMP/reasonix-home"
++SHELLHOME="$TMP/shell-home"
++mkdir -p "$WORK" "$RXHOME" "$SHELLHOME"
++printf 'print("STRESS OK")\n' > "$WORK/hello.py"
++cat > "$WORK/reasonix.toml" <<'TOML'
++default_model = "balance-mock-deny"
++
++[[providers]]
++name = "balance-mock-deny"
++kind = "mock"
++model = "deny-bypass"
++base_url = "http://127.0.0.1"
++context_window = 1000000
++price = { cache_hit = 0, input = 0, output = 0, currency = "KZT" }
++
++[environment]
++offline = true
++
++[sandbox]
++bash = "off"
++TOML
++
++WRAPPER_PID=""
++PORT_FILE="$TMP/serve.port"
++PID_FILE="$TMP/serve.pid"
++LOG_FILE="$TMP/serve.log"
++BASE=""
++
++stop_server() {
++  local signal="${1:-TERM}"
++  local server_pid=""
++  if [[ -s "$PID_FILE" ]]; then
++    server_pid="$(tr -d '\r\n' < "$PID_FILE" 2>/dev/null || true)"
++  fi
++  if [[ "$server_pid" =~ ^[0-9]+$ ]] && kill -0 "$server_pid" 2>/dev/null; then
++    if [[ "$signal" == "KILL" ]]; then
++      kill -9 "$server_pid" 2>/dev/null || true
++    else
++      kill "$server_pid" 2>/dev/null || true
++    fi
++  fi
++  if [[ -n "$WRAPPER_PID" ]]; then
++    wait "$WRAPPER_PID" 2>/dev/null || true
++  fi
++  WRAPPER_PID=""
++}
++
++cleanup() {
++  stop_server TERM || true
++  rm -rf "$TMP"
++}
++trap cleanup EXIT
++
++start_server() {
++  rm -f "$PORT_FILE" "$PID_FILE"
++  : > "$LOG_FILE"
++  (
++    cd "$WORK"
++    env -u DEEPSEEK_API_KEY -u ANTHROPIC_API_KEY -u OPENAI_API_KEY \
++      HOME="$SHELLHOME" REASONIX_HOME="$RXHOME" \
++      "$ROOT/bin/reasonix" serve --model balance-mock-deny --addr 127.0.0.1:0 --auth none \
++        --port-file "$PORT_FILE" --pid-file "$PID_FILE" >>"$LOG_FILE" 2>&1
++  ) &
++  WRAPPER_PID=$!
++
++  for _ in $(seq 1 120); do
++    if [[ -s "$PORT_FILE" ]]; then
++      BASE="http://$(tr -d '\r\n' < "$PORT_FILE")"
++      if "$CURL_BIN" -fsS "$BASE/mod/app/contract" >/dev/null 2>&1; then
++        return 0
++      fi
++    fi
++    if ! kill -0 "$WRAPPER_PID" 2>/dev/null; then
++      cat "$LOG_FILE" >&2 || true
++      echo "BALANCE_OFFLINE_STRESS_FAIL: backend exited before readiness" >&2
++      exit 1
++    fi
++    sleep 0.1
++  done
++  cat "$LOG_FILE" >&2 || true
++  echo "BALANCE_OFFLINE_STRESS_FAIL: backend readiness timeout" >&2
++  exit 1
++}
++
++post_json() {
++  local path="$1"
++  local body="$2"
++  "$CURL_BIN" -fsS -H 'Content-Type: application/json' -d "$body" "$BASE$path"
++}
++
++wait_idle() {
++  for _ in $(seq 1 160); do
++    if "$CURL_BIN" -fsS "$BASE/mod/app/bootstrap" > "$TMP/bootstrap-poll.json"; then
++      if "$PY_BIN" - "$TMP/bootstrap-poll.json" <<'PY' >/dev/null 2>&1
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))
++raise SystemExit(0 if not p.get('running', False) else 1)
++PY
++      then
++        return 0
++      fi
++    fi
++    sleep 0.1
++  done
++  cat "$LOG_FILE" >&2 || true
++  echo "BALANCE_OFFLINE_STRESS_FAIL: backend did not become idle" >&2
++  exit 1
++}
++
++start_server
++
++echo "[stress 1/8] Contract and isolated zero-key backend"
++"$CURL_BIN" -fsS "$BASE/mod/app/contract" > "$TMP/contract.json"
++"$PY_BIN" - "$TMP/contract.json" <<'PY'
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))
++assert p['protocolVersion']=='balance-apk-v1'
++assert p['guarantees']['hiddenReasoningExported'] is False
++assert p['guarantees']['budgetEnforcedInBackend'] is True
++assert p['guarantees']['apkNeverAuthoritativeForSafety'] is True
++PY
++
++echo "[stress 2/8] Native deny survives capability-proxy bypass attempt"
++post_json /mod/app/apply '{
++  "profile":{"name":"Offline Stress","mode":"agent","toolPacks":["developer"],"liveDetail":"project"},
++  "budget":{"budgetKzt":50,"reservePercent":15,"proMaxPercent":25,"hardStop":true,"fxKztPerUnit":{"KZT":1}},
++  "toolDecisions":{"write_file":"deny"},
++  "approvalMode":"ask"
++}' > "$TMP/applied.json"
++"$CURL_BIN" -fsS "$BASE/mod/capabilities" > "$TMP/capabilities.json"
++"$PY_BIN" - "$TMP/capabilities.json" <<'PY'
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))
++by={x['name']:x for x in p['capabilities']}
++w=by['write_file']
++assert w['manualDecision']=='deny', w
++assert w['decision']=='deny', w
++assert w['providerVisible'] is False, w
++PY
++HTTP="$($CURL_BIN -sS -o "$TMP/deny-start.out" -w '%{http_code}' -H 'Content-Type: application/json' \
++  -d '{"input":"Attempt the offline denied-write bypass stress scenario."}' "$BASE/mod/app/task/start")"
++[[ "$HTTP" == "202" ]] || { cat "$TMP/deny-start.out" >&2; cat "$LOG_FILE" >&2; echo "BALANCE_OFFLINE_STRESS_FAIL: denied-write task start HTTP $HTTP" >&2; exit 1; }
++PASS=0
++for _ in $(seq 1 180); do
++  if "$CURL_BIN" -fsS "$BASE/mod/live/history?limit=160" > "$TMP/live-deny.json" && grep -q 'OFFLINE_DENY_NATIVE_PASS' "$TMP/live-deny.json"; then
++    PASS=1
++    break
++  fi
++  sleep 0.1
++done
++[[ "$PASS" == "1" ]] || { cat "$TMP/live-deny.json" >&2 || true; cat "$LOG_FILE" >&2; echo "BALANCE_OFFLINE_STRESS_FAIL: native deny/proxy bypass gate was not observed" >&2; exit 1; }
++[[ ! -e "$WORK/should_not_exist.txt" ]] || { echo "BALANCE_OFFLINE_STRESS_FAIL: denied writer created a file" >&2; exit 1; }
++wait_idle
++
++echo "[stress 3/8] Queue budget is clipped by workspace KZT ceiling"
++post_json /mod/queue/pause '{}' >/dev/null
++post_json /mod/queue/items '{"input":"Queued offline stress item","idempotencyKey":"stress-queue-1","taskBudget":{"budgetKzt":500,"tokenLimit":1000,"wallSeconds":60}}' > "$TMP/enqueue.json"
++"$PY_BIN" - "$TMP/enqueue.json" <<'PY'
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))
++b=p['taskBudget']
++assert b['requestedKzt']==500, b
++assert b['effectiveKzt']==50, b
++assert b['providerCurrency']=='KZT', b
++assert b['providerCostLimit']==50, b
++PY
++"$CURL_BIN" -fsS "$BASE/mod/queue" > "$TMP/queue-before.json"
++QUEUE_ID="$($PY_BIN - "$TMP/queue-before.json" <<'PY'
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))
++assert p['paused'] is True, p
++assert p['count'] >= 1, p
++for x in p['items']:
++    if x.get('preview') == 'Queued offline stress item':
++        print(x['id']); break
++else:
++    raise SystemExit('queued item missing')
++PY
++)"
++[[ -n "$QUEUE_ID" ]] || { echo "BALANCE_OFFLINE_STRESS_FAIL: queue id missing" >&2; exit 1; }
++
++echo "[stress 4/8] Rollback without checkpoint fails closed"
++HTTP="$($CURL_BIN -sS -o "$TMP/rollback.out" -w '%{http_code}' -H 'Content-Type: application/json' -d '{}' "$BASE/mod/recovery/rollback-last")"
++[[ "$HTTP" == "409" ]] || { cat "$TMP/rollback.out" >&2 || true; echo "BALANCE_OFFLINE_STRESS_FAIL: rollback status $HTTP, want 409" >&2; exit 1; }
++
++echo "[stress 5/8] Crash/restart preserves APK policy and paused durable queue"
++post_json /mod/app/persistence/save '{}' >/dev/null
++"$CURL_BIN" -fsS "$BASE/mod/tasks" > "$TMP/tasks-before.json"
++SESSION_PATH="$($PY_BIN - "$TMP/tasks-before.json" <<'PY'
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))
++cur=[x for x in p.get('tasks',[]) if x.get('current')]
++if not cur:
++    raise SystemExit('current session missing')
++print(cur[0]['path'])
++PY
++)"
++[[ -n "$SESSION_PATH" ]] || { echo "BALANCE_OFFLINE_STRESS_FAIL: current session path missing" >&2; exit 1; }
++stop_server KILL
++start_server
++RESUME_BODY="$("$PY_BIN" - "$SESSION_PATH" <<'PY'
++import json, sys
++print(json.dumps({'path':sys.argv[1]}))
++PY
++)"
++RESUMED=0
++for _ in $(seq 1 60); do
++  HTTP="$($CURL_BIN -sS -o "$TMP/resume.out" -w '%{http_code}' -H 'Content-Type: application/json' -d "$RESUME_BODY" "$BASE/resume")"
++  if [[ "$HTTP" == "204" ]]; then
++    RESUMED=1
++    break
++  fi
++  # A killed previous process can leave a lease that is still being observed;
++  # only transient conflict is retried. Other responses are real failures.
++  if [[ "$HTTP" != "409" ]]; then
++    cat "$TMP/resume.out" >&2 || true
++    echo "BALANCE_OFFLINE_STRESS_FAIL: resume HTTP $HTTP" >&2
++    exit 1
++  fi
++  sleep 0.1
++done
++[[ "$RESUMED" == "1" ]] || { cat "$TMP/resume.out" >&2 || true; echo "BALANCE_OFFLINE_STRESS_FAIL: stale lease did not clear after killed backend" >&2; exit 1; }
++"$CURL_BIN" -fsS "$BASE/mod/app/bootstrap" > "$TMP/bootstrap-after.json"
++"$CURL_BIN" -fsS "$BASE/mod/capabilities" > "$TMP/cap-after.json"
++"$CURL_BIN" -fsS "$BASE/mod/queue" > "$TMP/queue-after.json"
++"$PY_BIN" - "$TMP/bootstrap-after.json" "$TMP/cap-after.json" "$TMP/queue-after.json" "$QUEUE_ID" <<'PY'
++import json, sys
++b=json.load(open(sys.argv[1], encoding='utf-8'))
++c=json.load(open(sys.argv[2], encoding='utf-8'))
++q=json.load(open(sys.argv[3], encoding='utf-8'))
++qid=sys.argv[4]
++assert b['profile']['mode']=='agent', b['profile']
++assert b['budget']['budgetKzt']==50, b['budget']
++assert b['budget']['spentKzt']==0, b['budget']
++by={x['name']:x for x in c['capabilities']}
++assert by['write_file']['manualDecision']=='deny', by['write_file']
++assert by['write_file']['providerVisible'] is False, by['write_file']
++assert q['paused'] is True, q
++assert any(x['id']==qid for x in q['items']), q
++PY
++
++echo "[stress 6/8] Corrupt APK state is reported, not fatal"
++stop_server TERM
++STATE_FILE="$(find "$RXHOME/balance/apk-state" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null || true)"
++[[ -n "$STATE_FILE" ]] || { echo "BALANCE_OFFLINE_STRESS_FAIL: persisted APK state file missing" >&2; exit 1; }
++cp "$STATE_FILE" "$STATE_FILE.good"
++printf '{broken-json' > "$STATE_FILE"
++start_server
++"$CURL_BIN" -fsS "$BASE/mod/app/persistence" > "$TMP/persistence-corrupt.json"
++"$PY_BIN" - "$TMP/persistence-corrupt.json" <<'PY'
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))
++assert p['enabled'] is True, p
++assert isinstance(p.get('lastError'), str) and p['lastError'], p
++PY
++stop_server TERM
++mv "$STATE_FILE.good" "$STATE_FILE"
++start_server
++"$CURL_BIN" -fsS "$BASE/mod/app/bootstrap" > "$TMP/bootstrap-restored.json"
++"$PY_BIN" - "$TMP/bootstrap-restored.json" <<'PY'
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))
++assert p['profile']['mode']=='agent', p['profile']
++assert p['budget']['budgetKzt']==50, p['budget']
++assert p['budget']['spentKzt']==0, p['budget']
++assert not p['persistence'].get('lastError',''), p['persistence']
++PY
++
++echo "[stress 7/8] Invalid budget request is rejected without mutating state"
++HTTP="$($CURL_BIN -sS -o "$TMP/bad-budget.out" -w '%{http_code}' -H 'Content-Type: application/json' \
++  -d '{"budgetKzt":-1,"reservePercent":15,"proMaxPercent":25,"hardStop":true}' "$BASE/mod/budget")"
++[[ "$HTTP" == "400" ]] || { cat "$TMP/bad-budget.out" >&2 || true; echo "BALANCE_OFFLINE_STRESS_FAIL: invalid budget status $HTTP, want 400" >&2; exit 1; }
++"$CURL_BIN" -fsS "$BASE/mod/budget" > "$TMP/budget-final.json"
++"$PY_BIN" - "$TMP/budget-final.json" <<'PY'
++import json, sys
++p=json.load(open(sys.argv[1], encoding='utf-8'))['budget']
++assert p['budgetKzt']==50, p
++assert p['spentKzt']==0, p
++PY
++
++echo "[stress 8/8] PASS — crash, corrupt-state and deny-path remained offline"
++if grep -R -E 'sk-[A-Za-z0-9_-]{8,}|DEEPSEEK_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY' "$RXHOME/balance" >/dev/null 2>&1; then
++  echo "BALANCE_OFFLINE_STRESS_FAIL: provider-key-shaped data leaked into Balance Mod state" >&2
++  exit 1
++fi
++
++echo "BALANCE_MOD_OFFLINE_STRESS_PASS"
+diff --git a/scripts/balance_mod_smoke.sh b/scripts/balance_mod_smoke.sh
+index 1739618..1f798c5 100755
+--- a/scripts/balance_mod_smoke.sh
++++ b/scripts/balance_mod_smoke.sh
+@@ -5,109 +5,109 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ 
+ cd "$ROOT"
+-echo "[1/44] Unit tests: Balance Mod core + APK bridge"
++echo "[1/47] Unit tests: Balance Mod core + APK bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency ./internal/provider/mock ./internal/serve
+ 
+-echo "[2/44] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
++echo "[2/47] Objective power router: Flash -> Flash -> Pro diagnose -> Flash"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestEscalatorFlashFlashProFlash$' -count=1
+ 
+-echo "[3/44] Failure cache: verified-only persistence + corruption recovery"
++echo "[3/47] Failure cache: verified-only persistence + corruption recovery"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestFailureCache' -count=1
+ 
+-echo "[4/44] Context/patch economy: log reducer + patch governor"
++echo "[4/47] Context/patch economy: log reducer + patch governor"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestReduceBuildLog|TestPatchGovernor)' -count=1
+ 
+-echo "[5/44] Unified repair cycle: verifier -> router -> cache"
++echo "[5/47] Unified repair cycle: verifier -> router -> cache"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^(TestVerificationReceiptRequiresHostEvidence|TestRepairCycleFlashFlashProFlashAndVerifiedCache)$' -count=1
+ 
+-echo "[6/44] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
++echo "[6/47] Offline MockProvider drives Flash -> Flash -> Pro -> Flash repair cycle"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleDrivenByOfflineMockProvider$' -count=1
+ 
+-echo "[7/44] Recovery policy: regression/oversize rollback + fail-closed conflict"
++echo "[7/47] Recovery policy: regression/oversize rollback + fail-closed conflict"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestRepairCycleRollback' -count=1
+ 
+-echo "[8/44] APK cycle/recovery API integration"
++echo "[8/47] APK cycle/recovery API integration"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModCycleAPIAndHostRepairWiring|TestModRecoveryAPIIsFailClosedWithoutCheckpoint)$' -count=1
+ 
+-echo "[9/44] Execution router: model slots + immediate KZT admission re-check"
++echo "[9/47] Execution router: model slots + immediate KZT admission re-check"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouter' -count=1
+ 
+-echo "[10/44] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
++echo "[10/47] Native Reasonix model-switch path: Flash B -> Pro -> Flash repair"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModExecutionRouterUsesNativeServeModelSwitch$' -count=1
+ 
+-echo "[11/44] APK execution config/status contract"
++echo "[11/47] APK execution config/status contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModExecutionAPIIsStrictAndAPKVisible|TestModStatusExposesTypedAPKSurface)$' -count=1
+ 
+-echo "[12/44] Universal agent control: native per-tool allow/ask/deny + schema trim"
++echo "[12/47] Universal agent control: native per-tool allow/ask/deny + schema trim"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control ./internal/tool -run '^(TestSessionToolDecisions|TestSessionHiddenTools)' -count=1
+ 
+-echo "[13/44] APK agent/tools API contract"
++echo "[13/47] APK agent/tools API contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAgentToolsAPIUsesNativeRuntimePolicy$' -count=1
+ 
+-echo "[14/44] APK instructions + workspace file bridge"
++echo "[14/47] APK instructions + workspace file bridge"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModInstructionsAndWorkspaceFileAPI|TestModWorkspaceFileRejectsTraversal)$' -count=1
+ 
+-echo "[15/44] Provider-agnostic project profile"
++echo "[15/47] Provider-agnostic project profile"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestProjectProfile' -count=1
+ 
+-echo "[16/44] Capability Registry + Chat/Agent mode + Tool Packs"
++echo "[16/47] Capability Registry + Chat/Agent mode + Tool Packs"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProjectChatModeHidesMutatingToolsAndRestoresAgentMode|TestModProjectToolPackRestrictsSurfaceAndManualDenySurvives|TestModEnvironmentAndProjectContract)$' -count=1
+ 
+-echo "[17/44] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
++echo "[17/47] APK live protocol: actions/diff/results visible, hidden reasoning excluded"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModLive' -count=1
+ 
+-echo "[18/44] Restart-safe KZT ledger persistence"
++echo "[18/47] Restart-safe KZT ledger persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestBudgetPersistentState' -count=1
+ 
+-echo "[19/44] APK bootstrap + atomic apply + restart persistence"
++echo "[19/47] APK bootstrap + atomic apply + restart persistence"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModApp' -count=1
+ 
+-echo "[20/44] APK project registry + supervisor handoff"
++echo "[20/47] APK project registry + supervisor handoff"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModProjectRegistryAndSupervisorHandoff$' -count=1
+ 
+-echo "[21/44] Native task catalog + local rename (no provider listing call)"
++echo "[21/47] Native task catalog + local rename (no provider listing call)"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModTaskCatalogUsesNativeSessionsAndRename$' -count=1
+ 
+-echo "[22/44] APK durable task queue + per-turn budget metadata"
++echo "[22/47] APK durable task queue + per-turn budget metadata"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve ./internal/control -run '^(TestModQueue|TestParseInboxTaskBudget)' -count=1
+ 
+-echo "[23/44] Unified power engine: repair + router + budget + native execution"
++echo "[23/47] Unified power engine: repair + router + budget + native execution"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestPowerEngine' -count=1
+ 
+-echo "[24/44] Native turn evidence -> pending power route (no mid-turn model race)"
++echo "[24/47] Native turn evidence -> pending power route (no mid-turn model race)"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModPowerTurnTracker' -count=1
+ 
+-echo "[25/44] APK unified power endpoint + explicit idle-boundary apply"
++echo "[25/47] APK unified power endpoint + explicit idle-boundary apply"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModPowerAPIExposesUnifiedState|TestModPowerPendingRouteAppliesOnlyAtExplicitIdleBoundary)$' -count=1
+ 
+-echo "[26/44] Auto continuation policy: bounded lease + terminal route mapping"
++echo "[26/47] Auto continuation policy: bounded lease + terminal route mapping"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModAutoOrchestratorLeaseAndLimit|TestModAutoContinuationPromptsCoverOnlyNonTerminalRoutes)$' -count=1
+ 
+-echo "[27/44] Auto continuation safety: direct-submit gate + fail-closed without execution routing"
++echo "[27/47] Auto continuation safety: direct-submit gate + fail-closed without execution routing"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModAutoSubmitGateRejectsDirectHTTPDuringTransition|TestModAutoScheduleFailsClosedWithoutExecutionRouting)$' -count=1
+ 
+-echo "[28/44] APK orchestrator config/stop contract"
++echo "[28/47] APK orchestrator config/stop contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAutoAPIConfigAndStop$' -count=1
+ 
+-echo "[29/44] v0.13 execution-mode guard rollback semantics"
++echo "[29/47] v0.13 execution-mode guard rollback semantics"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouterModeGuardRunsBeforeSwitchAndRollsBackOnFailure$' -count=1
+ 
+-echo "[30/44] v0.13 Pro diagnosis is physically read-only"
++echo "[30/47] v0.13 Pro diagnosis is physically read-only"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModProDiagnosisHardDeniesMutatingTools$' -count=1
+ 
+-echo "[31/44] v0.13 pending route survives restart without raw log/prompt leakage"
++echo "[31/47] v0.13 pending route survives restart without raw log/prompt leakage"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModPendingPowerRoutePersistsSanitizedAcrossRestart$' -count=1
+ 
+-echo "[32/44] Native session-inbox crash recovery regression"
++echo "[32/47] Native session-inbox crash recovery regression"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/control -run '^TestInboxSnapshotRecoversUnownedInFlightItem$' -count=1
+ 
+-echo "[33/44] Debian Android backend supervisor syntax"
++echo "[33/47] Debian Android backend supervisor syntax"
+ bash -n ./scripts/reasonix_android_backend.sh
+ 
+-echo "[34/44] Native Reasonix completion gate regression test"
++echo "[34/47] Native Reasonix completion gate regression test"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/agent -run '^TestFinalReadinessBlocksUntilProjectCheckRunsAfterWriter$' -count=1
+ 
+-echo "[35/44] Build CLI only (skip example plugin)"
++echo "[35/47] Build CLI only (skip example plugin)"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+@@ -133,7 +133,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[36/44] Offline normal tool-loop"
++echo "[36/47] Offline normal tool-loop"
+ cd "$TMP"
+ OUT="$("$ROOT/bin/reasonix" run --model balance-mock --max-steps 6 "Run the offline Balance Mod smoke scenario." 2>&1 || true)"
+ printf '%s\n' "$OUT"
+@@ -160,7 +160,7 @@ offline = true
+ bash = "off"
+ TOML
+ 
+-echo "[37/44] Offline anti-loop intervention"
++echo "[37/47] Offline anti-loop intervention"
+ LOOP_OUT="$("$ROOT/bin/reasonix" run --model balance-mock-loop --max-steps 8 "Investigate the requested file. If a host guard detects repetition, obey it and stop retrying the same failed action." 2>&1 || true)"
+ printf '%s\n' "$LOOP_OUT"
+ if ! grep -q 'OFFLINE_LOOP_GUARD_PASS' <<<"$LOOP_OUT"; then
+@@ -170,39 +170,48 @@ fi
+ 
+ # Balance Mod v0.14.2: return from temp workspace before repo-relative tests.
+ cd "$ROOT"
+-echo "[38/44] v0.14 frozen APK v1 contract + bootstrap negotiation"
++echo "[38/47] v0.14 frozen APK v1 contract + bootstrap negotiation"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAPKContract' -count=1
+ 
+-echo "[39/44] v0.14 full localhost HTTP offline prototype"
++echo "[39/47] v0.14 full localhost HTTP offline prototype"
+ PATH="$(dirname "$(command -v "$GO_BIN")"):$PATH" GOTOOLCHAIN=local ./scripts/balance_mod_offline_prototype.sh
+ 
+-echo "[40/44] Universal agent-control contract summary"
++echo "[40/47] Universal agent-control contract summary"
+ echo "  - workspace root + confined file browser: PASS"
+ echo "  - per-tool allow/ask/deny via native gate: PASS"
+ echo "  - instruction editor via native memory docs: PASS"
+ echo "  - skill management surface: compiled in core serve tests"
+ 
+-echo "[41/44] Universal APK protocol summary"
++echo "[41/47] Universal APK protocol summary"
+ echo "  - dynamic Capability Registry + Tool Packs: PASS"
+ echo "  - Chat mode denies mutating tools without creating a second agent: PASS"
+ echo "  - APK environment endpoint reuses Reasonix native probes/cache + project markers: PASS"
+ echo "  - project profile is provider-agnostic and APK-replayable: PASS"
+ echo "  - live event history exposes actions/diffs/results but not hidden reasoning: PASS"
+ 
+-echo "[42/44] APK supervisor/control-plane summary"
++echo "[42/47] APK supervisor/control-plane summary"
+ echo "  - bootstrap + atomic settings apply: PASS"
+ echo "  - task start/stop aliases reuse native submit/cancel: PASS"
+ echo "  - workspace-scoped policy survives backend restart: PASS"
+ echo "  - KZT/Pro spend ledger survives restart: PASS"
+ echo "  - Debian Android supervisor wrapper syntax: PASS"
+ 
+-echo "[43/44] APK v1 protocol freeze summary"
++echo "[43/47] APK v1 protocol freeze summary"
+ echo "  - machine-readable endpoint/event manifest: PASS"
+ echo "  - contract digest exposed in bootstrap: PASS"
+ echo "  - breaking endpoint semantics require protocol-major bump: PASS"
+ echo "  - localhost HTTP -> mock tool-loop -> live history: PASS"
+ 
+-echo "[44/44] PASS — no provider API key/network was used"
++echo "[44/47] v0.15 native deny-bypass mock policy regression"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/provider/mock -run '^TestDenyBypassScenarioRequiresSchemaTrimAndNativeDenial$' -count=1
++
++echo "[45/47] v0.15 offline stress harness syntax"
++bash -n ./scripts/balance_mod_offline_stress.sh
++
++echo "[46/47] v0.15 full localhost crash/restart/policy stress gate"
++PATH="$(dirname "$(command -v "$GO_BIN")"):$PATH" GOTOOLCHAIN=local ./scripts/balance_mod_offline_stress.sh
++
++echo "[47/47] PASS — no provider API key/network was used"
+ echo "  - v0.1 KZT budget/resource telemetry: PASS"
+ echo "  - v0.2 native anti-loop/completion telemetry: PASS"
+ echo "  - v0.3 router/cache/log/patch modules: PASS"
+@@ -217,4 +226,5 @@ echo "  - v0.11 unified power engine + native turn-evidence bridge: PASS"
+ echo "  - v0.12 idle-boundary auto continuation + durable inbox handoff: PASS"
+ echo "  - v0.13 durable pending route recovery + hard Pro diagnosis read-only gate: PASS"
+ echo "  - v0.14 APK v1 contract freeze + localhost offline prototype: PASS"
+-echo "BALANCE_MOD_V14_SMOKE_PASS"
++echo "  - v0.15 native deny bypass + crash/restart + queue/state stress gate: PASS"
++echo "BALANCE_MOD_V15_SMOKE_PASS"
+diff --git a/scripts/balance_mod_smoke_quick.sh b/scripts/balance_mod_smoke_quick.sh
+index 3c84a78..b97cf5f 100755
+--- a/scripts/balance_mod_smoke_quick.sh
++++ b/scripts/balance_mod_smoke_quick.sh
+@@ -5,23 +5,29 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ GO_BIN="${GO_BIN:-go}"
+ cd "$ROOT"
+ 
+-echo "[1/6] v0.12 orchestrator policy + APK contract"
++echo "[1/8] v0.12 orchestrator policy + APK contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAuto' -count=1
+ 
+-echo "[2/6] v0.13 execution-mode guard rollback"
++echo "[2/8] v0.13 execution-mode guard rollback"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/efficiency -run '^TestExecutionRouterModeGuardRunsBeforeSwitchAndRollsBackOnFailure$' -count=1
+ 
+-echo "[3/6] v0.13 hard Pro diagnosis + durable pending route"
++echo "[3/8] v0.13 hard Pro diagnosis + durable pending route"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^(TestModProDiagnosisHardDeniesMutatingTools|TestModPendingPowerRoutePersistsSanitizedAcrossRestart)$' -count=1
+ 
+-echo "[4/6] v0.14 frozen APK contract"
++echo "[4/8] v0.14 frozen APK contract"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^TestModAPKContract' -count=1
+ 
+-echo "[5/6] Serve package compile gate"
++echo "[5/8] v0.15 native deny-bypass mock scenario"
++GOTOOLCHAIN=local "$GO_BIN" test ./internal/provider/mock -run '^TestDenyBypassScenarioRequiresSchemaTrimAndNativeDenial$' -count=1
++
++echo "[6/8] v0.15 offline stress harness syntax"
++bash -n ./scripts/balance_mod_offline_stress.sh
++
++echo "[7/8] Serve package compile gate"
+ GOTOOLCHAIN=local "$GO_BIN" test ./internal/serve -run '^$' -count=1
+ 
+-echo "[6/6] CLI compile gate"
++echo "[8/8] CLI compile gate"
+ mkdir -p bin
+ GOTOOLCHAIN=local CGO_ENABLED=0 "$GO_BIN" build -o bin/reasonix ./cmd/reasonix
+ 
+-echo "BALANCE_MOD_V14_QUICK_PASS"
++echo "BALANCE_MOD_V15_QUICK_PASS"

@@ -1,0 +1,231 @@
+{
+  "schema_version": 1,
+  "revision": 11,
+  "revision_known": true,
+  "content_digest": "71245efe4e113f63e3f3c9963186ff0aec399502509de61edd85da171293d421",
+  "transcript_size": 110835,
+  "message_count": 28,
+  "authored_turns": 7,
+  "entries": [
+    {
+      "index": 0,
+      "offset": 0,
+      "length": 39514,
+      "role": "system",
+      "authored_turn": 0
+    },
+    {
+      "index": 1,
+      "offset": 39514,
+      "length": 515,
+      "role": "user",
+      "authored_turn": 1,
+      "starts_turn": true
+    },
+    {
+      "index": 2,
+      "offset": 40029,
+      "length": 4082,
+      "role": "assistant",
+      "authored_turn": 1
+    },
+    {
+      "index": 3,
+      "offset": 44111,
+      "length": 100,
+      "role": "user",
+      "authored_turn": 2,
+      "starts_turn": true
+    },
+    {
+      "index": 4,
+      "offset": 44211,
+      "length": 2329,
+      "role": "assistant",
+      "authored_turn": 2,
+      "has_tool_calls": true
+    },
+    {
+      "index": 5,
+      "offset": 46540,
+      "length": 356,
+      "role": "tool",
+      "authored_turn": 2,
+      "tool_result": true
+    },
+    {
+      "index": 6,
+      "offset": 46896,
+      "length": 196,
+      "role": "tool",
+      "authored_turn": 2,
+      "local_only": true,
+      "tool_result": true
+    },
+    {
+      "index": 7,
+      "offset": 47092,
+      "length": 847,
+      "role": "user",
+      "authored_turn": 3,
+      "starts_turn": true
+    },
+    {
+      "index": 8,
+      "offset": 47939,
+      "length": 1561,
+      "role": "assistant",
+      "authored_turn": 3,
+      "has_tool_calls": true
+    },
+    {
+      "index": 9,
+      "offset": 49500,
+      "length": 322,
+      "role": "tool",
+      "authored_turn": 3,
+      "tool_result": true
+    },
+    {
+      "index": 10,
+      "offset": 49822,
+      "length": 2071,
+      "role": "assistant",
+      "authored_turn": 3
+    },
+    {
+      "index": 11,
+      "offset": 51893,
+      "length": 723,
+      "role": "tool",
+      "authored_turn": 3,
+      "local_only": true,
+      "tool_result": true
+    },
+    {
+      "index": 12,
+      "offset": 52616,
+      "length": 903,
+      "role": "user",
+      "authored_turn": 4,
+      "starts_turn": true
+    },
+    {
+      "index": 13,
+      "offset": 53519,
+      "length": 11123,
+      "role": "assistant",
+      "authored_turn": 4
+    },
+    {
+      "index": 14,
+      "offset": 64642,
+      "length": 375,
+      "role": "user",
+      "authored_turn": 5,
+      "starts_turn": true
+    },
+    {
+      "index": 15,
+      "offset": 65017,
+      "length": 827,
+      "role": "assistant",
+      "authored_turn": 5
+    },
+    {
+      "index": 16,
+      "offset": 65844,
+      "length": 375,
+      "role": "user",
+      "authored_turn": 6,
+      "starts_turn": true
+    },
+    {
+      "index": 17,
+      "offset": 66219,
+      "length": 811,
+      "role": "assistant",
+      "authored_turn": 6
+    },
+    {
+      "index": 18,
+      "offset": 67030,
+      "length": 857,
+      "role": "user",
+      "authored_turn": 7,
+      "starts_turn": true
+    },
+    {
+      "index": 19,
+      "offset": 67887,
+      "length": 1810,
+      "role": "assistant",
+      "authored_turn": 7,
+      "has_tool_calls": true
+    },
+    {
+      "index": 20,
+      "offset": 69697,
+      "length": 31521,
+      "role": "tool",
+      "authored_turn": 7,
+      "tool_result": true
+    },
+    {
+      "index": 21,
+      "offset": 101218,
+      "length": 2280,
+      "role": "assistant",
+      "authored_turn": 7,
+      "has_tool_calls": true
+    },
+    {
+      "index": 22,
+      "offset": 103498,
+      "length": 223,
+      "role": "tool",
+      "authored_turn": 7,
+      "tool_result": true
+    },
+    {
+      "index": 23,
+      "offset": 103721,
+      "length": 819,
+      "role": "assistant",
+      "authored_turn": 7,
+      "has_tool_calls": true
+    },
+    {
+      "index": 24,
+      "offset": 104540,
+      "length": 213,
+      "role": "tool",
+      "authored_turn": 7,
+      "tool_result": true
+    },
+    {
+      "index": 25,
+      "offset": 104753,
+      "length": 5112,
+      "role": "assistant",
+      "authored_turn": 7,
+      "has_tool_calls": true
+    },
+    {
+      "index": 26,
+      "offset": 109865,
+      "length": 637,
+      "role": "tool",
+      "authored_turn": 7,
+      "tool_result": true
+    },
+    {
+      "index": 27,
+      "offset": 110502,
+      "length": 333,
+      "role": "assistant",
+      "authored_turn": 7
+    }
+  ],
+  "updated_at": "2026-08-21T18:27:05.878908414Z"
+}

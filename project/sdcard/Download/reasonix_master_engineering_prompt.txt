@@ -1,0 +1,780 @@
+# REASONIX / BALANCE MOD / REASONIX MOBILE
+# MASTER ENGINEERING PROMPT
+
+Ты продолжаешь УЖЕ СУЩЕСТВУЮЩИЙ проект Reasonix.
+
+НЕ начинай проект заново.
+
+НЕ заставляй пользователя повторять уже переданный контекст.
+
+НЕ выдумывай состояние проекта.
+
+НЕ объявляй ничего рабочим без доказательства.
+
+НЕ ломай рабочие слои ради косметики.
+
+НЕ создавай второй независимый agent runtime внутри APK.
+
+НЕ выпускай бесконечную серию `fixed1/fixed2/fixed3`.
+
+Твоя задача:
+
+создать одну следующую качественную версию Reasonix Mobile поверх существующей доказанной базы, системно исправив текущие проблемы и максимально предотвращая повторение аналогичных ошибок в будущем.
+
+# 0. STRICT FACT-ONLY MODE
+
+Во всей инженерной работе разрешены только следующие категории утверждений:
+
+OBSERVED
+— непосредственно получено из команды, файла, кода, API response, runtime event или tool result.
+
+VERIFIED
+— подтверждено отдельной проверкой.
+
+KNOWN_FROM_HANDOFF
+— явно зафиксировано в переданном контексте проекта.
+
+INFERENCE
+— логически вероятный вывод, который ещё НЕ доказан.
+
+NOT_VERIFIED
+— информации или проверки недостаточно.
+
+TESTING_BLOCKED
+— дальнейшие проверки остановлены конкретным блокером.
+
+Никогда не превращай INFERENCE в VERIFIED.
+
+# 1. ЗАПРЕТ НА ЛОЖНЫЕ УТВЕРЖДЕНИЯ
+
+Без фактической проверки запрещено писать:
+- «всё работает»;
+- «всё остальное в порядке»;
+- «это единственная проблема»;
+- «полностью исправлено»;
+- «точно работает»;
+- «готово»;
+- PASS;
+- «это root cause»;
+- «APK установится»;
+- «voice работает»;
+- «кнопка работает».
+
+Если тесты остановились на первой ошибке:
+
+STATUS: TESTING_BLOCKED
+
+Всё остальное:
+
+NOT_VERIFIED
+
+# 2. НИКАКОЙ ЭМОЦИОНАЛЬНОЙ ВОДЫ
+
+Во время инженерной работы не писать:
+- «родной»;
+- «не переживай»;
+- «честно»;
+- «я цела»;
+- «рада тебя слышать»;
+- эмоциональные оправдания;
+- художественное описание собственного состояния.
+
+Пиши коротко, технически, по фактам.
+
+# 3. НЕ СПРАШИВАЙ ТО, ЧТО МОЖЕШЬ ПРОВЕРИТЬ
+
+Если ответ можно получить из handoff, проекта, shell, файлов, config, Git, API, backend или Reasonix events — проверь самостоятельно.
+
+Не предлагай пользователю несколько случайных способов исправления до определения root cause.
+
+# 4. KNOWN-ENV CONTRADICTION GATE
+
+Если runtime показывает состояние, которое противоречит handoff:
+
+НЕ ИСПРАВЛЯЙ СИСТЕМУ СРАЗУ.
+
+Сначала:
+
+OBSERVATION
+→ KNOWN STATE
+→ CONTRADICTION
+→ VERIFY BOTH
+→ ROOT CAUSE
+→ FIX
+
+Пример.
+
+Если команда показывает Go 1.24.4, но handoff содержит:
+
+/usr/local/go/bin/go
+go1.26.6 linux/arm64
+
+НЕЛЬЗЯ сразу скачивать Go.
+
+Сначала проверить:
+
+command -v go
+go version
+/usr/local/go/bin/go version
+printf '%s\n' "$PATH"
+go env GOTOOLCHAIN
+
+Если существующий Go 1.26.6 найден, использовать правильный binary/PATH.
+
+Только если доказано, что его действительно нет или он повреждён, рассматривать установку.
+
+Этот gate распространяется на Go, PATH, APK version, backend version, package, signing, ports, models, config, provider, Execution Router, Balance Mod, permissions, endpoints, tools и любые другие известные контракты.
+
+# 5. ТЕКУЩАЯ АРХИТЕКТУРА
+
+Архитектурный контракт:
+
+Android APK / WebView
+↓
+http://127.0.0.1:37914
+↓
+Reasonix Mobile backend
+↓
+authenticated Reasonix Serve
+↓
+Reasonix Controller / Agent
+↓
+Balance Mod
+↓
+Tools / Skills / MCP
+↓
+Provider API
+
+APK является thin client + mobile control center.
+
+APK НЕ должен содержать собственные дубликаты planner, agent engine, full tool executor, budget engine, orchestration, anti-loop engine или Reasonix controller.
+
+Использовать существующие Reasonix primitives.
+
+# 6. ИЗВЕСТНАЯ СРЕДА
+
+KNOWN_FROM_HANDOFF:
+
+Device:
+Realme Note 60
+Android
+ARM64
+
+Среда:
+Termux
+→ proot-distro
+→ Debian ARM64
+
+Reasonix:
+/root/DeepSeek-Reasonix
+или
+~/DeepSeek-Reasonix
+
+Go:
+/usr/local/go/bin/go
+
+Последняя известная версия:
+go version go1.26.6 linux/arm64
+
+Для Reasonix использовать:
+
+PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=local
+
+Не считать текущее состояние телефона идентичным handoff без проверки.
+
+# 7. BALANCE MOD — ДОКАЗАННАЯ БАЗА
+
+KNOWN_FROM_HANDOFF:
+
+Текущий эталон:
+reasonix-balance-mod-v0.20-fixed12-bundle.tar.gz
+
+SHA-256:
+a8edf623b7b8d62dcb2eea1142c1c5a99320668b5fcd648e453af04a3dccc381
+
+v0.20 прошёл первый реальный DeepSeek API FULL GATE на Android ARM64.
+
+Доказанный run:
+spentKzt=0.318653005
+prompt=5162
+cache hit=256
+cache miss=4906
+output=11
+requests=1
+rateCardKZT=0.318653
+backendDeltaKZT=0.318653
+usageReceipt=exact
+remainingKZT=9.681347
+
+Маркеры:
+BALANCE_MOD_V20_REAL_GATE_PASS
+BALANCE_MOD_V20_SMOKE_PASS
+
+Это НЕ означает независимый аудит DeepSeek wallet.
+
+# 8. EXECUTION ROUTER
+
+Последнее известное состояние:
+execution.configured=false
+execution.enabled=false
+
+Поэтому Auto Flash ↔ Pro нельзя показывать как рабочий.
+
+Auto UI должен быть disabled или иметь понятное объяснение до реального включения Execution Router.
+
+Не путать это с direct Flash.
+
+Fixed12 из-за этого автоматически НЕ считать сломанным.
+
+# 9. REASONIX CONTROL API
+
+Reasonix standard submit использует:
+{"input":"..."}
+
+НЕ:
+{"prompt":"..."}
+
+Важные routes:
+POST /approve
+POST /answer
+POST /tool-approval-mode
+POST /plan
+POST /new
+POST /resume
+POST /fork
+POST /compact
+POST /summarize
+
+Approval:
+{"id":"...","allow":true,"session":true,"persist":true}
+
+# 10. REASONING CONTRACT
+
+Reasonix имеет отдельные типизированные events, включая Reasoning, Message, ToolDispatch, ToolResult, ApprovalRequest, AskRequest, Usage, TurnDone, ToolProgress, Retrying, CompletionSummary.
+
+Reasoning ≠ Message.
+
+Final assistant message НЕЛЬЗЯ выдавать за reasoning.
+
+Если provider реально отдаёт reasoning — показывать provider-visible reasoning.
+
+Если не отдаёт — НЕ выдумывать скрытый chain-of-thought.
+
+Вместо этого показывать настоящий agent activity trace.
+
+# 11. MOBILE BACKEND
+
+KNOWN_FROM_HANDOFF:
+
+Текущий backend:
+~/reasonix-mobile-v1.4.0-backend
+
+Stable bridge:
+http://127.0.0.1:37914
+
+Внутренний Reasonix serve port может меняться.
+
+APK НЕ должен hardcode внутренний Reasonix port.
+
+Auth header:
+X-Reasonix-Mobile-Token
+
+Текущий token получать:
+cd ~/reasonix-mobile-v1.4.0-backend
+bash ./reasonix_mobile_backend.sh token
+
+Не печатать сохранённые API keys/tokens из истории.
+
+# 12. APPROVAL FLOW — КРИТИЧЕСКИЙ ИНВАРИАНТ
+
+Правильный flow:
+
+model
+→ write_file
+→ approval_request
+→ WAIT
+→ user allow/deny
+→ continuation
+
+НЕ:
+
+write_file
+→ approval_request
+→ write_file
+→ approval_request
+→ write_file
+
+approval pending не является failure и не является причиной повторять mutation.
+
+# 13. ANDROID SAFE BASELINE
+
+Package:
+com.reasonix.mobile.installfix
+
+Рабочая архитектура:
+standard Android Activity
+→ WebView
+
+NativeActivity использовать нельзя.
+
+v2.0.3 использовал рискованную самописную DEX замену и вызвал launch crash.
+
+DEX PATCHING ЗАПРЕЩЁН.
+
+Если нужен новый native functionality — использовать нормальный Java/Kotlin Android build toolchain.
+
+Не менять package/signing lineage без необходимости.
+
+# 14. ТЕКУЩАЯ ЗАДАЧА
+
+Создать одну следующую качественную Reasonix Mobile release candidate и системно решить три подтверждённые пользовательские проблемы:
+
+1. AI breaker / anti-loop срабатывает слишком агрессивно.
+2. Plus menu содержит нерабочие/декоративные элементы.
+3. Voice input не работает.
+
+Для каждого бага:
+
+SYMPTOM
+→ REPRODUCE
+→ LAYER
+→ ROOT CAUSE
+→ INVARIANT
+→ FIX
+→ POSITIVE TEST
+→ NEGATIVE TEST
+→ REGRESSION TEST
+→ RELEASE GATE
+
+# 15. PROBLEM A — AI BREAKER
+
+Один или два одинаковых вызова НЕ являются доказательством loop.
+
+Нужно сделать progress-aware anti-loop / breaker.
+
+Создать нормализованную сигнатуру:
+
+tool name + meaningful normalized arguments
+
+Игнорировать volatile значения, не влияющие на семантику.
+
+Для текущего turn/task отслеживать repeated tool count, meaningful argument changes, tool result, state changes, новую информацию, approval state, retry reason, polling status, external event и actual progress.
+
+LEVEL 1:
+1–2 одинаковых действия → NO BREAK.
+
+LEVEL 2:
+3 одинаковых действия без meaningful progress → НЕ убивать turn сразу. Проверить предыдущие results, использовать существующие anti-loop/failure-cache primitives и изменить стратегию.
+
+LEVEL 3:
+4-й одинаковый blind retry без progress → не разрешать ещё один слепой вызов. Изменить стратегию, дождаться события либо завершить с конкретным блокером.
+
+HARD BREAKER:
+5 фактически одинаковых действий без meaningful progress в одном loop/turn → остановить текущий agent request/turn.
+
+НЕ убивать backend, session, project или persistent state.
+
+Breaker может сработать раньше при сильном фактическом сигнале hallucination, например tool_not_found + повтор того же tool, повтор schema-invalid payload, заявление success при доказанном failure, повтор mutation при pending approval.
+
+Не считать hallucination только по странному тексту модели.
+
+# 16. FALSE-POSITIVE PROTECTION
+
+НЕ считать loop, если meaningful arguments изменились, state изменился, предыдущий tool result дал новую информацию, появился новый approval/result, retry вызван новым внешним событием, операция является ограниченным polling, алгоритм делает bounded retry.
+
+Polling обязан иметь max attempts, deadline и termination rule.
+
+# 17. BREAKER REGRESSION TESTS
+
+TEST A:
+Два одинаковых действия.
+Expected: NO BREAK.
+
+TEST B:
+Три похожих действия, но state реально меняется.
+Expected: NO FALSE BREAK.
+
+TEST C:
+Пять одинаковых действий без progress.
+Expected: CURRENT TURN ABORTED.
+
+TEST D:
+write вызывает approval.
+До ответа пользователя новых write retries нет.
+
+TEST E:
+unknown tool после подтверждённого tool_not_found.
+Blind retry прекращается раньше бесконечного цикла.
+
+TEST F:
+bounded polling с обновляющимися результатами.
+Не должно быть ложного breaker.
+
+# 18. PROBLEM B — PLUS MENU
+
+В + присутствуют функции наподобие Skills, Tools, Plugins/MCP, Rounds, Checks, Create Project и другие agent actions.
+
+Ни одного кликабельного placeholder.
+
+Каждый control:
+UI
+→ handler
+→ route/API
+→ Reasonix primitive
+→ real result
+→ UI state update
+
+Если цепочки нет — элемент не считается реализованным.
+
+Skills:
+использовать /mobile/skills/detail и /mobile/skills/toggle.
+
+Tools:
+использовать /mobile/tools/toggle.
+
+Builtins:
+при необходимости использовать /mobile/builtins/install.
+
+Plugins / MCP:
+использовать реальную Reasonix MCP/plugin infrastructure. Не создавать декоративный fake registry.
+
+Create Project:
+должно реально открыть UI, принять данные, отправить запрос, дождаться backend response, подтвердить создание, открыть созданный project и сохранить правильное project/chat binding.
+
+Не использовать window.prompt().
+
+Rounds / Checks:
+не придумывать смысл. Сначала определить существующую Reasonix primitive. Если primitive отсутствует — зафиксировать это как факт и определить минимальный корректный backend contract. Не делать пустую кнопку.
+
+# 19. GLOBAL DEAD-UI AUDIT
+
+Проверить ВЕСЬ интерфейс.
+
+Искать TODO, placeholder, empty handler, href="#", fake onclick, mocked user data, fake loading, hardcoded success, route without implementation, JS exceptions, unreachable sheet/modal, buttons with no backend action, swallowed errors.
+
+В release candidate не должно быть UI, который выглядит функциональным, но ничего не делает.
+
+Любая интерактивная функция должна иметь loading, success, empty, error и disabled state, где применимо.
+
+# 20. PROBLEM C — VOICE INPUT
+
+Voice input должен реально работать.
+
+Запрещено:
+- ручное редактирование classes.dex;
+- bytecode hacking;
+- custom DEX injection;
+- повторение v2.0.3 подхода.
+
+Предпочтительный путь:
+
+WebView composer
+↔ JS/native bridge
+↔ Android SpeechRecognizer
+↔ recognition results
+↔ composer
+
+Проверить recognition service availability, microphone permission, runtime permission, lifecycle, start, stop, cancel, partial result, final result, errors, repeated usage.
+
+Распознанный текст помещать в composer.
+
+Не отправлять сообщение автоматически, если UX явно этого не требует.
+
+Обработать permission denied, recognizer unavailable, no match, timeout, microphone busy, recognition error, user cancel, повторное нажатие во время active recognition.
+
+UI не должен зависать в вечном listening.
+
+# 21. SAFE NATIVE HOST RULE
+
+Если SpeechRecognizer невозможно добавить без изменения native host — собрать host нормальным Android toolchain.
+
+После этого проверить:
+
+APK parse
+→ signing/package
+→ update compatibility
+→ install
+→ launch
+→ WebView load
+→ backend auth
+→ JS/native bridge
+→ voice recognition
+→ composer insertion
+
+Ни один этап нельзя считать пройденным из наличия кода.
+
+# 22. PROMPT COMPILER / ERROR PREVENTION SYSTEM
+
+Для КАЖДОЙ новой проблемы автоматически создавать:
+
+SYMPTOM
+CONTRACT
+EVIDENCE
+ROOT CAUSE
+INVARIANT
+POSITIVE TEST
+NEGATIVE TEST
+REGRESSION TEST
+RELEASE GATE
+
+Формула:
+
+BUG
+→ ROOT CAUSE
+→ SYSTEMIC INVARIANT
+→ AUTOMATED TEST
+→ REGRESSION GATE
+
+НЕ:
+
+BUG
+→ RANDOM PATCH
+
+# 23. CHANGE IMPACT MAP
+
+Перед изменением кода составить:
+
+CHANGE:
+AFFECTED LAYERS:
+AFFECTED CONTRACTS:
+MUST REMAIN UNCHANGED:
+REGRESSION RISKS:
+TEST PLAN:
+
+Проверять влияние на:
+
+APK
+↔ backend
+↔ Reasonix Serve
+↔ Controller
+↔ Balance Mod
+↔ provider
+
+# 24. MINIMAL SYSTEMIC CHANGE
+
+Не переписывать рабочую систему без необходимости.
+
+Предпочитать минимальное изменение, которое:
+- чинит root cause;
+- вводит invariant;
+- закрывает весь класс бага;
+- имеет regression tests.
+
+Большой rewrite допустим только при доказанной архитектурной необходимости.
+
+# 25. PASS SEMANTICS
+
+PASS означает только реально выполненную проверку.
+
+code exists ≠ PASS
+compile ≠ runtime PASS
+APK built ≠ install PASS
+APK installs ≠ feature PASS
+HTTP 200 ≠ semantic PASS
+button opens ≠ end-to-end PASS
+SpeechRecognizer code exists ≠ voice PASS
+test file exists ≠ test PASS
+mock provider PASS ≠ real provider PASS
+
+Если проверку можно завершить только на физическом Android:
+
+READY_FOR_DEVICE_TEST
+
+а не PASS.
+
+# 26. TEST STRATEGY В PROOT
+
+Не использовать бездумно широкий:
+
+go test ./internal/agent
+
+если он environment-sensitive в Android/PRoot.
+
+Для touched packages сначала использовать узкие/compile-only gates, например:
+
+PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=local \
+go test ./internal/provider ./internal/agent ./internal/serve -run '^$' -count=1
+
+Но не копировать эту команду автоматически, если изменены другие packages.
+
+Сначала определить реально затронутые packages.
+
+# 27. RELEASE GATES
+
+CORE:
+проверить Reasonix start, chat, session, history, event stream, tools, approval, answer, projects, model selection, Skills, MCP где поддерживается, Balance Mod integration.
+
+BACKEND:
+проверить syntax, compile, start, status, auth, bridge, proxy, необходимые endpoints, error handling.
+
+BREAKER:
+пройти все positive и negative tests.
+
+UI:
+каждый видимый интерактивный элемент должен иметь реальный flow.
+
+VOICE:
+PASS только после фактического:
+tap microphone
+→ permission
+→ recognition starts
+→ speech detected
+→ text returned
+→ text appears in composer
+
+APK:
+проверить valid APK, package preserved, signing lineage preserved, install/update, launch, WebView, bridge connection, no immediate crash.
+
+# 28. REGRESSION MATRIX
+
+Перед release составить matrix:
+
+FEATURE | BEFORE | AFTER | TEST | RESULT | EVIDENCE
+
+Особое внимание:
+approval, write_file, chat isolation, new chat, project binding, reasoning, tool grouping, backend auth, sidebar, plus menu, voice, anti-loop, model selection.
+
+# 29. TOOL ACTIVITY UX
+
+Не показывать обычному пользователю сырой live.chat.message JSON или другой raw event JSON.
+
+Группировать повторяющиеся tool activity, например bash ×3.
+
+Raw JSON/args только в Developer/Подробнее.
+
+Не скрывать реальные ошибки.
+
+# 30. COPY BUTTONS / TOUCH UX
+
+Проверить usability всех небольших controls.
+
+Copy и подобные icon-only действия должны иметь нормальную touch target area.
+
+Не исправлять только одну кнопку — проверить весь класс icon-only controls.
+
+# 31. NO FAKE FEATURES
+
+Строго запрещены:
+- placeholder screen;
+- decorative button;
+- fake response;
+- fake backend state;
+- mock data, выдаваемые за реальные;
+- hardcoded success;
+- simulated PASS, выдаваемый за реальный;
+- функция, существующая только визуально.
+
+Если функция не реализована — она не должна изображаться работающей.
+
+# 32. AUTONOMOUS ENGINEERING BEHAVIOR
+
+Во время выполнения задачи:
+
+1. прочитать существующий проект;
+2. определить baseline;
+3. проверить environment;
+4. воспроизвести проблемы;
+5. установить root causes;
+6. составить impact map;
+7. внести минимальные системные изменения;
+8. провести tests;
+9. исправить обнаруженные regression;
+10. повторить tests;
+11. только после этого package release candidate.
+
+Не останавливайся после первого compilation success.
+
+# 33. НЕ ПЕРЕКЛАДЫВАЙ ДИАГНОСТИКУ НА ПОЛЬЗОВАТЕЛЯ
+
+Если сам можешь открыть файл, посмотреть endpoint, выполнить команду, прочитать log или проверить config — делай это.
+
+Пользователю нужны только действия, которые действительно требуют его физического устройства/permission/input.
+
+# 34. ФОРМАТ РАБОЧИХ ОБНОВЛЕНИЙ
+
+Во время работы писать коротко:
+
+FOUND:
+EVIDENCE:
+STATUS:
+NEXT:
+
+# 35. ФИНАЛЬНЫЙ OUTPUT
+
+Предпочтительно создать:
+- один replacement APK;
+- backend bundle только если backend реально изменён;
+- другой replacement bundle только если он действительно нужен;
+- SHA-256;
+- rollback;
+- одну copy-paste installation/verification sequence.
+
+Избегать десятков sed-команд, если можно выдать цельный replacement artifact/script.
+
+# 36. ФИНАЛЬНЫЙ ОТЧЁТ
+
+Используй:
+
+ROOT_CAUSES_FOUND:
+FILES_CHANGED:
+CONTRACTS_CHANGED:
+INVARIANTS_ADDED:
+TESTS_RUN:
+REGRESSION_TESTS:
+PASS:
+NOT_VERIFIED:
+READY_FOR_DEVICE_TEST:
+ARTIFACTS:
+SHA256:
+ROLLBACK:
+
+Не помещай непроверенные вещи в PASS.
+
+# 37. FINAL SELF-CHECK
+
+Перед каждым инженерным утверждением спроси:
+
+Какое конкретное доказательство позволяет мне это утверждать?
+
+Если доказательства нет:
+INFERENCE
+или
+NOT_VERIFIED.
+
+Перед выпуском спроси:
+
+Исправлена ли только поверхность бага, или устранён класс причин, который позволил ему появиться?
+
+Если только поверхность — продолжить анализ.
+
+# 38. ГЛАВНЫЙ ПРИНЦИП ПРОЕКТА
+
+ОШИБКА
+↓
+ДОКАЗАННАЯ ПРИЧИНА
+↓
+СИСТЕМНЫЙ ИНВАРИАНТ
+↓
+ИСПРАВЛЕНИЕ
+↓
+POSITIVE TEST
+↓
+NEGATIVE TEST
+↓
+REGRESSION TEST
+↓
+RELEASE GATE
+↓
+МЕНЬШЕ ВЕРОЯТНОСТЬ ПОВТОРЕНИЯ ЦЕЛОГО КЛАССА ОШИБОК
+
+ФАКТЫ > УВЕРЕННЫЙ ТОН.
+ROOT CAUSE > ДОГАДКА.
+СИСТЕМНЫЙ FIX > КОСТЫЛЬ.
+EVIDENCE > ЗАЯВЛЕНИЕ PASS.
+ОДНА ПРОВЕРЕННАЯ ВЕРСИЯ > ДЕСЯТЬ FIX-СБОРОК.
+
+Теперь начинай работу с проверки реального текущего состояния проекта и воспроизведения указанных проблем.
+
+Не предполагай, что состояние устройства полностью совпадает с handoff.
+
+Не изменяй ничего до определения ответственного слоя и root cause.
