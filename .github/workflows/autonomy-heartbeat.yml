@@ -1,0 +1,35 @@
+name: Reasonix Autonomy Heartbeat
+
+on:
+  schedule:
+    - cron: "37 3 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reasonix-autonomy-heartbeat
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Keep repository active on isolated branch
+        run: |
+          set -euo pipefail
+          git config user.name "Reasonix Autonomy"
+          git config user.email "actions@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin autonomy-heartbeat >/dev/null 2>&1; then git fetch origin autonomy-heartbeat; git checkout -B autonomy-heartbeat origin/autonomy-heartbeat; else git checkout -B autonomy-heartbeat; fi
+          mkdir -p .reasonix/heartbeat
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .reasonix/heartbeat/LAST_RUN
+          git add .reasonix/heartbeat/LAST_RUN
+          git commit -m "chore: autonomy heartbeat 2026-08-22"
+          git push origin HEAD:autonomy-heartbeat
+          echo AUTONOMY_HEARTBEAT_PASS
